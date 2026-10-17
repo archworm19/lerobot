@@ -4,7 +4,10 @@ Pass --left and/or --right with the arm's serial port; at least one is required.
 arms move at the same time. Run `record_home` for each arm first so it has a saved home pose.
 
 Usage: uv run python -m lerobot.felix_jr.wiggle_test [--left PORT] [--right PORT] [--delta DEG]
-       [--pause SEC] [--tol DEG] [--timeout SEC]
+       [--pause SEC] [--max-vel DEG/S] [--max-accel DEG/S2] [--tol DEG] [--timeout SEC]
+
+Example command:
+uv run python -m lerobot.felix_jr.wiggle_test --left /dev/tty.usbmodem5AE60864731 --right /dev/tty.usbmodem5AE60837301 --delta 20 --tol 5 --max-vel 60 --max-accel 25 --timeout 5       
 """
 
 import argparse
@@ -14,14 +17,15 @@ import sys
 import time
 
 from lerobot.felix_jr.home import (
+    DEFAULT_MAX_ACCEL,
+    DEFAULT_MAX_VEL,
     HOME_TOLERANCE,
     JOINTS,
     deviations,
     home_path,
     load_home,
     make_follower,
-    move_all,
-    read_pose,
+    move_all
 )
 from lerobot.robots.so_follower import SO101Follower
 
@@ -34,11 +38,10 @@ def wiggle(
     homes: dict[str, dict[str, float]],
     delta: float,
     pause: float,
-    tol: float,
-    timeout: float,
+    move_kw: dict[str, float],
 ) -> None:
     for robot_id, robot in robots.items():
-        start = read_pose(robot)
+        start = robot.get_observation()  # get the current pose in degrees
         print(f"[{robot_id}] Start pose:", {k: round(v, 1) for k, v in start.items()})
         devs = deviations(start, homes[robot_id])
         far = {k: round(d, 1) for k, d in devs.items() if abs(d) > HOME_TOLERANCE}
@@ -47,7 +50,7 @@ def wiggle(
     input("Clear the workspace, hold the arm(s) if needed. ENTER to move to center...")
 
     def move(target: dict[str, float]) -> None:
-        move_all(robots, dict.fromkeys(robots, target), tol=tol, timeout=timeout)
+        move_all(robots, dict.fromkeys(robots, target), **move_kw)
 
     try:
         move(CENTER)
@@ -58,7 +61,7 @@ def wiggle(
                 print(f"{key}: {target[key]:+.1f}")
                 move(target)
                 time.sleep(pause)
-                print("   read back:", {i: f"{read_pose(r)[key]:+.1f}" for i, r in robots.items()})
+                print("   read back:", {i: f"{r.get_observation()[key]:+.1f}" for i, r in robots.items()})
             move(CENTER)
     except KeyboardInterrupt:
         print("\nCtrl+C: stopping the wiggle.")
@@ -67,7 +70,7 @@ def wiggle(
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         print("Returning to home (torque stays on until disconnect).")
         try:
-            move_all(robots, homes, tol=tol, timeout=timeout)
+            move_all(robots, homes, **move_kw)
         except Exception as e:  # e.g. an arm's USB serial port vanished
             print(f"Could not return to home: {e!r}")
 
@@ -77,9 +80,16 @@ parser.add_argument("--left", metavar="PORT", help="serial port of the left arm 
 parser.add_argument("--right", metavar="PORT", help="serial port of the right arm (id: right_arm)")
 parser.add_argument("--delta", type=float, default=10.0, help="nudge size in degrees (default: 10)")
 parser.add_argument("--pause", type=float, default=0.3, help="seconds to hold each nudge (default: 0.3)")
+parser.add_argument(
+    "--max-vel", type=float, default=DEFAULT_MAX_VEL, help="cruise speed limit, deg/s (default: %(default)s)"
+)
+parser.add_argument(
+    "--max-accel", type=float, default=DEFAULT_MAX_ACCEL, help="accel limit, deg/s^2 (default: %(default)s)"
+)
 parser.add_argument("--tol", type=float, default=1.5, help="deg from target that counts as arrived")
-parser.add_argument("--timeout", type=float, default=10.0, help="max seconds to wait per move")
+parser.add_argument("--timeout", type=float, default=10.0, help="max seconds to settle after each move")
 args = parser.parse_args()
+move_kw = {"max_vel": args.max_vel, "max_accel": args.max_accel, "tol": args.tol, "timeout": args.timeout}
 # max_relative_target clamping logs a warning on every tick; it is expected here and drowns real output.
 logging.getLogger("lerobot.robots.utils").setLevel(logging.ERROR)
 
@@ -102,7 +112,7 @@ try:
             sys.exit(f"[{robot_id}] No home pose at {home_path(robot)}. Run lerobot.felix_jr.record_home.")
         homes[robot_id] = home
 
-    wiggle(robots, homes, args.delta, args.pause, args.tol, args.timeout)
+    wiggle(robots, homes, args.delta, args.pause, move_kw)
 except KeyboardInterrupt:
     print("\nCtrl+C before the wiggle started; arms were not moved.")
 finally:
