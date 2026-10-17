@@ -9,6 +9,7 @@ import time
 import numpy as np
 from pathlib import Path
 
+from lerobot.felix_jr.base_follower import SO101FollowerWithBase
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 from lerobot.lerobot_types import RobotAction, RobotObservation  # aliases for dict[str, Any]
 
@@ -22,20 +23,29 @@ STALE_GOAL = 10.0  # deg: if an arm is farther than this from its last commanded
 HOME_TOLERANCE = 15.0  # warn at startup if any joint is farther than this from the saved home
 
 
-def make_follower(port: str, robot_id: str, max_relative_target: float = 5.0) -> SO101Follower:
+def make_follower(
+    port: str, robot_id: str, max_relative_target: float = 5.0, with_base: bool | None = None
+) -> SO101Follower:
+    """Build a follower. `with_base=None` auto-detects wheels: they are present if setup_base has saved
+    `<robot_id>_base.json` for this arm. Pass True/False to override."""
     if max_relative_target is not None:
         print(f"[{robot_id}] max_relative_target={max_relative_target} deg (per-command cap) set by lerobot controller")
     if max_relative_target is None:
         # safety check
         raise ValueError("max_relative_target must be set to a positive number (degrees) to keep motion gentle")
-    return SO101Follower(
-        SO101FollowerConfig(
-            port=port,
-            id=robot_id,
-            use_degrees=True,
-            max_relative_target=max_relative_target,  # per-command cap in degrees; keeps motion gentle
-        )
+    config = SO101FollowerConfig(
+        port=port,
+        id=robot_id,
+        use_degrees=True,
+        max_relative_target=max_relative_target,  # per-command cap in degrees; keeps motion gentle
     )
+    if with_base is None:
+        probe = SO101FollowerWithBase(config, with_base=False)  # only used for its calibration dir
+        with_base = (probe.calibration_dir / f"{robot_id}_base.json").is_file()
+        if with_base:
+            print(f"[{robot_id}] wheel setup found: wheel servos (IDs 9, 10) must be on this arm's bus")
+    # with_base: wheel servos (IDs 9-10) share this arm's bus.
+    return SO101FollowerWithBase(config, with_base=with_base)
 
 
 def home_path(robot: SO101Follower) -> Path:

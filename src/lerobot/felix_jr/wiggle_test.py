@@ -4,7 +4,7 @@ Pass --left and/or --right with the arm's serial port; at least one is required.
 arms move at the same time. Run `record_home` for each arm first so it has a saved home pose.
 
 Usage: uv run python -m lerobot.felix_jr.wiggle_test [--left PORT] [--right PORT] [--delta DEG]
-       [--pause SEC] [--max-vel DEG/S] [--max-accel DEG/S2] [--tol DEG] [--timeout SEC]
+       [--pause SEC] [--max-vel DEG/S] [--max-accel DEG/S2] [--tol DEG] [--timeout SEC] [--no-base]
 
 Example command:
 uv run python -m lerobot.felix_jr.wiggle_test --left /dev/tty.usbmodem5AE60864731 --right /dev/tty.usbmodem5AE60837301 --delta 20 --tol 5 --max-vel 60 --max-accel 25 --timeout 5       
@@ -78,6 +78,9 @@ def wiggle(
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 parser.add_argument("--left", metavar="PORT", help="serial port of the left arm (id: left_arm)")
 parser.add_argument("--right", metavar="PORT", help="serial port of the right arm (id: right_arm)")
+parser.add_argument(
+    "--no-base", action="store_true", help="ignore wheel servos even if an arm has a base set up"
+)
 parser.add_argument("--delta", type=float, default=10.0, help="nudge size in degrees (default: 10)")
 parser.add_argument("--pause", type=float, default=0.3, help="seconds to hold each nudge (default: 0.3)")
 parser.add_argument(
@@ -102,7 +105,7 @@ robots: dict[str, SO101Follower] = {}
 try:
     # Connect everything and validate homes before any arm moves.
     for robot_id, port in arms.items():
-        robot = make_follower(port, robot_id)
+        robot = make_follower(port, robot_id, with_base=False if args.no_base else None)
         robot.connect(calibrate=False)  # use the saved calibration, don't re-run it
         robots[robot_id] = robot
     homes = {}
