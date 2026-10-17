@@ -19,6 +19,8 @@ SETTLE_WINDOW = 0.5  # seconds a joint must stay still to count as settled
 SETTLE_MOTION = 0.3  # degrees of movement over the window that still counts as "still"
 DEFAULT_MAX_VEL = 60.0  # deg/s (gripper: units/s)
 DEFAULT_MAX_ACCEL = 120.0  # deg/s^2
+CENTER = {f"{j}.pos": 0.0 for j in JOINTS}  # 0 deg = middle of the calibrated range
+CENTER["gripper.pos"] = 50.0  # gripper is 0-100
 STALE_GOAL = 10.0  # deg: if an arm is farther than this from its last commanded goal, start from where it is
 HOME_TOLERANCE = 15.0  # warn at startup if any joint is farther than this from the saved home
 
@@ -121,6 +123,12 @@ def trapezoid_offset(
 # pose: the arm rests a few degrees off its goal (gravity, P-only control), and starting from the measured
 # pose would snap the servo's goal to that sagging position and make the arm jump.
 _last_goal: dict[str, dict[str, float]] = {}
+
+
+def remember_goal(robot_id: str, goal: dict[str, float]) -> None:
+    """Tell `move_all` the last goal sent to an arm by code other than `move_all` (e.g. teleop), so the
+    next trajectory starts from it."""
+    _last_goal[robot_id] = dict(goal)
 
 
 def move_all(

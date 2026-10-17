@@ -19,6 +19,7 @@ import time
 from lerobot.felix_jr.home import (
     DEFAULT_MAX_ACCEL,
     DEFAULT_MAX_VEL,
+    CENTER,
     HOME_TOLERANCE,
     JOINTS,
     deviations,
@@ -29,8 +30,6 @@ from lerobot.felix_jr.home import (
 )
 from lerobot.robots.so_follower import SO101Follower
 
-CENTER = {f"{j}.pos": 0.0 for j in JOINTS}  # 0 deg = middle of the calibrated range
-CENTER["gripper.pos"] = 50.0  # gripper is 0-100
 
 
 def wiggle(
