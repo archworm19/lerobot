@@ -4,8 +4,9 @@ The puck deflection is a velocity: each tick it is integrated into a target end-
 orientation, in the robot base frame), which inverse kinematics turns into joint targets. The SO-101 has only
 five joints before the gripper, so it can't follow every combination of the 6 puck axes: x/y/z move the tip,
 pitch tilts the tool in the arm's plane, roll twists the tool about its axis and yaw swings the whole arm
-about the shoulder pan. The arm first moves to its center pose (ENTER to confirm). Left button closes
-the gripper, right button opens it. Ctrl+C returns the arm to its saved home pose and disconnects.
+about the shoulder pan. The arm first moves to its center pose (ENTER to confirm). The gripper opens and
+closes continuously (0-100): hold the right/left puck button, or press the Up/Down arrow keys in the terminal.
+Ctrl+C returns the arm to its saved home pose and disconnects.
 
 Needs: pyspacemouse + the hidapi system library (macOS: `brew install hidapi`), placo (the `placo-dep` extra),
 and the SO-101 URDF with its meshes (git clone of TheRobotStudio/SO-ARM100, Simulation/SO101).
@@ -23,6 +24,7 @@ Usage: uv run python -m lerobot.felix_jr.spacemouse_teleop <PORT> [ROBOT_ID] [op
   --max-step DEG          lerobot per-command cap: goal stays within this of the measured position (5)
   --max-joint-speed DEG/S limit on every joint's speed (default: 60)
   --tol DEG               how close to center counts as arrived for the initial move (default: 4)
+  --gripper-step N        gripper units (0-100) per Up/Down arrow press (default: 5)
   --invert AXES           comma-separated puck axes to flip, from x,y,z,roll,pitch,yaw (e.g. y,yaw)
   --log CSV               write per-tick commanded vs measured joints/tip to this CSV
   --sim                   no hardware: run a scripted push through the IK and print the result
@@ -39,8 +41,13 @@ import csv
 import ctypes
 import ctypes.util
 import logging
+import os
+import select
 import signal
+import sys
+import termios
 import time
+import tty
 from pathlib import Path
 
 import numpy as np
@@ -206,6 +213,7 @@ def main() -> None:
         help="lerobot's per-command cap: the goal is kept within this many deg of the measured position",
     )
     p.add_argument("--max-joint-speed", type=float, default=60.0, help="deg/s limit on every joint")
+    p.add_argument("--gripper-step", type=float, default=5.0, help="gripper units per Up/Down key press")
     p.add_argument("--invert", default="", help="comma-separated axes to flip, e.g. y,yaw")
     p.add_argument("--sim", action="store_true", help="no hardware: run a scripted push through IK")
     args = p.parse_args()
@@ -240,6 +248,36 @@ def main() -> None:
     # Open the mouse before touching the arm, so a missing mouse/driver can't leave the arm moving.
     with pyspacemouse.open(nonblocking=True, axis_convention=pyspacemouse.AxisConvention.ROS) as mouse:
         run_teleop(mouse, kin, args, invert, dt)
+
+
+class KeyReader:
+    """Non-blocking up/down arrow reader for the terminal running the script.
+
+    Puts the terminal in cbreak mode (no echo, no line buffering) while active. Ctrl+C still raises
+    KeyboardInterrupt, and the original terminal settings are restored on exit. If stdin is not a
+    terminal, polling just returns no keys. Only works while this terminal window has focus.
+    """
+
+    def __enter__(self) -> "KeyReader":
+        self.fd = sys.stdin.fileno()
+        self.active = sys.stdin.isatty()
+        if self.active:
+            self.saved = termios.tcgetattr(self.fd)
+            tty.setcbreak(self.fd)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self.active:
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
+
+    def poll(self) -> int:
+        """Net number of Up minus Down presses since the last call."""
+        net = 0
+        while self.active and select.select([self.fd], [], [], 0)[0]:
+            data = os.read(self.fd, 256)
+            net += data.count(b"\x1b[A") + data.count(b"\x1bOA")  # Up (normal / application mode)
+            net -= data.count(b"\x1b[B") + data.count(b"\x1bOB")  # Down
+        return net
 
 
 LOG_COLUMNS = (
@@ -293,39 +331,42 @@ def run_teleop(mouse, kin: RobotKinematics, args: argparse.Namespace, invert: se
         pan_axis = pan_axis_xy(kin, q_cmd)
         pos_target = origin.copy()
         print(f"Start tip position (m): {np.round(origin, 3)}. Push/twist the puck; Ctrl+C returns home.")
+        print("Gripper: puck buttons (left closes, right opens) or the Up/Down arrow keys in this terminal.")
 
         t_start = last_tick = next_tick = time.perf_counter()
-        while True:
-            state = mouse.read()
-            axes = read_axes(state, args.deadband, invert)
-            buttons = list(state.buttons)
-            close, open_ = (buttons[0] if buttons else 0), (buttons[1] if len(buttons) > 1 else 0)
-            gripper = float(np.clip(gripper + GRIPPER_RATE * dt * (open_ - close), 0.0, 100.0))
+        with KeyReader() as keys:
+            while True:
+                state = mouse.read()
+                axes = read_axes(state, args.deadband, invert)
+                buttons = list(state.buttons)
+                close, open_ = (buttons[0] if buttons else 0), (buttons[1] if len(buttons) > 1 else 0)
+                gripper += GRIPPER_RATE * dt * (open_ - close) + args.gripper_step * keys.poll()
+                gripper = float(np.clip(gripper, 0.0, 100.0))
 
-            q_cmd, pos_target, _ = step_joints(kin, q_cmd, pos_target, pan_axis, origin, axes, dt, args)
-            action = {f"{j}.pos": float(q) for j, q in zip(ARM_JOINTS, q_cmd, strict=True)}
-            action["gripper.pos"] = gripper
-            robot.send_action(action)
-            remember_goal(robot.id, action)
+                q_cmd, pos_target, _ = step_joints(kin, q_cmd, pos_target, pan_axis, origin, axes, dt, args)
+                action = {f"{j}.pos": float(q) for j, q in zip(ARM_JOINTS, q_cmd, strict=True)}
+                action["gripper.pos"] = gripper
+                robot.send_action(action)
+                remember_goal(robot.id, action)
 
-            if args.log:  # measured joints after this command, and the tip they put the gripper at
-                obs = robot.get_observation()
-                q_meas = np.array([obs[f"{j}.pos"] for j in ARM_JOINTS], dtype=float)
-                now = time.perf_counter()
-                log_rows.append(
-                    [now - t_start, now - last_tick]
-                    + [axes[a] for a in AXES]
-                    + list(q_cmd)
-                    + list(q_meas)
-                    + list(kin.forward_kinematics(q_cmd)[:3, 3])
-                    + list(kin.forward_kinematics(q_meas)[:3, 3])
-                    + list(pos_target)
-                    + [gripper]
-                )
-                last_tick = now
+                if args.log:  # measured joints after this command, and the tip they put the gripper at
+                    obs = robot.get_observation()
+                    q_meas = np.array([obs[f"{j}.pos"] for j in ARM_JOINTS], dtype=float)
+                    now = time.perf_counter()
+                    log_rows.append(
+                        [now - t_start, now - last_tick]
+                        + [axes[a] for a in AXES]
+                        + list(q_cmd)
+                        + list(q_meas)
+                        + list(kin.forward_kinematics(q_cmd)[:3, 3])
+                        + list(kin.forward_kinematics(q_meas)[:3, 3])
+                        + list(pos_target)
+                        + [gripper]
+                    )
+                    last_tick = now
 
-            next_tick += dt
-            time.sleep(max(0.0, next_tick - time.perf_counter()))
+                next_tick += dt
+                time.sleep(max(0.0, next_tick - time.perf_counter()))
     except KeyboardInterrupt:
         print("\nCtrl+C: returning to home.")
     finally:
