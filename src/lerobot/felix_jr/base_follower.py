@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 BASE_MOTOR_IDS = {"base_left_wheel": 9, "base_right_wheel": 10}
 STEPS_PER_DEG = 4096.0 / 360.0
+# Per-joint P gain overrides (lerobot's default is 16 for every joint). With 16, shoulder_lift and
+# elbow_flex fall 10-35 deg behind when lifting the arm against gravity; 32 tracks within a few degrees
+# (see lift_test.py). The wrist joints carry little load and are fine at 16.
+DEFAULT_JOINT_P_GAINS = {"shoulder_lift": 32, "elbow_flex": 32}
 
 
 class SO101FollowerWithBase(SO101Follower):
@@ -33,8 +37,15 @@ class SO101FollowerWithBase(SO101Follower):
     wheels are plugged in (connecting pings every motor in the bus, and would fail on missing wheels).
     """
 
-    def __init__(self, config: SO101FollowerConfig, with_base: bool = True, max_base_degps: float = 180.0):
+    def __init__(
+        self,
+        config: SO101FollowerConfig,
+        with_base: bool = True,
+        max_base_degps: float = 180.0,
+        joint_p_gains: dict[str, int] | None = None,
+    ):
         super().__init__(config)
+        self.joint_p_gains = dict(DEFAULT_JOINT_P_GAINS if joint_p_gains is None else joint_p_gains)
         self.with_base = with_base
         self.max_base_degps = max_base_degps
         self.base_motors: list[str] = []
@@ -70,6 +81,13 @@ class SO101FollowerWithBase(SO101Follower):
         super().calibrate()
 
     def configure(self) -> None:
+        self._configure_motors()
+        if self.joint_p_gains:
+            with self.bus.torque_disabled(list(self.joint_p_gains)):  # P gain lives in EEPROM
+                for joint, p_gain in self.joint_p_gains.items():
+                    self.bus.write("P_Coefficient", joint, p_gain)
+
+    def _configure_motors(self) -> None:
         if not self.with_base:
             return super().configure()
         # Same as SOFollower.configure for the arm joints; wheels go to VELOCITY mode (stopped) instead.

@@ -10,7 +10,22 @@ the gripper, right button opens it. Ctrl+C returns the arm to its saved home pos
 Needs: pyspacemouse + the hidapi system library (macOS: `brew install hidapi`), placo (the `placo-dep` extra),
 and the SO-101 URDF with its meshes (git clone of TheRobotStudio/SO-ARM100, Simulation/SO101).
 
-Usage: uv run python -m lerobot.felix_jr.spacemouse_teleop <PORT> [ROBOT_ID] [--urdf PATH] [--sim]
+Usage: uv run python -m lerobot.felix_jr.spacemouse_teleop <PORT> [ROBOT_ID] [options]
+  PORT                    serial port of the arm
+  ROBOT_ID                arm id (default: left_arm)
+  --urdf PATH             SO-101 URDF, with its assets/ folder next to it
+  --lin-speed M/S         tip speed at full puck push (default: 0.05)
+  --ang-speed RAD/S       tool rotation speed at full puck twist (default: 0.6)
+  --deadband F            ignore puck deflection below this, 0-1 (default: 0.08)
+  --rate HZ               control loop rate (default: 30)
+  --reach M               tip may move at most this far from its start point (default: 0.15)
+  --orientation-weight W  IK weight on tool orientation vs position, 0-1 (default: 0.5)
+  --max-step DEG          lerobot per-command cap: goal stays within this of the measured position (5)
+  --max-joint-speed DEG/S limit on every joint's speed (default: 60)
+  --tol DEG               how close to center counts as arrived for the initial move (default: 4)
+  --invert AXES           comma-separated puck axes to flip, from x,y,z,roll,pitch,yaw (e.g. y,yaw)
+  --log CSV               write per-tick commanded vs measured joints/tip to this CSV
+  --sim                   no hardware: run a scripted push through the IK and print the result
 
 Tips for linking to underlying libraries on macOS and killing 3xconnexion's background process:
 export DYLD_LIBRARY_PATH="/opt/homebrew/lib:$DYLD_LIBRARY_PATH"
@@ -20,8 +35,10 @@ pkill -f 3Dconnexion
 """
 
 import argparse
+import csv
 import ctypes
 import ctypes.util
+import logging
 import signal
 import time
 from pathlib import Path
@@ -153,6 +170,14 @@ def step_joints(
     q_new = kin.inverse_kinematics(q_cmd, target, orientation_weight=args.orientation_weight)
     if np.max(np.abs(q_new - q_cmd)) > MAX_IK_JUMP_DEG:  # near a singularity: ignore this tick
         return q_cmd, t_cur[:3, 3].copy(), True
+    # Joint speed limit. Near a folded-up pose a small tip motion needs a big joint motion; shrink the
+    # whole step (all joints together, so the path keeps its shape) and drop the part of the target that
+    # we couldn't follow, so it can't pile up and lurch later.
+    max_delta = args.max_joint_speed * dt
+    biggest = float(np.max(np.abs(q_new - q_cmd)))
+    if biggest > max_delta:
+        q_new = q_cmd + (q_new - q_cmd) * (max_delta / biggest)
+        return q_new, kin.forward_kinematics(q_new)[:3, 3].copy(), False
     reached = kin.forward_kinematics(q_new)[:3, 3]
     if np.linalg.norm(reached - pos) > UNREACHABLE_M:
         pos = reached.copy()  # target is outside the workspace: don't let it run away
@@ -175,9 +200,16 @@ def main() -> None:
     p.add_argument("--reach", type=float, default=0.15, help="max distance from the start point, m")
     p.add_argument("--orientation-weight", type=float, default=0.5, help="IK orientation weight (0-1)")
     p.add_argument("--tol", type=float, default=4.0, help="deg from center that counts as arrived")
+    p.add_argument("--log", metavar="CSV", help="write per-tick commanded vs measured joints/tip to this CSV")
+    p.add_argument(
+        "--max-step", type=float, default=5.0,
+        help="lerobot's per-command cap: the goal is kept within this many deg of the measured position",
+    )
+    p.add_argument("--max-joint-speed", type=float, default=60.0, help="deg/s limit on every joint")
     p.add_argument("--invert", default="", help="comma-separated axes to flip, e.g. y,yaw")
     p.add_argument("--sim", action="store_true", help="no hardware: run a scripted push through IK")
     args = p.parse_args()
+    logging.getLogger("lerobot.robots.utils").setLevel(logging.ERROR)  # clamp warning fires every tick
     invert = {a for a in args.invert.split(",") if a}
     if invert - set(AXES):
         p.error(f"--invert axes must be among {AXES}")
@@ -210,14 +242,46 @@ def main() -> None:
         run_teleop(mouse, kin, args, invert, dt)
 
 
+LOG_COLUMNS = (
+    ["t", "tick_s"]
+    + [f"puck_{a}" for a in AXES]
+    + [f"q_cmd_{j}" for j in ARM_JOINTS]
+    + [f"q_meas_{j}" for j in ARM_JOINTS]
+    + [f"tip_cmd_{c}" for c in "xyz"]
+    + [f"tip_meas_{c}" for c in "xyz"]
+    + [f"tip_target_{c}" for c in "xyz"]
+    + ["gripper_cmd"]
+)
+
+
+def save_log(rows: list[list[float]], path: str, dt: float) -> None:
+    """Write the per-tick log as CSV and print a short tracking summary."""
+    if not rows:
+        return
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(LOG_COLUMNS)
+        writer.writerows(rows)
+    data = np.array(rows)
+    col = {name: i for i, name in enumerate(LOG_COLUMNS)}
+    err = np.stack([data[:, col[f"tip_meas_{c}"]] - data[:, col[f"tip_cmd_{c}"]] for c in "xyz"], axis=1)
+    print(f"Saved {len(rows)} ticks to {path}")
+    tick_ms = 1000 * data[:, col["tick_s"]]
+    print(f"  tick period: mean {tick_ms.mean():.1f} ms, max {tick_ms.max():.1f} ms (goal {1000 * dt:.1f})")
+    for i, c in enumerate("xyz"):
+        mean_mm, max_mm = 1000 * err[:, i].mean(), 1000 * np.abs(err[:, i]).max()
+        print(f"  tip {c}: measured - commanded  mean {mean_mm:+.1f} mm, max |err| {max_mm:.1f} mm")
+
+
 def run_teleop(mouse, kin: RobotKinematics, args: argparse.Namespace, invert: set[str], dt: float) -> None:
-    robot = make_follower(args.port, args.robot_id, with_base=False)
+    robot = make_follower(args.port, args.robot_id, max_relative_target=args.max_step, with_base=False)
     robot.connect(calibrate=False)
     home = load_home(robot)
     if home is None:
         robot.disconnect()
         raise SystemExit(f"No home pose for {args.robot_id}. Run lerobot.felix_jr.record_home first.")
 
+    log_rows: list[list[float]] = []
     try:
         input("Clear the workspace, hold the arm if needed. ENTER to move to center...")
         move_all({robot.id: robot}, {robot.id: CENTER}, tol=args.tol)
@@ -230,7 +294,7 @@ def run_teleop(mouse, kin: RobotKinematics, args: argparse.Namespace, invert: se
         pos_target = origin.copy()
         print(f"Start tip position (m): {np.round(origin, 3)}. Push/twist the puck; Ctrl+C returns home.")
 
-        next_tick = time.perf_counter()
+        t_start = last_tick = next_tick = time.perf_counter()
         while True:
             state = mouse.read()
             axes = read_axes(state, args.deadband, invert)
@@ -244,12 +308,30 @@ def run_teleop(mouse, kin: RobotKinematics, args: argparse.Namespace, invert: se
             robot.send_action(action)
             remember_goal(robot.id, action)
 
+            if args.log:  # measured joints after this command, and the tip they put the gripper at
+                obs = robot.get_observation()
+                q_meas = np.array([obs[f"{j}.pos"] for j in ARM_JOINTS], dtype=float)
+                now = time.perf_counter()
+                log_rows.append(
+                    [now - t_start, now - last_tick]
+                    + [axes[a] for a in AXES]
+                    + list(q_cmd)
+                    + list(q_meas)
+                    + list(kin.forward_kinematics(q_cmd)[:3, 3])
+                    + list(kin.forward_kinematics(q_meas)[:3, 3])
+                    + list(pos_target)
+                    + [gripper]
+                )
+                last_tick = now
+
             next_tick += dt
             time.sleep(max(0.0, next_tick - time.perf_counter()))
     except KeyboardInterrupt:
         print("\nCtrl+C: returning to home.")
     finally:
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+        if args.log:
+            save_log(log_rows, args.log, dt)
         try:
             move_all({robot.id: robot}, {robot.id: home})
         except Exception as e:  # e.g. the arm's USB serial port vanished
