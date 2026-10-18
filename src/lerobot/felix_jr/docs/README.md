@@ -8,7 +8,7 @@ uv run python -m lerobot.felix_jr.<folder>.<script> ...
 ```
 
 Serial ports for each arm are in [current_ports.md](current_ports.md). Findings from tuning the hardware are in
-[tuning_notes.md](tuning_notes.md).
+[tuning_notes.md](tuning_notes.md); the RealSense camera on this Mac is covered in [realsense_m1.md](realsense_m1.md).
 
 ## Layout
 
@@ -18,9 +18,9 @@ Serial ports for each arm are in [current_ports.md](current_ports.md). Findings 
 | `base_follower.py` | Shared: `SO101FollowerWithBase` (per-joint P gains, optional wheel servos). |
 | `setup/` | One-time, per-robot: `record_home`, `wheels`. |
 | `checks/` | Hardware sign-of-life tests: `wiggle_test`, `wheel_test`. |
-| `diagnostics/` | Tuning and debugging: `lift_test`, `dump_servo_config`. |
+| `diagnostics/` | Tuning and debugging: `lift_test`, `dump_servo_config`, `realsense_check`. |
 | `teleop/` | `spacemouse_teleop`. |
-| `docs/` | This file, `tuning_notes.md`, `current_ports.md`. |
+| `docs/` | This file, `tuning_notes.md`, `realsense_m1.md`, `current_ports.md`. |
 
 ## First-time order
 
