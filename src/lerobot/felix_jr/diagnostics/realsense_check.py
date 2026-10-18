@@ -9,13 +9,17 @@ install is the prebuilt `pyrealsense2-macosx` wheel. Run it with the project's v
 (which would leave root-owned files in the cache), and without writing .pyc files:
 
   sudo env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m lerobot.felix_jr.diagnostics.realsense_check \\
-      [--width 640] [--height 480] [--fps 30] [--seconds 3] [--save-dir DIR]
+      [--width 640] [--height 480] [--fps 30] [--seconds 3] [--save-dir DIR] [--retries 3]
+
+If it is flaky: replug the camera before every run (a crashed run can leave it wedged), try --fps 15, and
+prefix the command with `LRS_LOG_LEVEL=DEBUG` (inside the `sudo env ...`) to get librealsense's own log.
 """
 
 import argparse
 import functools
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -24,13 +28,15 @@ import numpy as np
 import pyrealsense2 as rs
 
 from lerobot.cameras.realsense import RealSenseCamera, RealSenseCameraConfig
+from lerobot.felix_jr.depth import alignment_panel, with_matrices
 
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 parser.add_argument("--width", type=int, default=640)
 parser.add_argument("--height", type=int, default=480)
 parser.add_argument("--fps", type=int, default=30)
 parser.add_argument("--seconds", type=float, default=3.0, help="how long to stream (default: 3)")
-parser.add_argument("--save-dir", help="write color.png and depth.png here")
+parser.add_argument("--save-dir", help="write color.png, depth.png and calibration.json here")
+parser.add_argument("--retries", type=int, default=3, help="open attempts, each in a fresh process (3)")
 args = parser.parse_args()
 print = functools.partial(print, flush=True)  # the failure path below can crash the process on exit
 
@@ -71,8 +77,19 @@ config = RealSenseCameraConfig(
     height=args.height,
     use_depth=True,
 )
+attempt = int(os.environ.get("RS_CHECK_ATTEMPT", "1"))
 camera = RealSenseCamera(config)
-camera.connect()
+try:
+    camera.connect()
+except Exception as e:  # "failed to set power state" can also happen as root, usually after a crashed run
+    print(f"Open attempt {attempt}/{args.retries} failed: {e}")
+    if attempt >= args.retries:
+        fail("Could not open the camera. Unplug and replug the USB cable, wait a few seconds, and rerun.")
+    time.sleep(2.0)
+    # Retry in a fresh process: after a failed open, pyrealsense2's macOS build segfaults when the failed
+    # camera object is torn down, so an in-process retry never gets to run. exec skips that teardown.
+    os.environ["RS_CHECK_ATTEMPT"] = str(attempt + 1)
+    os.execv(sys.executable, [sys.executable, "-m", __spec__.name, *sys.argv[1:]])
 try:
     color = depth = None
     frames = 0
@@ -110,7 +127,7 @@ try:
         "depth_scale_m_per_unit": depth_scale,
         "color_intrinsics": intrinsics(streams["color"]),
         "depth_intrinsics": intrinsics(streams["depth"]),
-        "depth_to_color_rotation_row_major": list(ext.rotation),
+        "depth_to_color_rotation_col_major": list(ext.rotation),  # librealsense stores it column-major
         "depth_to_color_translation_m": list(ext.translation),
     }
     ci, di = calibration["color_intrinsics"], calibration["depth_intrinsics"]
@@ -118,6 +135,7 @@ try:
     print(f"Depth scale: {depth_scale} m per raw unit")
     print(f"Color fx/fy {ci['fx']:.1f}/{ci['fy']:.1f}; depth fx/fy {di['fx']:.1f}/{di['fy']:.1f}")
     print(f"Depth-to-color translation: {shift_mm} mm (depth is not aligned to color)")
+    panel, zoom = alignment_panel(color, depth, with_matrices(calibration))
     if args.save_dir:
         out = Path(args.save_dir)
         out.mkdir(parents=True, exist_ok=True)
@@ -125,11 +143,15 @@ try:
         scale = 255.0 / max(1, np.percentile(depth, 98))
         depth_vis = cv2.applyColorMap(cv2.convertScaleAbs(depth, alpha=scale), cv2.COLORMAP_JET)
         cv2.imwrite(str(out / "depth.png"), depth_vis)
+        cv2.imwrite(str(out / "depth_raw.png"), np.squeeze(depth))  # 16-bit PNG, raw units
+        cv2.imwrite(str(out / "alignment.png"), cv2.cvtColor(panel, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(str(out / "alignment_zoom.png"), cv2.cvtColor(zoom, cv2.COLOR_RGB2BGR))
         (out / "calibration.json").write_text(json.dumps(calibration, indent=2))
         if os.getuid() == 0 and os.environ.get("SUDO_UID"):  # don't leave root-owned files behind
             uid, gid = int(os.environ["SUDO_UID"]), int(os.environ.get("SUDO_GID", "-1"))
-            for p in (out, out / "color.png", out / "depth.png", out / "calibration.json"):
+            for p in out.iterdir():
                 os.chown(p, uid, gid)
-        print(f"Saved color.png, depth.png and calibration.json to {out}")
+            os.chown(out, uid, gid)
+        print(f"Saved color, depth, depth_raw, alignment(+zoom) and calibration.json to {out}")
 finally:
     camera.disconnect()

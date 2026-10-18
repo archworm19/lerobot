@@ -15,10 +15,11 @@ Serial ports for each arm are in [current_ports.md](current_ports.md). Findings 
 | Path | What it is |
 |---|---|
 | `home.py` | Shared: follower construction (`make_follower`), home pose files, the trapezoid-profile `move_all`. |
+| `depth.py` | Shared: align RealSense depth to the color image, depth-edge overlays and checks. |
 | `base_follower.py` | Shared: `SO101FollowerWithBase` (per-joint P gains, optional wheel servos). |
 | `setup/` | One-time, per-robot: `record_home`, `wheels`. |
 | `checks/` | Hardware sign-of-life tests: `wiggle_test`, `wheel_test`. |
-| `diagnostics/` | Tuning and debugging: `lift_test`, `dump_servo_config`, `realsense_check`. |
+| `diagnostics/` | Tuning and debugging: `lift_test`, `dump_servo_config`, `realsense_check`, `alignment_from_saved`. |
 | `teleop/` | `spacemouse_teleop`. |
 | `docs/` | This file, `tuning_notes.md`, `realsense_m1.md`, `current_ports.md`. |
 
