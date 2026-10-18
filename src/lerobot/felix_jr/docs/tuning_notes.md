@@ -18,17 +18,18 @@ have. Re-run the commands in each section to regenerate them.
 
 ## 1. Scripts and where state lives
 
-Run all of these with `uv run python -m lerobot.felix_jr.<name>`.
+Run them with `uv run python -m lerobot.felix_jr.<folder>.<name>`, for example
+`lerobot.felix_jr.checks.wiggle_test`. `docs/README.md` has the first-time order.
 
 | Script | Purpose |
 |---|---|
-| `record_home` | Save the arm's current pose as its "home" pose (`<id>_home.json`). |
-| `wiggle_test` | Go to center, nudge each joint, return home. `--left` / `--right`, several arms at once. |
-| `lift_test` | Drive only `shoulder_lift` down / up (against gravity) / back and sample the servo's load, current, voltage. |
-| `dump_servo_config` | Read-only dump of limit and gain registers for every arm servo. |
-| `setup_base` | One-time wheel setup: servo IDs and per-wheel forward direction. |
-| `wheel_test` | Spin each wheel, then both, then spin in place. |
-| `spacemouse_teleop` | Drive an arm's tip pose with a 3Dconnexion SpaceMouse, with optional per-tick logging. |
+| `setup/record_home` | Save the arm's current pose as its "home" pose (`<id>_home.json`). |
+| `checks/wiggle_test` | Go to center, nudge each joint, return home. `--left` / `--right`, several arms at once. |
+| `diagnostics/lift_test` | Drive only `shoulder_lift` down / up (against gravity) / back and sample the servo's load, current, voltage. |
+| `diagnostics/dump_servo_config` | Read-only dump of limit and gain registers for every arm servo. |
+| `setup/wheels` | One-time wheel setup: servo IDs and per-wheel forward direction. |
+| `checks/wheel_test` | Spin each wheel, then both, then spin in place. |
+| `teleop/spacemouse_teleop` | Drive an arm's tip pose with a 3Dconnexion SpaceMouse, with optional per-tick logging. |
 
 Shared code is in `home.py` (follower construction, home pose, the trapezoid-profile `move_all`) and
 `base_follower.py` (`SO101FollowerWithBase`: per-joint P gains and the optional wheel servos).
@@ -50,11 +51,11 @@ cloned to `~/.cache/felix_jr/SO-ARM100/`.
 | `elbow_flex` P gain | 32 | same | 3.7 |
 | Other joints' P gain | 16 | lerobot default | 3.5 |
 | Per-command cap (`max_relative_target`) | 5 deg in the scripts; teleop `--max-step` (we tried 15) | `make_follower`, `--max-step` | 3.6 |
-| Teleop joint speed limit | 60 deg/s, `--max-joint-speed` | `spacemouse_teleop.py` | 3.7 |
+| Teleop joint speed limit | 60 deg/s, `--max-joint-speed` | `teleop/spacemouse_teleop.py` | 3.7 |
 | Trajectory limits for `move_all` | 60 deg/s, 120 deg/s^2 | `DEFAULT_MAX_VEL`, `DEFAULT_MAX_ACCEL` | 3.2 |
 | Wheel servo IDs | left 9, right 10 (7-8 reserved for head servos) | `BASE_MOTOR_IDS` | 3.3 |
 
-Servo registers were identical on all six joints of both arms when we dumped them (`dump_servo_config`):
+Servo registers were identical on all six joints of both arms when we dumped them (`diagnostics/dump_servo_config`):
 P 16, I 0, D 32, `Max_Torque_Limit` / `Torque_Limit` 1000, `Protection_Current` 310 (about 2 A),
 `Protective_Torque` 20, `Overload_Torque` 80, `Acceleration` 254. The gripper differs by design (torque 500,
 `Protection_Current` 250, `Overload_Torque` 25). So the arm-to-arm and joint-to-joint differences below are
@@ -90,7 +91,7 @@ match) replaced the old "resend the target every tick" loop; see the derivation 
 
 - Wheels leave the factory as ID 1, which collides with the arm's `shoulder_pan` and with each other, so the
   first wheel must be set up alone on the board. Wiring: board -> right wheel -> left wheel, arm on the same
-  board. `setup_base` sets the right wheel (ID 10) alone, then finds the left wheel by scanning the chain for
+  board. `setup/wheels` sets the right wheel (ID 10) alone, then finds the left wheel by scanning the chain for
   the one servo that is not the right wheel (ID 9).
 - The stock `setup_motor` finds its target by broadcast ping, which is unreliable (and can pick the wrong
   servo) when two servos answer, hence the per-ID scan.
@@ -108,12 +109,12 @@ torque. Not seen again, but not explained.
 
 ### 3.5 Dip in tip height on a -x push: `shoulder_lift` under-tracking *(measured; mechanism inferred)*
 
-Logged with `spacemouse_teleop --log`. Commanded tip height stayed within about 9 mm, but the measured tip
+Logged with `teleop/spacemouse_teleop --log`. Commanded tip height stayed within about 9 mm, but the measured tip
 dropped up to 110 mm and recovered 1 to 2 s later. Per joint, `elbow_flex` and `wrist_flex` stayed within about
 3 deg of their commands; `shoulder_lift` trailed by 10 to 20 deg whenever its command decreased (raising the
 arm against gravity) and crept back slowly after the input stopped.
 
-`lift_test` isolated it (shoulder only, down 18 deg, up 14 deg, back to 0):
+`diagnostics/lift_test` isolated it (shoulder only, down 18 deg, up 14 deg, back to 0):
 
 | Run | Peak lag in the "up" phase | Final error after hold | Peak load | Peak current |
 |---|---|---|---|---|
@@ -187,7 +188,7 @@ Whether the motion now *feels* right to the operator has not been written down h
 
 - `pyspacemouse` needs the native hidapi library (`brew install hidapi`). Its HID layer looks the library up
   by name, which misses Homebrew's `/opt/homebrew/lib`, then silently falls back to the wrong place and
-  reports "HID API is probably not installed". `spacemouse_teleop.preload_hidapi()` loads the library first.
+  reports "HID API is probably not installed". `teleop/spacemouse_teleop.preload_hidapi()` loads the library first.
 - Even with the library loaded, the device would not open ("Failed to open device") while 3Dconnexion's own
   driver was running (its DriverKit extension and helper apps). Quitting/disabling it fixed it. Terminal
   Input Monitoring permission can give the same symptom.

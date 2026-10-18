@@ -1,13 +1,13 @@
 """Sign-of-life test for SO-101 followers: go to center, nudge each joint +/- a few degrees, return home.
 
 Pass --left and/or --right with the arm's serial port; at least one is required. If both are given, the
-arms move at the same time. Run `record_home` for each arm first so it has a saved home pose.
+arms move at the same time. Run `setup/record_home` for each arm first so it has a saved home pose.
 
-Usage: uv run python -m lerobot.felix_jr.wiggle_test [--left PORT] [--right PORT] [--delta DEG]
+Usage: uv run python -m lerobot.felix_jr.checks.wiggle_test [--left PORT] [--right PORT] [--delta DEG]
        [--pause SEC] [--max-vel DEG/S] [--max-accel DEG/S2] [--tol DEG] [--timeout SEC] [--no-base]
 
 Example command:
-uv run python -m lerobot.felix_jr.wiggle_test --left /dev/tty.usbmodem5AE60864731 --right /dev/tty.usbmodem5AE60837301 --delta 20 --tol 5 --max-vel 60 --max-accel 25 --timeout 5       
+uv run python -m lerobot.felix_jr.checks.wiggle_test --left /dev/tty.usbmodem5AE60864731 --right /dev/tty.usbmodem5AE60837301 --delta 20 --tol 5 --max-vel 60 --max-accel 25 --timeout 5       
 """
 
 import argparse
@@ -111,7 +111,9 @@ try:
     for robot_id, robot in robots.items():
         home = load_home(robot)
         if home is None:
-            sys.exit(f"[{robot_id}] No home pose at {home_path(robot)}. Run lerobot.felix_jr.record_home.")
+            sys.exit(
+                f"[{robot_id}] No home pose at {home_path(robot)}. Run lerobot.felix_jr.setup.record_home."
+            )
         homes[robot_id] = home
 
     wiggle(robots, homes, args.delta, args.pause, move_kw)

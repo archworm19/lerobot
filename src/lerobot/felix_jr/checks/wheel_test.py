@@ -1,13 +1,14 @@
 """Sign-of-life test for the wheel base: each wheel alone, both together, then spinning in place.
 
-Run `setup_base` first. Start with the robot LIFTED so the wheels spin freely; add --ground afterwards
+Run `setup.wheels` first. Start with the robot LIFTED so the wheels spin freely; add --ground afterwards
 for short low-speed moves on the floor. Ctrl+C stops the wheels. The arm joints hold their current pose.
 
-Usage: uv run python -m lerobot.felix_jr.wheel_test <PORT> [ROBOT_ID] [--speed DEG/S] [--seconds S] [--ground]
+Usage: uv run python -m lerobot.felix_jr.checks.wheel_test <PORT> [ROBOT_ID]
+       [--speed DEG/S] [--seconds S] [--ground]
   PORT / ROBOT_ID: the arm whose board the wheels are plugged into (default id: right_arm).
 
 For default setup where robot attached to right wheel:
-uv run python -m lerobot.felix_jr.wheel_test /dev/tty.usbmodem5AE60837301 right_arm  
+uv run python -m lerobot.felix_jr.checks.wheel_test /dev/tty.usbmodem5AE60837301 right_arm  
 """
 
 import argparse

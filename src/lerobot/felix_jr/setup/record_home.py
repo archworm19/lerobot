@@ -1,6 +1,6 @@
 """Record the current pose of an SO-101 follower as its "home" pose.
 
-Usage: uv run python -m lerobot.felix_jr.record_home <PORT> <ROBOT_ID>
+Usage: uv run python -m lerobot.felix_jr.setup.record_home <PORT> <ROBOT_ID>
 """
 
 import sys

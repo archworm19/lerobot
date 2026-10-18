@@ -11,7 +11,7 @@ Ctrl+C returns the arm to its saved home pose and disconnects.
 Needs: pyspacemouse + the hidapi system library (macOS: `brew install hidapi`), placo (the `placo-dep` extra),
 and the SO-101 URDF with its meshes (git clone of TheRobotStudio/SO-ARM100, Simulation/SO101).
 
-Usage: uv run python -m lerobot.felix_jr.spacemouse_teleop <PORT> [ROBOT_ID] [options]
+Usage: uv run python -m lerobot.felix_jr.teleop.spacemouse_teleop <PORT> [ROBOT_ID] [options]
   PORT                    serial port of the arm
   ROBOT_ID                arm id (default: left_arm)
   --urdf PATH             SO-101 URDF, with its assets/ folder next to it
@@ -317,7 +317,7 @@ def run_teleop(mouse, kin: RobotKinematics, args: argparse.Namespace, invert: se
     home = load_home(robot)
     if home is None:
         robot.disconnect()
-        raise SystemExit(f"No home pose for {args.robot_id}. Run lerobot.felix_jr.record_home first.")
+        raise SystemExit(f"No home pose for {args.robot_id}. Run lerobot.felix_jr.setup.record_home first.")
 
     log_rows: list[list[float]] = []
     try:

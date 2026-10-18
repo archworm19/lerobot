@@ -6,7 +6,7 @@ reserved for 7-8 (XLeRobot convention) and the wheels get 9-10.
 
 Wheels run in VELOCITY mode and are driven with `set_base_velocity`. The only wheel "calibration" is a
 spin-direction sign per wheel (they are mounted mirrored), saved as `<id>_base.json` by
-`python -m lerobot.felix_jr.setup_base`. The wheels are deliberately kept out of
+`python -m lerobot.felix_jr.setup.wheels`. The wheels are deliberately kept out of
 the arm interface: `get_observation()` / `send_action()` / the saved calibration and home files only ever
 see the six arm joints, so `move_all`, `record_home` and the wiggle test work unchanged.
 """
@@ -57,7 +57,9 @@ class SO101FollowerWithBase(SO101Follower):
         if self.base_signs_path.is_file():
             self.base_signs.update(json.loads(self.base_signs_path.read_text()))
         else:
-            logger.warning(f"No wheel directions at {self.base_signs_path}; run lerobot.felix_jr.setup_base.")
+            logger.warning(
+                f"No wheel directions at {self.base_signs_path}; run lerobot.felix_jr.setup.wheels."
+            )
         motors = {
             **self.bus.motors,
             **{name: Motor(i, "sts3215", MotorNormMode.RANGE_M100_100) for name, i in BASE_MOTOR_IDS.items()},

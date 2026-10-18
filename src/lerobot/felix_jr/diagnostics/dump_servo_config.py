@@ -2,7 +2,7 @@
 
 Useful for comparing joints, or the two arms, when one behaves differently (e.g. a weak shoulder_lift).
 
-Usage: uv run python -m lerobot.felix_jr.dump_servo_config [--left PORT] [--right PORT]
+Usage: uv run python -m lerobot.felix_jr.diagnostics.dump_servo_config [--left PORT] [--right PORT]
 """
 
 import argparse

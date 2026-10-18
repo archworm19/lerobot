@@ -10,7 +10,7 @@ so the first wheel has to be set up alone:
   3. Plug the arm back in when the script finishes.
 Do this with the robot lifted so the wheels spin freely.
 
-Usage: uv run python -m lerobot.felix_jr.setup_base <PORT> <ROBOT_ID>
+Usage: uv run python -m lerobot.felix_jr.setup.wheels <PORT> <ROBOT_ID>
   PORT / ROBOT_ID: the arm whose board the wheels are plugged into (here the right arm: its port and
   right_arm); the wheel directions are saved with that arm's files.
 """

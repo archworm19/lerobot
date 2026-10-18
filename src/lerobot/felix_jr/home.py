@@ -28,7 +28,7 @@ HOME_TOLERANCE = 15.0  # warn at startup if any joint is farther than this from 
 def make_follower(
     port: str, robot_id: str, max_relative_target: float = 5.0, with_base: bool | None = None
 ) -> SO101Follower:
-    """Build a follower. `with_base=None` auto-detects wheels: they are present if setup_base has saved
+    """Build a follower. `with_base=None` auto-detects wheels: they are present if setup.wheels has saved
     `<robot_id>_base.json` for this arm. Pass True/False to override."""
     if max_relative_target is not None:
         print(f"[{robot_id}] max_relative_target={max_relative_target} deg (per-command cap) set by lerobot controller")

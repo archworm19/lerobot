@@ -7,7 +7,7 @@ Per phase it prints the peak load/current, the lowest voltage and how far the jo
 you can tell a torque-limited or under-powered shoulder (load pinned high, voltage sagging, position
 stalled) from one that just needs a stiffer position gain.
 
-Usage: uv run python -m lerobot.felix_jr.lift_test <PORT> [ROBOT_ID] [--down DEG] [--up DEG]
+Usage: uv run python -m lerobot.felix_jr.diagnostics.lift_test <PORT> [ROBOT_ID] [--down DEG] [--up DEG]
        [--p-lift N] [--max-step DEG] [--log CSV]
 """
 
@@ -61,7 +61,7 @@ robot.connect(calibrate=False)
 home = load_home(robot)
 if home is None:
     robot.disconnect()
-    raise SystemExit(f"No home pose for {args.robot_id}. Run lerobot.felix_jr.record_home first.")
+    raise SystemExit(f"No home pose for {args.robot_id}. Run lerobot.felix_jr.setup.record_home first.")
 
 if args.p_lift is not None:
     # P_Coefficient is stored in EEPROM, so torque has to be off to write it; the next normal connect
