@@ -16,12 +16,13 @@ Serial ports for each arm are in [current_ports.md](current_ports.md). Findings 
 |---|---|
 | `home.py` | Shared: follower construction (`make_follower`), home pose files, the trapezoid-profile `move_all`. |
 | `depth.py` | Shared: align RealSense depth to the color image, depth-edge overlays and checks. |
+| `scene.py`, `overlay.py` | Shared: ask a color + depth capture for 3D points, projections and path checks; draw paths on it. |
 | `base_follower.py` | Shared: `SO101FollowerWithBase` (per-joint P gains, optional wheel servos). |
-| `setup/` | One-time, per-robot: `record_home`, `wheels`. |
+| `setup/` | One-time, per-robot: `record_home`, `wheels`, `head`. |
 | `checks/` | Hardware sign-of-life tests: `wiggle_test`, `wheel_test`. |
-| `diagnostics/` | Tuning and debugging: `lift_test`, `dump_servo_config`, `realsense_check`, `alignment_from_saved`. |
+| `diagnostics/` | Tuning and debugging: `lift_test`, `dump_servo_config`, `set_servo_id`, `realsense_check`, `alignment_from_saved`. |
 | `teleop/` | `spacemouse_teleop`. |
-| `docs/` | This file, `tuning_notes.md`, `realsense_m1.md`, `current_ports.md`. |
+| `docs/` | This file, `tuning_notes.md`, `realsense_m1.md`, `scene_tools.md`, `head.md`, `current_ports.md`. |
 
 ## First-time order
 
@@ -35,8 +36,12 @@ Use each arm's own port and id (`left_arm`, `right_arm`).
    disconnected from the other for the first step; the script prompts through it. Pass the port and id of the
    arm whose board the wheels plug into (the right arm here):
    `uv run python -m lerobot.felix_jr.setup.wheels <PORT> <ID>`
+3b. **Set up the head** (only if it is fitted; details in [head.md](head.md)). Same pattern: the arm unplugged
+   from the board and the neck disconnected from the eyes for the first step. Pass the port and id of the arm
+   whose board the head plugs into (the left arm here):
+   `uv run python -m lerobot.felix_jr.setup.head <PORT> <ID>`
 4. **Check the arms move.** `uv run python -m lerobot.felix_jr.checks.wiggle_test --left <PORT> --right <PORT>`
-   (`--no-base` ignores wheel servos).
+   (`--no-base` / `--no-head` ignore the wheel / head servos).
 5. **Check the wheels** with the robot lifted:
    `uv run python -m lerobot.felix_jr.checks.wheel_test <PORT> <ID>`
 6. **Teleop.** `uv run python -m lerobot.felix_jr.teleop.spacemouse_teleop <PORT> <ID> --max-step 15`.
@@ -62,3 +67,8 @@ Use each arm's own port and id (`left_arm`, `right_arm`).
 - State is saved next to each arm's calibration, in
   `~/.cache/huggingface/lerobot/calibration/robots/so_follower/`: `<id>_home.json`, and `<id>_base.json` for
   the arm with the base.
+
+## Tests
+
+`uv run pytest tests/felix_jr -q` runs the tests for the geometry helpers (`depth.py`, `scene.py`, `overlay.py`). They
+need no hardware.

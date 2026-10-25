@@ -39,7 +39,7 @@ LIFTED_STEPS = [
 ]
 GROUND_STEPS = [("drive forward", S, S), ("drive backward", -S, -S), ("rotate in place", -S, S)]
 
-robot = make_follower(args.port, args.robot_id, with_base=True)
+robot = make_follower(args.port, args.robot_id, with_base=True, with_head=False)
 if args.speed <= 0 or args.speed > robot.max_base_degps:
     raise SystemExit(f"--speed must be in (0, {robot.max_base_degps}] deg/s")
 

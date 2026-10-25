@@ -23,7 +23,7 @@ from lerobot.felix_jr.home import make_follower
 WHEELS = {"base_right_wheel": "RIGHT", "base_left_wheel": "LEFT"}
 
 port, robot_id = sys.argv[1], sys.argv[2]
-robot = make_follower(port, robot_id, with_base=True)
+robot = make_follower(port, robot_id, with_base=True, with_head=False)
 
 signs: dict[str, int] = {}
 try:

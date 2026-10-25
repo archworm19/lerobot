@@ -46,7 +46,7 @@ if not arms:
 table: dict[str, dict[str, list]] = {}  # arm -> register -> value per motor
 motors: list[str] = []
 for robot_id, port in arms.items():
-    robot = make_follower(port, robot_id, with_base=False)
+    robot = make_follower(port, robot_id, with_base=False, with_head=False)
     robot.bus.connect()
     try:
         motors = list(robot.bus.motors)

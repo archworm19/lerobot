@@ -26,10 +26,17 @@ HOME_TOLERANCE = 15.0  # warn at startup if any joint is farther than this from 
 
 
 def make_follower(
-    port: str, robot_id: str, max_relative_target: float = 5.0, with_base: bool | None = None
+    port: str,
+    robot_id: str,
+    max_relative_target: float = 5.0,
+    with_base: bool | None = None,
+    with_head: bool | None = None,
+    calibration_dir: Path | None = None,
 ) -> SO101Follower:
-    """Build a follower. `with_base=None` auto-detects wheels: they are present if setup.wheels has saved
-    `<robot_id>_base.json` for this arm. Pass True/False to override."""
+    """Build a follower. `with_base` / `with_head` = None auto-detects the extra servos on this arm's bus: the
+    wheels are present if setup.wheels has saved `<robot_id>_base.json`, the head if setup.head has saved
+    `<robot_id>_head.json`. Pass True/False to override. `calibration_dir` overrides where the calibration,
+    home and sign files live (default: LeRobot's calibration folder)."""
     if max_relative_target is not None:
         print(f"[{robot_id}] max_relative_target={max_relative_target} deg (per-command cap) set by lerobot controller")
     if max_relative_target is None:
@@ -40,14 +47,19 @@ def make_follower(
         id=robot_id,
         use_degrees=True,
         max_relative_target=max_relative_target,  # per-command cap in degrees; keeps motion gentle
+        calibration_dir=calibration_dir,
     )
-    if with_base is None:
+    if with_base is None or with_head is None:
         probe = SO101FollowerWithBase(config, with_base=False)  # only used for its calibration dir
-        with_base = (probe.calibration_dir / f"{robot_id}_base.json").is_file()
-        if with_base:
-            print(f"[{robot_id}] wheel setup found: wheel servos (IDs 9, 10) must be on this arm's bus")
-    # with_base: wheel servos (IDs 9-10) share this arm's bus.
-    return SO101FollowerWithBase(config, with_base=with_base)
+        if with_base is None:
+            with_base = (probe.calibration_dir / f"{robot_id}_base.json").is_file()
+            if with_base:
+                print(f"[{robot_id}] wheel setup found: wheel servos (IDs 9, 10) must be on this arm's bus")
+        if with_head is None:
+            with_head = (probe.calibration_dir / f"{robot_id}_head.json").is_file()
+            if with_head:
+                print(f"[{robot_id}] head setup found: head servos (IDs 7, 8) must be on this arm's bus")
+    return SO101FollowerWithBase(config, with_base=with_base, with_head=with_head)
 
 
 def home_path(robot: SO101Follower) -> Path:

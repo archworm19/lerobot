@@ -56,7 +56,9 @@ parser.add_argument("--max-step", type=float, default=5.0, help="lerobot per-com
 parser.add_argument("--log", metavar="CSV", help="write every sample to this CSV")
 args = parser.parse_args()
 
-robot = make_follower(args.port, args.robot_id, max_relative_target=args.max_step, with_base=False)
+robot = make_follower(
+    args.port, args.robot_id, max_relative_target=args.max_step, with_base=False, with_head=False
+)
 robot.connect(calibrate=False)
 home = load_home(robot)
 if home is None:

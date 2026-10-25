@@ -312,7 +312,9 @@ def save_log(rows: list[list[float]], path: str, dt: float) -> None:
 
 
 def run_teleop(mouse, kin: RobotKinematics, args: argparse.Namespace, invert: set[str], dt: float) -> None:
-    robot = make_follower(args.port, args.robot_id, max_relative_target=args.max_step, with_base=False)
+    robot = make_follower(
+        args.port, args.robot_id, max_relative_target=args.max_step, with_base=False, with_head=False
+    )
     robot.connect(calibrate=False)
     home = load_home(robot)
     if home is None:
