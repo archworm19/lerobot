@@ -1,5 +1,7 @@
 """Sign-of-life test for SO-101 followers: go to center, nudge each joint +/- a few degrees, return home.
 Then, for an arm that has them, the head servos (down/up, left/right) and the wheels (each alone, then both).
+Each head servo first goes to its recorded home (`setup.head_range`), is nudged within its recorded limits, and
+ends at home (also after Ctrl+C). Without a recorded home it is nudged from where it is, and ends there.
 
 Pass --left and/or --right with the arm's serial port; at least one is required. If both are given, the
 arms move at the same time. Run `setup/record_home` for each arm first so it has a saved home pose. Head and
@@ -33,6 +35,7 @@ from lerobot.felix_jr.home import (
     make_follower,
     move_all
 )
+from lerobot.felix_jr.server.hardware import make_head_controller
 from lerobot.robots.so_follower import SO101Follower
 
 
@@ -88,15 +91,37 @@ def exercise_extras(
 ) -> None:
     """Head servos, then wheels, for every arm that has them."""
     for robot_id, robot in robots.items():
+        head = make_head_controller(robot)
         for name in robot.head_motors:
-            to_pos, to_neg = robot.wiggle_head(name, head_delta)
-            positive, negative = ("down", "up") if name == "head_eyes" else ("left", "right")
-            print(
-                f"[{robot_id}] {name}: asked +/-{head_delta:.0f} deg, moved {to_pos:+.1f} deg {positive} "
-                f"and {to_neg:+.1f} deg {negative}"
-            )
-            if min(to_pos, to_neg) < 0.3 * head_delta:
-                print(f"[{robot_id}] WARNING: {name} moved much less than commanded (blocked or no power?)")
+            home = head.store.get(name).get("home")
+            try:
+                if home is not None:
+                    print(f"[{robot_id}] {name}: going to home")
+                    head.move(name, to="home")
+                else:
+                    print(
+                        f"[{robot_id}] WARNING: no home recorded for {name} (run setup.head_range); "
+                        "nudging it from where it is"
+                    )
+                result = head.wiggle(name, head_delta)
+                positive, negative = ("down", "up") if name == "head_eyes" else ("left", "right")
+                print(
+                    f"[{robot_id}] {name}: asked +/-{head_delta:.0f} deg, moved {result['to_pos']:+.1f} deg "
+                    f"{positive} and {result['to_neg']:+.1f} deg {negative}"
+                )
+                if result["limited"]:
+                    print(f"[{robot_id}] {name}: a move was shortened by the recorded limit")
+                if result["blocked"] or (
+                    not result["limited"] and min(result["to_pos"], result["to_neg"]) < 0.3 * head_delta
+                ):
+                    print(f"[{robot_id}] WARNING: {name} moved much less than commanded (blocked or no power?)")
+            finally:
+                if home is not None:  # always finish at home, even after Ctrl+C
+                    try:
+                        head.move(name, to="home")
+                        print(f"[{robot_id}] {name}: back at home")
+                    except Exception as e:
+                        print(f"[{robot_id}] Could not return {name} to home: {e!r}")
     for robot_id, robot in robots.items():
         if not robot.with_base:
             continue

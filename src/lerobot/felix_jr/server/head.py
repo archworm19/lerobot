@@ -178,6 +178,30 @@ class HeadController:
             last = position
             self._sleep(POLL_S)
 
+    def wiggle(self, name: str, degrees: float) -> dict[str, Any]:
+        """Nudge servo `name` in both directions, coming back to where it started after each.
+
+        It goes `degrees` in the positive direction (down / left), then the same the other way. Moves go
+        through `move`, so recorded limits apply.
+
+        Returns `to_pos` and `to_neg`: how far it actually went in each direction, in degrees measured in the
+        direction it was asked to go (both close to `degrees` if it followed the command); `limited`: a move was
+        shortened by a recorded limit; `blocked`: the servo stopped short of a goal without a limit being the
+        reason.
+        """
+        self._check(name)
+        sign = self.signs.get(name, 1)
+        base = self.backend.read_ticks(name)
+        achieved, limited, blocked = [], False, False
+        for direction in (+1, -1):
+            out = self.move(name, delta_deg=direction * degrees)
+            limited |= out["clamped"]
+            blocked |= not out["reached"]
+            achieved.append(direction * sign * (out["ticks"] - base) / TICKS_PER_DEG)
+            back = self.move(name, delta_deg=sign * (base - out["ticks"]) / TICKS_PER_DEG)
+            blocked |= not back["reached"]
+        return {"to_pos": achieved[0], "to_neg": achieved[1], "limited": limited, "blocked": blocked}
+
     def record(self, name: str, what: str) -> dict[str, Any]:
         """Save servo `name`'s present position as `what` (one of `RANGE_KEYS`). Returns the servo's state."""
         self._check(name)

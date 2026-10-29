@@ -114,6 +114,20 @@ class BusHeadBackend:
         self.robot.bus.write("Torque_Limit", name, int(limit), normalize=False)
 
 
+def make_head_controller(robot) -> HeadController | None:
+    """The `HeadController` of a connected `SO101FollowerWithBase`, or None if it has no head servos.
+
+    Its recorded limits and home are read from `<id>_head_range.json` next to the arm's calibration.
+    """
+    if not getattr(robot, "with_head", False):
+        return None
+    return HeadController(
+        BusHeadBackend(robot),
+        robot.head_signs,
+        RangeStore(robot.calibration_dir / f"{robot.id}_head_range.json"),
+    )
+
+
 class FakeHardware:
     """A robot with a synthetic scene: a flat wall 1 m away with a box 0.6 m away, and arms at rest.
 
@@ -276,12 +290,7 @@ class RealHardware:
                 robot = make_follower(port, robot_id)
                 robot.connect(calibrate=False)
                 self.robots[robot_id] = robot
-                if getattr(robot, "with_head", False):
-                    self.head = HeadController(
-                        BusHeadBackend(robot),
-                        robot.head_signs,
-                        RangeStore(robot.calibration_dir / f"{robot.id}_head_range.json"),
-                    )
+                self.head = make_head_controller(robot) or self.head
         except Exception:
             self.close()
             raise

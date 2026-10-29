@@ -118,6 +118,39 @@ def test_a_blocked_servo_is_told_to_hold_and_the_move_stops():
     assert backend.writes[-1] == 2100  # the last command is "stay where you are"
 
 
+def test_wiggle_goes_both_ways_and_returns_to_where_it_started(head):
+    start = head.backend.read_ticks(EYES)
+    result = head.wiggle(EYES, 8.0)
+    assert result["to_pos"] == pytest.approx(8.0, abs=0.1) and result["to_neg"] == pytest.approx(8.0, abs=0.1)
+    assert not result["limited"] and not result["blocked"]
+    assert head.backend.read_ticks(EYES) == start
+    neck = head.wiggle(NECK, 8.0)  # a servo with the opposite sign reports the same distances
+    assert neck["to_pos"] == pytest.approx(8.0, abs=0.1) and neck["to_neg"] == pytest.approx(8.0, abs=0.1)
+    assert head.backend.read_ticks(NECK) == start
+
+
+def test_wiggle_respects_recorded_limits(head):
+    head.record(EYES, "limit_pos")  # the down limit is right here
+    result = head.wiggle(EYES, 8.0)
+    assert result["limited"] and not result["blocked"]
+    assert result["to_pos"] == 0.0  # could not go down at all
+    assert result["to_neg"] == pytest.approx(8.0, abs=0.1)  # up was free
+    assert head.backend.read_ticks(EYES) == 2048
+
+
+def test_wiggle_reports_a_blocked_servo():
+    class Stuck(FakeHeadBackend):
+        def write_goal(self, name, ticks):
+            pass  # ignores every goal
+
+    now = [0.0]
+    controller = HeadController(
+        Stuck(), SIGNS, RangeStore(), sleep=lambda s: now.__setitem__(0, now[0] + s), clock=lambda: now[0]
+    )
+    result = controller.wiggle(EYES, 8.0)
+    assert result["blocked"] and result["to_pos"] == 0.0
+
+
 def test_range_store_persists(tmp_path):
     path = tmp_path / "sub" / "left_arm_head_range.json"
     controller = HeadController(FakeHeadBackend(), SIGNS, RangeStore(path))
