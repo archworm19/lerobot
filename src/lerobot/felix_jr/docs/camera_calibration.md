@@ -137,7 +137,73 @@ patched copy in placo, and checks the projected pixels end to end. Two things th
 - **Combining rotation errors:** several rotation errors on one joint are applied as one roll-pitch-yaw rotation
   (`Rz(yaw) Ry(pitch) Rx(roll)`); applying them one after another gives a different result.
 
+## Click calibration (the path we are taking)
+
+Instead of tags, a person clicks the tip of the closed gripper in the head camera's image, pose after pose, and a
+least-squares fit finds the kinematic corrections that make the model's predicted tip agree with the clicks. This is
+Option B below (calibrate the kinematic chain, with priors), with clicks as the observation. It needs no printed
+tags, it measures what matters (where the tip lands in the image), and it reuses the Step 1 forward kinematics.
+A tag or a colored marker on the gripper can replace the clicks later without changing the fit.
+
+**Run it** (README, section 6): `calibration.collect` on your computer (against the server), then `calibration.fit`.
+`collect` plans arm poses spread around the wiggle's center pose, moves the arm slowly, turns the head towards where
+the current model predicts the tip, and shows a cyan circle there; you click the real tip. Each click refits, so the
+circle converges on the tip. `fit` writes `kinematic_calibration.json`, `xlerobot_calibrated.urdf`,
+`so101_calibrated.urdf` and `fit_report.md`.
+
+**The model** (`calibration/model.py`):
+
+- **Two URDFs.** The head and camera come from `xlerobot.urdf`; the arm from the official SO-101 URDF (vendored as
+  `so101_new_calib.urdf`, Apache 2.0). Reasons, found by comparing them: the arm inside `xlerobot.urdf` is an
+  older gripper (its wrist roll joint is at (0, -0.0601, 0) where the SO-101's is at (0, -0.0611, 0.0181), and
+  the jaw pivot and the shoulder offsets differ too, about 13 mm at the pivots), the hardware is an SO-101, and the
+  SO-101 URDF's joint angles are LeRobot's calibrated degrees one to one (the teleop depends on it), so no sign or
+  offset guessing for the arm, and the tool center point (`gripper_frame_link`, about 98 mm along the closed jaws)
+  is well defined.
+- **Mounting the SO-101 on the XLeRobot.** A constant transform `T` places the SO-101 chain on the XLeRobot's `Base`
+  frame: the best rigid match of the shoulder, elbow and wrist pivots of the two URDFs (residual about 8 mm). The
+  XLeRobot URDF's joint zero is not LeRobot's: lift and elbow are 90 degrees off (signs -1 and +1), and the pan
+  zero points the arm *sideways* (left arm +90 degrees, right arm -90) where LeRobot's center points it
+  forward. We checked this against the wiggle test's camera frames: with it, the arms' wrist and gripper land
+  below the picture at the left and right, where the arms are seen, a +10 degree pan moves them to the right as in
+  the images, and at the center pose the tip is about 35 cm forward and 23 cm up from the arm base. The mount
+  (6 parameters, wide priors) is then calibrated like everything else.
+- **Head angles** come from the servos' raw ticks: `sign * (ticks - ref) * 2pi / 4096`, with `ref` the recorded home.
+  The true angle at home is unknown (home is not level), so the head pan and tilt zeros are parameters with a
+  +/-20 degree prior.
+- **Parameters and priors** (43 per arm): head pan / tilt zeros (20 deg), their joint origins (2 mm), the camera
+  mount (3 mm in x and z, **15 mm laterally in y**, since the RGB sensor's lateral offset in the camera link is the
+  least certain; rotations 2 deg), the arm mount (15 mm, 5 deg), the SO-101 joint zeros (2 deg) and origins (2 mm),
+  and the tip offset (8 mm, "the tip of the closed gripper" versus the tool center point). The head tower is left
+  out, since moving it and moving the arm mount are indistinguishable (Step 1).
+- **Intrinsics** are not fitted. The camera stores its factory calibration and every `capture` carries it
+  (`fx`, `fy`, `ppx`, `ppy`); the color distortion coefficients of our D415 are all zero, so ignoring distortion is
+  right. RealSense's self-calibration tools (on-chip, tare) improve the *depth* stereo pair, not the color camera's
+  place on the robot, so they are not part of this; run them only if depth looks wrong (not verified here).
+
+**What the fit can and cannot learn.** `fit` reports each parameter's posterior sigma next to its prior. In a
+simulation with the true parameters known (tests/felix_jr/test_calibration_fit.py), 20 to 80 clicks with 1.5 px of
+click noise brought the pixel error at clicks held out from the fit from about 220 px (uncalibrated) to about 2 px.
+The clicks pin down the head tilt zero (to about 2 deg), the head pan zero (4 deg), the camera roll and yaw, the
+arm mount roll and pitch, the tip offset and the camera's lateral offset; the rest (most joint origins, the wrist
+roll) stay at their priors, which is correct: they do not move the tip enough to be seen. That simulation uses the
+right model and random poses, so it is optimistic: real errors also include backlash, play and the gravity sag
+that the measured joint angles only partly capture.
+
+**Trusting the result.** (1) `fit` holds out every 5th click by default and reports the pixel RMS on them before and
+after: that, not the training RMS, says whether the calibration generalizes. (2) Click noise is about 2 to 4 px
+(`--sigma-px`); an RMS after calibration near that is as good as the clicks allow. (3) Also try the result at poses
+you did not collect (the workspace where the VLM will plan), by clicking a few more and checking the error.
+(4) Check the report's "largest remaining errors": a mis-click shows up there, and `u` in `collect` undoes the
+last click. (5) A parameter marked "no" in the Learned column was not determined; do not read meaning into it.
+
+**Not done yet:** the second arm (fit its own mount, joint and tip parameters with the head and camera fixed), a
+marker instead of clicks, using depth at the click (`--use-depth`, off by default because dark shiny parts give
+poor depth), and applying the result to the runtime (projecting planned trajectories into the image).
+
 ## Step 2: Repeatability test (hardware)
+
+*The click calibration above gets a repeatability number for free: if the fit's held-out error stays well above the click noise, the remainder is play, backlash or model error, which is what this step was to find. A separate tag-based test is still the cleaner way to measure it.*
 
 **Question:** how far does the same commanded pose land from itself? This is the floor: constant offsets
 cannot fix play, backlash or hysteresis.

@@ -18,13 +18,14 @@ Serial ports for each arm are in [current_ports.md](current_ports.md). Findings 
 | `depth.py` | Shared: align RealSense depth to the color image, depth-edge overlays and checks. |
 | `scene.py`, `overlay.py` | Shared: ask a color + depth capture for 3D points, projections and path checks; draw paths on it. |
 | `ports.py` | Shared: the saved arm-to-port cache (`setup.find_ports` writes it, `resolve(robot_id)` reads it). |
+| `so101_new_calib.urdf` | The official SO-101 URDF (Apache 2.0), used by the calibration for the arm. |
 | `base_follower.py` | Shared: `SO101FollowerWithBase` (per-joint P gains, optional wheel servos). |
 | `setup/` | One-time, per-robot: `find_ports`, `record_home`, `wheels`, `head`. |
 | `checks/` | Hardware sign-of-life tests: `wiggle_test`, `wheel_test`. |
 | `diagnostics/` | Tuning and debugging: `lift_test`, `dump_servo_config`, `set_servo_id`, `realsense_check`, `alignment_from_saved`. |
 | `server/` | Robot server for the Raspberry Pi and its client (`FelixClient`); plan in `server_plan.md`. |
 | `teleop/` | `spacemouse_teleop`. |
-| `calibration/` | Camera-to-robot calibration work: numpy URDF kinematics (`urdf_kinematics`) and the URDF sensitivity analysis (`sensitivity`); plan in `camera_calibration.md`. |
+| `calibration/` | Camera-to-robot calibration: numpy URDF kinematics (`urdf_kinematics`), the sensitivity analysis (`sensitivity`), and the click calibration (`model`, `design`, `collect`, `fit`, `urdf_patch`); plan in `camera_calibration.md`. |
 | `docs/` | This file, `tuning_notes.md`, `realsense_m1.md`, `scene_tools.md`, `head.md`, `camera_calibration.md`, `sensitivity_default_urdf.md`, `server_plan.md`, `current_ports.md`. |
 
 ## First-time order
@@ -167,6 +168,30 @@ it ends; `stop` aborts and holds in place; only one motion runs at a time; while
 `capture` answer from a snapshot (nothing else may use the serial bus then). Scripts that move the robot wrap
 themselves in `client.session()`, which sends it to rest on any exit; scripts that only read open no session and
 are never moved. Details are in `server/motion.py` and the module docstring of `server/client.py`.
+
+### 6. Calibrate the camera to the arm (clicks, needs the server)
+
+Finds the corrections to the URDFs (head and camera offsets, arm joint zeros, the tip offset) so a trajectory can be
+projected into the camera image. You click the tip of the closed gripper in about 30 to 60 frames. Background and
+how to judge the result are in [camera_calibration.md](camera_calibration.md), "Click calibration".
+
+1. Server on the Pi with the arm (the left arm also carries the head): `server.server --left-port <PORT> ...`.
+   Record the head's home (`setup.head_range`, for the eyes and, ideally, the neck) first, since the head angles
+   are measured from it.
+2. On your computer, with the workspace in front of the robot clear and the arm free to move:
+   `uv run python -m lerobot.felix_jr.calibration.collect tcp://<pi>:5555 --arm left --out-dir ~/cal_left`
+   A window shows the camera with a cyan circle where the model predicts the tip. `n` moves the arm (slowly) to the
+   next planned pose and turns the head towards the circle; click the very end of the closed gripper; arrow keys
+   nudge the head (do this now and then, so the head's parameters are not confounded with the arm's); `u` undoes
+   a click; `q` finishes and the robot goes to rest. The first few clicks are hard: the circle is far off until the
+   head's zero offsets are learned. Watch the arm: poses are within about +/-20 degrees of the center pose, but
+   nothing checks for collisions. Ctrl+C is safe (the robot stops and goes to rest).
+3. Fit: `uv run python -m lerobot.felix_jr.calibration.fit ~/cal_left/observations.json --out-dir ~/cal_left`
+   Read `fit_report.md`: the held-out pixel error before and after, which parameters were learned, and the
+   largest remaining errors (re-click or undo those). It also writes the calibrated URDFs.
+4. Do the right arm with `--arm right` (and the same head), then compare.
+
+`calibration.design` only plans poses; `collect --resume` continues an earlier folder.
 
 ## Checks and teleop (after either setup)
 

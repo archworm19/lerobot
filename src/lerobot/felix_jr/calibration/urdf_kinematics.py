@@ -127,6 +127,8 @@ class UrdfTree:
                 upper=_optional_float(limit, "upper"),
             )
         self.joint_into: dict[str, Joint] = {j.child: j for j in self.joints.values()}
+        # The origin rotation of each joint never changes unless it is perturbed; build it once.
+        self._origin_rotation = {name: rotation_from_rpy(*j.rpy) for name, j in self.joints.items()}
         links = {lk.get("name") for lk in root.findall("link")}
         roots = links - set(self.joint_into)
         self.root = sorted(roots)[0] if roots else None
@@ -169,7 +171,7 @@ class UrdfTree:
         p = perturb or {}
         name = joint.name
         xyz = joint.xyz + np.array([p.get(f"pos:{name}:{a}", 0.0) for a in ("x", "y", "z")])
-        rot = rotation_from_rpy(*joint.rpy)
+        rot = self._origin_rotation[name]
         extra = [p.get(f"rot:{name}:{a}", 0.0) for a in ("roll", "pitch", "yaw")]
         if any(extra):
             # Right-multiply: the extra rotation is about the joint frame's own axes, after the URDF rotation.
