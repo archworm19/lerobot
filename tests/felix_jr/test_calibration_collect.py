@@ -12,6 +12,7 @@ from lerobot.felix_jr.calibration.collect import CollectSession, decode_key, par
 from lerobot.felix_jr.calibration.design import (
     JOINT_LIMITS,
     LIMIT_MARGIN,
+    best_roll,
     center_head,
     plan_poses,
 )
@@ -252,7 +253,7 @@ def test_without_a_table_plane_the_session_says_so_and_still_plans_poses(robot, 
     with client.session():
         session = CollectSession(client, "left", tmp_path / "cal", lambda image: None, None, n_poses=5)
         assert any("no table plane" in note for note in session.notes)  # the fake scene is a flat wall
-        assert session.model.prior_overrides == {} and session.table_z is None
+        assert "zero:head_tilt_joint" not in session.model.prior_overrides and session.table_z is None
         assert len(session.poses) == 5
 
 
@@ -262,7 +263,8 @@ def test_bootstrap_can_be_switched_off(robot, tmp_path):
         session = CollectSession(
             client, "left", tmp_path / "cal", lambda image: None, None, n_poses=4, bootstrap=False
         )
-        assert session.notes == [] and session.model.prior_overrides == {}
+        assert not any("tilt" in note or "first pose" in note for note in session.notes)
+        assert set(session.model.prior_overrides) == {"zero:head_pan_joint"}  # only the neck's missing home
         assert all(abs(session.poses[0][f"{j}.pos"]) < 1e-9 for j in ARM_JOINTS)  # the plain center seed
 
 
@@ -309,3 +311,71 @@ def test_every_planned_pose_can_be_brought_into_view_by_the_head_within_its_limi
             tip = session.model.predict(Observation(arm=pose, head_ticks=target, pixel=(0, 0)), session.theta)
             assert session.model.in_view(tip.uv, margin=collect_module.VIEW_MARGIN - 1)
             assert all(limits[n][0] <= target[n] <= limits[n][1] for n in target)
+
+
+def test_the_hinge_axis_angle_depends_on_the_wrist_roll_and_best_roll_minimizes_it():
+    model = make_model()
+    theta = {"zero:head_tilt_joint": 0.4}
+    ticks = {"head_neck": 2048, "head_eyes": 2048}
+    pose = {**{f"{j}.pos": 0.0 for j in ARM_JOINTS}, "shoulder_pan.pos": 30.0, "gripper.pos": 1.0}
+    angles = [
+        model.hinge_axis_angle({**pose, "wrist_roll.pos": r}, ticks, theta) for r in range(-100, 101, 10)
+    ]
+    assert all(0.0 <= a <= 90.0 for a in angles) and max(angles) - min(angles) > 20  # the roll matters a lot
+    roll, angle = best_roll(model, theta, pose, ticks, max_roll=100)
+    assert -100 <= roll <= 100 and angle <= min(angles) + 1e-9
+    narrow_roll, narrow = best_roll(model, theta, pose, ticks, max_roll=20)
+    assert abs(narrow_roll) <= 20 and narrow >= angle
+    # the tip barely moves with the roll (it is about 8 mm off the roll axis)
+    moved = model.tip_in_root({**pose, "wrist_roll.pos": 90.0}, theta) - model.tip_in_root(pose, theta)
+    assert np.linalg.norm(moved) < 0.02
+
+
+def test_plan_poses_can_adjust_candidates():
+    rolled = plan_poses(10, adjust=lambda pose: {**pose, "wrist_roll.pos": 77.0}, rng_seed=2)
+    assert rolled[0]["wrist_roll.pos"] == 0.0  # the seed is left as it is
+    assert all(p["wrist_roll.pos"] == 77.0 for p in rolled[1:])
+    assert len(plan_poses(10, adjust=lambda pose: None)) == 1
+
+
+def test_planned_poses_turn_the_gripper_so_the_camera_sees_the_pinch_point(robot, tmp_path):
+    fake, client = robot
+    with client.session():
+        session = CollectSession(
+            client,
+            "left",
+            tmp_path / "cal",
+            lambda image: None,
+            None,
+            n_poses=10,
+            head_tilt_deg=30.0,
+            max_roll=100,
+        )
+        head = client.head_state()
+        limits = collect_module.head_limits(head)
+        ticks = {n: head[n]["ticks"] for n in ("head_neck", "head_eyes")}
+        for pose in session.poses[1:]:
+            target = center_head(session.model, session.theta, pose, ticks, limits)
+            assert (
+                session.model.hinge_axis_angle(pose, target, session.theta)
+                <= collect_module.FACING_MAX_DEG + 1e-6
+            )
+            assert abs(pose["wrist_roll.pos"]) <= 100
+        seed_angle = session.model.hinge_axis_angle(session.poses[0], ticks, session.theta)
+        unrolled = session.model.hinge_axis_angle(
+            {**session.poses[0], "wrist_roll.pos": 0.0}, ticks, session.theta
+        )
+        assert seed_angle <= unrolled  # the first pose is rolled towards the camera too
+
+
+def test_a_neck_without_a_recorded_home_gets_a_wide_pan_prior(robot, tmp_path):
+    fake, client = robot
+    with client.session():
+        session = CollectSession(
+            client, "left", tmp_path / "cal", lambda image: None, None, n_poses=3, bootstrap=False
+        )
+        assert session.model.prior_overrides["zero:head_pan_joint"] == (
+            0.0,
+            collect_module.NECK_PRIOR_NO_HOME,
+        )
+        assert any("no recorded home" in note for note in session.notes)

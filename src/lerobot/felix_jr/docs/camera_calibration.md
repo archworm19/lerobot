@@ -196,7 +196,16 @@ the elbow instead of the gripper. Before the first click, `collect`:
 On the capture saved from the Pi, it reads 15.8 degrees below horizontal (tilt zero +16 degrees), puts the table
 3 cm below the arm base, and yields 40 or more poses per arm; the first pose's tip stays in the picture even if the
 pan zero is 20 degrees off or the tilt 5 degrees off. What it cannot know is the head's pan zero (about 20 degrees
-unsure), which the first clicks pin down.
+unsure with a recorded neck home, 45 without), which the first clicks pin down.
+
+**Seeing the pinch point.** The tip's position is not enough: the gripper hides its own pinch point when the
+camera looks along the plane the jaws open in. `CalibrationModel.hinge_axis_angle` gives the angle between the
+jaw hinge axis (the normal of that plane) and the line of sight; at 0 the camera sees the jaws meet from the side.
+At the wiggle-like poses with the wrist roll near 0 it is 75-86 degrees, which is why the first sessions showed
+the gripper but not its tip. The planner now rolls the wrist of each pose (within +/-`--max-roll`, default 100,
+to spare a wrist camera's cable) to the roll that minimizes this angle, and drops poses where it stays above 50
+degrees. On the session's settings this gives 40 poses at a median of 45 degrees, using rolls of about -100 and
++55 to +80.
 
 **What the fit can and cannot learn.** `fit` reports each parameter's posterior sigma next to its prior. In a
 simulation with the true parameters known (tests/felix_jr/test_calibration_fit.py), 20 to 80 clicks with 1.5 px of

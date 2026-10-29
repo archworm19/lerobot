@@ -276,6 +276,25 @@ class CalibrationModel:
         x_arm_tip = self.arm_tree.link_pose(TIP_FRAME, self.arm_angles(arm), arm_params)
         return (x_root_base @ self.T @ x_arm_tip)[:3, 3]
 
+    def hinge_axis_angle(
+        self, arm: dict[str, float], head_ticks: dict[str, int], theta: dict[str, float] | None = None
+    ) -> float:
+        """How far (degrees, 0-90) the gripper's hinge axis is from the line of sight between the tip and the camera.
+
+        The hinge axis is the axis the moving jaw turns about, i.e. the normal of the plane the jaws open in. At 0 the
+        camera looks at the gripper from the side and sees the jaws meet; at 90 it looks along the jaw plane, and
+        the jaws hide the pinch point behind each other or behind the gripper body.
+        """
+        theta = theta or {}
+        head_params, arm_params = self.split(theta)
+        hinge = self.arm_tree.joints["gripper"]
+        x_root_base = self.head_tree.link_pose(self.base_link, {}, head_params)
+        x_jaw = x_root_base @ self.T @ self.arm_tree.link_pose(hinge.child, self.arm_angles(arm), arm_params)
+        axis = x_jaw[:3, :3] @ (hinge.axis / np.linalg.norm(hinge.axis))
+        sight = self.camera_pose(head_ticks, theta)[:3, 3] - self.tip_in_root(arm, theta)
+        cosine = abs(float(axis @ sight)) / np.linalg.norm(sight)
+        return float(np.degrees(np.arccos(np.clip(cosine, 0.0, 1.0))))
+
     def predict(self, obs: Observation, theta: dict[str, float] | None = None) -> Prediction:
         """The tip's pixel, depth and camera-frame position for one observation's joints."""
         theta = theta or {}

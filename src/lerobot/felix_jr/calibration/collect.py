@@ -50,9 +50,10 @@ from lerobot.felix_jr.calibration.bootstrap import (
     table_height,
     up_from_pitch,
 )
-from lerobot.felix_jr.calibration.design import center_head, plan_poses
+from lerobot.felix_jr.calibration.design import MAX_ROLL_DEG, best_roll, center_head, plan_poses
 from lerobot.felix_jr.calibration.fit import FitConfig, fit, pixel_errors, rms
 from lerobot.felix_jr.calibration.model import (
+    ARM_JOINTS,
     HEAD_JOINTS,
     TICKS_PER_TURN,
     CalibrationModel,
@@ -71,6 +72,10 @@ VIEW_MARGIN = 60  # pixels from the image border a planned tip must stay
 NECK_RANGE_TICKS = (
     450  # +/- ticks (about 40 deg) the neck may be turned from where it is, if no limit is recorded
 )
+FACING_MAX_DEG = (
+    50.0  # the gripper's hinge axis must be within this of the line of sight (pinch point visible)
+)
+NECK_PRIOR_NO_HOME = np.radians(45.0)  # head pan zero prior sigma when the neck has no recorded home
 TABLE_CLEARANCE = 0.04  # meters the tip must stay above the table (the model is good to a centimeter or two)
 # cv2.waitKeyEx codes differ by platform (macOS, Linux GTK, Windows, Qt).
 UP_KEYS = {63232, 65362, 2490368, 0, ord("i")}
@@ -127,6 +132,7 @@ class CollectSession:
         seed_pose: dict[str, float] | None = None,
         head_tilt_deg: float | None = None,
         bootstrap: bool = True,
+        max_roll: float = MAX_ROLL_DEG,
     ):
         """Connect the pieces and take a first frame.
 
@@ -139,8 +145,9 @@ class CollectSession:
         self.client, self.arm, self.out_dir, self.show = client, arm, out_dir, show
         self.notes: list[str] = []
         self.table_z: float | None = (
-            None  # the table's height in the root frame, when the depth image showed it
+            None  # the table's height in the root frame, if the depth image showed it
         )
+        self.max_roll = max_roll
         self.arm_id = f"{arm}_arm"
         self.poses, self.pose_index = poses or [], 0
         self.max_vel, self.max_accel, self.head_step_deg = max_vel, max_accel, head_step_deg
@@ -170,6 +177,13 @@ class CollectSession:
                 },
             )
             self.observations: list[Observation] = []
+            if head["head_neck"]["home"] is None:
+                # its reference is then wherever the neck happens to be, so its zero can be anything
+                self.model.prior_overrides["zero:head_pan_joint"] = (0.0, NECK_PRIOR_NO_HOME)
+                self._note(
+                    "the neck has no recorded home, so the head's pan is unknown at first (record it with "
+                    "setup.head_range --name head_neck); expect the circle to be off sideways until a few clicks"
+                )
             if bootstrap:
                 self._estimate_head_tilt(head_tilt_deg)
         if poses is None:
@@ -242,20 +256,36 @@ class CollectSession:
         limits = head_limits(self.client.head_state())
         floor = None if self.table_z is None else self.table_z + TABLE_CLEARANCE
 
-        def keep(pose: dict[str, float]) -> bool:
-            """Above the table, and the head can bring the tip into the picture within its limits."""
-            if floor is not None and self.model.tip_in_root(pose, self.theta)[2] < floor:
-                return False
-            target = center_head(self.model, self.theta, pose, ticks, limits)
-            if target is None:
-                return False
-            tip = self.model.predict(Observation(arm=pose, head_ticks=target, pixel=(0.0, 0.0)), self.theta)
-            return self.model.in_view(tip.uv, margin=VIEW_MARGIN)
+        def adjust(
+            pose: dict[str, float], head_ticks: dict[str, int] | None = None
+        ) -> dict[str, float] | None:
+            """The pose with the wrist rolled to show the pinch point, or None if it cannot be shown.
 
-        poses = plan_poses(n, seed_pose, delta_scale, keep=keep)
+            It must stay above the table, the head must be able to bring the tip into the picture within its
+            limits, and the gripper's hinge axis must then face the camera within `FACING_MAX_DEG`.
+            """
+            if floor is not None and self.model.tip_in_root(pose, self.theta)[2] < floor:
+                return None
+            target = head_ticks or center_head(self.model, self.theta, pose, ticks, limits)
+            if target is None:
+                return None
+            roll, angle = best_roll(self.model, self.theta, pose, target, self.max_roll)
+            if angle > FACING_MAX_DEG:
+                return None
+            pose = {**pose, "wrist_roll.pos": roll}
+            tip = self.model.predict(Observation(arm=pose, head_ticks=target, pixel=(0.0, 0.0)), self.theta)
+            return pose if self.model.in_view(tip.uv, margin=VIEW_MARGIN) else None
+
+        if seed_pose is not None:  # roll the seed too, for the head where it is now
+            full = {**{f"{j}.pos": 0.0 for j in ARM_JOINTS}, **seed_pose, "gripper.pos": 1.0}
+            seed_pose = adjust(full, ticks) or {
+                **full,
+                "wrist_roll.pos": best_roll(self.model, self.theta, full, ticks, self.max_roll)[0],
+            }
+        poses = plan_poses(n, seed_pose, delta_scale, adjust=adjust)
         if len(poses) < n:
             self._note(
-                f"only {len(poses)} of {n} poses can show the tip within the head's range and above the table"
+                f"only {len(poses)} of {n} poses show the pinch point within the head's range and above the table"
             )
         return poses
 
@@ -479,6 +509,12 @@ def main() -> None:
     parser.add_argument(
         "--no-bootstrap", action="store_true", help="skip the head tilt estimate and the first-pose search"
     )
+    parser.add_argument(
+        "--max-roll",
+        type=float,
+        default=MAX_ROLL_DEG,
+        help="largest wrist roll used to show the pinch point, deg (100)",
+    )
     parser.add_argument("--resume", action="store_true", help="continue an earlier --out-dir")
     args = parser.parse_args()
 
@@ -508,6 +544,7 @@ def main() -> None:
             seed_pose=parse_seed(args.seed_pose),
             head_tilt_deg=args.head_tilt_deg,
             bootstrap=not args.no_bootstrap,
+            max_roll=args.max_roll,
         )
         for note in session.notes:
             print(note)

@@ -176,8 +176,10 @@ projected into the camera image. You click the tip of the closed gripper in abou
 how to judge the result are in [camera_calibration.md](camera_calibration.md), "Click calibration".
 
 1. Server on the Pi with the arm (the left arm also carries the head): `server.server --left-port <PORT> ...`.
-   Record the head's home (`setup.head_range`, for the eyes and, ideally, the neck) first, since the head angles
-   are measured from it.
+   Record the head's home first, for the eyes **and the neck** (`setup.head_range`, then
+   `setup.head_range --name head_neck` with the head looking straight ahead). The servos report their position in
+   raw ticks; the home is what says which tick count means "straight ahead". Without a neck home the script has
+   to take wherever the neck happens to be as its reference, and the circle starts off sideways.
 2. On your computer, with the workspace in front of the robot clear and the arm free to move:
    `uv run python -m lerobot.felix_jr.calibration.collect tcp://<pi>:5555 --arm left --out-dir ~/cal_left`
    A window shows the camera with a cyan circle where the model predicts the tip. `n` moves the arm (slowly) to the

@@ -37,6 +37,9 @@ JOINT_LIMITS = {
     "wrist_roll": (-157.0, 163.0),
 }
 LIMIT_MARGIN = 0.8
+MAX_ROLL_DEG = (
+    100.0  # how far the wrist may roll to show the pinch point (a wrist camera's cable may limit it)
+)
 DEFAULT_DELTA = {  # +/- degrees around the seed pose
     "shoulder_pan": 25.0,
     "shoulder_lift": 20.0,
@@ -53,13 +56,15 @@ def plan_poses(
     candidates: int = 600,
     rng_seed: int = 0,
     keep: Callable[[dict[str, float]], bool] | None = None,
+    adjust: Callable[[dict[str, float]], dict[str, float] | None] | None = None,
 ) -> list[dict[str, float]]:
     """`n` arm poses (`{"shoulder_pan.pos": deg, ..., "gripper.pos": 1.0}`) spread around `seed_pose`.
 
     The first pose is the seed itself. `delta_scale` scales the region (`DEFAULT_DELTA`). Selection is
     farthest-point: each next pose is the candidate farthest from the ones already chosen, in joint space with
     each joint divided by its region size. `keep(pose)` can veto candidates (e.g. a tip that would be below the
-    table); the seed pose itself is always first. If too few candidates pass, fewer than `n` poses come back.
+    table); `adjust(pose)` can change a candidate (e.g. choose its wrist roll) or veto it by returning None. The seed
+    pose itself is always first, unchanged. If too few candidates pass, fewer than `n` poses come back.
     """
     rng = np.random.default_rng(rng_seed)
     seed = {**CENTER_POSE, **{k.removesuffix(".pos"): v for k, v in (seed_pose or {}).items()}}
@@ -86,6 +91,18 @@ def plan_poses(
             for row in pool
         ]
         pool = pool[np.array(allowed, dtype=bool)]
+    if adjust is not None:
+        adjusted = []
+        for row in pool:
+            pose = adjust(
+                {
+                    **{f"{j}.pos": float(v) for j, v in zip(ARM_JOINTS, row, strict=True)},
+                    "gripper.pos": CLOSED,
+                }
+            )
+            if pose is not None:
+                adjusted.append([pose[f"{j}.pos"] for j in ARM_JOINTS])
+        pool = np.array(adjusted).reshape(-1, len(ARM_JOINTS))
     chosen = [np.array([seed[j] for j in ARM_JOINTS])]
     distance = np.linalg.norm((pool - chosen[0]) / scale, axis=1) if len(pool) else np.array([])
     while len(chosen) < n and len(pool):
@@ -144,3 +161,23 @@ def center_head(
         move = np.clip(move, -250.0, 250.0)  # never a huge jump on a poor prediction
         ticks = np.array([min(max(t, lo), hi) for t, (lo, hi) in zip(ticks + move, bounds, strict=True)])
     return {n: int(round(t)) for n, t in zip(names, ticks, strict=True)}
+
+
+def best_roll(
+    model: CalibrationModel,
+    theta: dict[str, float],
+    pose: dict[str, float],
+    head_ticks: dict[str, int],
+    max_roll: float = MAX_ROLL_DEG,
+    step: float = 5.0,
+) -> tuple[float, float]:
+    """The wrist roll (degrees, within +/- `max_roll`) that best shows the pinch point, and the angle it leaves.
+
+    The angle is `CalibrationModel.hinge_axis_angle`: 0 when the camera sees the jaws from the side. The roll hardly
+    moves the tip (it is about 8 mm off the roll axis), so it can be chosen after the rest of the pose.
+    """
+    low, high = JOINT_LIMITS["wrist_roll"]
+    rolls = np.arange(max(-max_roll, low * LIMIT_MARGIN), min(max_roll, high * LIMIT_MARGIN) + 1e-9, step)
+    angles = [model.hinge_axis_angle({**pose, "wrist_roll.pos": float(r)}, head_ticks, theta) for r in rolls]
+    i = int(np.argmin(angles))
+    return float(rolls[i]), float(angles[i])
