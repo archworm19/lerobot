@@ -37,9 +37,8 @@ JOINT_LIMITS = {
     "wrist_roll": (-157.0, 163.0),
 }
 LIMIT_MARGIN = 0.8
-MAX_ROLL_DEG = (
-    100.0  # how far the wrist may roll to show the pinch point (a wrist camera's cable may limit it)
-)
+# How far the wrist may roll to show the pinch point (the joint limit with its margin is about -125 to +130).
+MAX_ROLL_DEG = 130.0
 DEFAULT_DELTA = {  # +/- degrees around the seed pose
     "shoulder_pan": 25.0,
     "shoulder_lift": 20.0,
@@ -170,14 +169,18 @@ def best_roll(
     head_ticks: dict[str, int],
     max_roll: float = MAX_ROLL_DEG,
     step: float = 5.0,
+    side: str = "either",
 ) -> tuple[float, float]:
     """The wrist roll (degrees, within +/- `max_roll`) that best shows the pinch point, and the angle it leaves.
 
-    The angle is `CalibrationModel.hinge_axis_angle`: 0 when the camera sees the jaws from the side. The roll hardly
+    The angle is `CalibrationModel.hinge_axis_angle` for `side`: 0 when the camera sees the jaws from that side of
+    the gripper ("either" accepts both sides). The roll hardly
     moves the tip (it is about 8 mm off the roll axis), so it can be chosen after the rest of the pose.
     """
     low, high = JOINT_LIMITS["wrist_roll"]
     rolls = np.arange(max(-max_roll, low * LIMIT_MARGIN), min(max_roll, high * LIMIT_MARGIN) + 1e-9, step)
-    angles = [model.hinge_axis_angle({**pose, "wrist_roll.pos": float(r)}, head_ticks, theta) for r in rolls]
+    angles = [
+        model.hinge_axis_angle({**pose, "wrist_roll.pos": float(r)}, head_ticks, theta, side) for r in rolls
+    ]
     i = int(np.argmin(angles))
     return float(rolls[i]), float(angles[i])

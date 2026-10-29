@@ -219,6 +219,13 @@ held-out error should be as good as the left arm's. If either is off, calibrate 
 `--head-from`. Fitting both arms' clicks together in one fit, with one shared head, would be slightly better
 still; it is not implemented.
 
+**The pinch point and the wrist camera.** The pinch point is only visible when the camera looks at the gripper
+from the side, and from the side *without* the wrist camera, whose board otherwise covers it. `collect` rolls the
+wrist of every pose to show that side (`--side positive`, the default, see `camera_calibration.md`). For the right
+arm this means rolls near the joint's limit (+120 to +130 degrees): keep an eye on the wrist camera's cable. If
+your wrist camera is mounted on the other side, use `--side negative`; `--side either` learns it from the first
+three clicks.
+
 `calibration.design` only plans poses; `collect --resume` continues an earlier folder.
 
 ## Checks and teleop (after either setup)

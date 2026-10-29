@@ -379,3 +379,171 @@ def test_a_neck_without_a_recorded_home_gets_a_wide_pan_prior(robot, tmp_path):
             collect_module.NECK_PRIOR_NO_HOME,
         )
         assert any("no recorded home" in note for note in session.notes)
+
+
+def earlier_fit(folder, signs=None):
+    """A `fit` output folder (only the JSON `collect --head-from` reads), as if the left arm had been calibrated."""
+    from lerobot.felix_jr.calibration.model import parameter_set
+
+    folder.mkdir(parents=True, exist_ok=True)
+    params = parameter_set("left")
+    values = {p.name: 0.001 * (i + 1) for i, p in enumerate(params)}
+    values["zero:head_tilt_joint"], values["pos:fixed_head_camera_link:y"] = 0.58, 0.021
+    sigma = {p.name: 0.5 * p.sigma for p in params}
+    sigma["rot:fixed_head_camera_link:roll"] = 1e-6  # absurdly sure: the floor applies
+    data = {
+        "settings": {
+            "arm": "left",
+            "intrinsics": INTRINSICS,
+            "head_signs": signs or SIGNS,
+            "head_refs": {"head_neck": 1900, "head_eyes": 2000},
+            "prior_overrides": {},
+        },
+        "parameters": values,
+        "sigma_post": sigma,
+    }
+    (folder / "kinematic_calibration.json").write_text(__import__("json").dumps(data))
+    return data
+
+
+def test_head_priors_take_the_head_and_camera_from_an_earlier_fit_and_nothing_else(tmp_path):
+    from lerobot.felix_jr.calibration.model import head_priors
+
+    data = earlier_fit(tmp_path / "left")
+    priors = head_priors(data)
+    assert set(priors) == {
+        "zero:head_pan_joint",
+        "zero:head_tilt_joint",
+        *{
+            f"pos:{j}:{a}"
+            for j in ("head_pan_joint", "head_tilt_joint", "fixed_head_camera_link")
+            for a in "xyz"
+        },
+        *{f"rot:fixed_head_camera_link:{a}" for a in ("roll", "pitch", "yaw")},
+    }  # no arm mount, arm joint or tip parameters: those belong to the arm
+    assert priors["zero:head_tilt_joint"] == (0.58, data["sigma_post"]["zero:head_tilt_joint"])
+    assert priors["rot:fixed_head_camera_link:roll"][1] == pytest.approx(np.radians(0.3))  # floored
+    assert priors["pos:fixed_head_camera_link:y"][0] == 0.021
+
+
+def test_the_right_arm_session_starts_from_the_left_arms_head(robot, tmp_path):
+    fake, client = robot
+    earlier_fit(tmp_path / "left")
+    with client.session():
+        session = CollectSession(
+            client,
+            "right",
+            tmp_path / "right",
+            lambda image: None,
+            None,
+            n_poses=4,
+            head_from=tmp_path / "left",
+        )
+        assert session.model.arm == "right"
+        assert session.model.head_refs == {
+            "head_neck": 1900,
+            "head_eyes": 2000,
+        }  # the left session's references
+        assert session.theta["zero:head_tilt_joint"] == 0.58
+        assert session.model.prior_overrides["pos:fixed_head_camera_link:y"][0] == 0.021
+        assert not any(name.startswith("so101:") for name in session.model.prior_overrides)
+        assert any("head and camera from" in note for note in session.notes)
+        assert not any("no recorded home" in note for note in session.notes)  # the references came with it
+        session.click(100, 100)
+    import json
+
+    saved = json.loads((tmp_path / "right" / "observations.json").read_text())["settings"]
+    assert saved["arm"] == "right" and saved["prior_overrides"]["zero:head_tilt_joint"][0] == 0.58
+
+
+def test_head_from_refuses_a_fit_made_with_other_head_directions(robot, tmp_path):
+    fake, client = robot
+    earlier_fit(tmp_path / "left", signs={"head_neck": 1, "head_eyes": 1})
+    with client.session(), pytest.raises(ValueError, match="directions changed"):
+        CollectSession(
+            client,
+            "right",
+            tmp_path / "right",
+            lambda image: None,
+            None,
+            n_poses=2,
+            head_from=tmp_path / "left",
+        )
+
+
+def test_the_hinge_axis_cosine_says_which_side_faces_the_camera():
+    model = make_model()
+    theta = {"zero:head_tilt_joint": 0.4}
+    ticks = {"head_neck": 2048, "head_eyes": 2048}
+    pose = {**{f"{j}.pos": 0.0 for j in ARM_JOINTS}, "shoulder_pan.pos": 30.0, "gripper.pos": 1.0}
+    for roll in (-90.0, -30.0, 0.0, 45.0, 120.0):
+        p = {**pose, "wrist_roll.pos": roll}
+        cosine = model.hinge_axis_cosine(p, ticks, theta)
+        positive = model.hinge_axis_angle(p, ticks, theta, "positive")
+        negative = model.hinge_axis_angle(p, ticks, theta, "negative")
+        assert positive + negative == pytest.approx(180.0)
+        assert model.hinge_axis_angle(p, ticks, theta) == pytest.approx(min(positive, negative))
+        assert (cosine > 0) == (positive < 90)
+    for side, sign in (("positive", 1), ("negative", -1)):
+        roll, _ = best_roll(model, theta, pose, ticks, max_roll=130, side=side)
+        assert sign * model.hinge_axis_cosine({**pose, "wrist_roll.pos": roll}, ticks, theta) > 0
+
+
+@pytest.mark.parametrize("side,sign", [("positive", 1), ("negative", -1)])
+def test_a_chosen_side_is_the_one_every_planned_pose_shows(robot, tmp_path, side, sign):
+    fake, client = robot
+    with client.session():
+        session = CollectSession(
+            client,
+            "right",
+            tmp_path / "cal",
+            lambda image: None,
+            None,
+            n_poses=8,
+            head_tilt_deg=30.0,
+            side=side,
+        )
+        head = client.head_state()
+        limits = collect_module.head_limits(head)
+        ticks = {n: head[n]["ticks"] for n in ("head_neck", "head_eyes")}
+        for pose in session.poses[1:]:
+            target = center_head(session.model, session.theta, pose, ticks, limits)
+            assert sign * session.model.hinge_axis_cosine(pose, target, session.theta) > 0
+        assert session.side == side
+
+
+def test_with_either_side_the_side_is_learned_from_the_clicks_and_the_rest_replanned(robot, tmp_path):
+    fake, client = robot
+    with client.session():
+        session = CollectSession(
+            client,
+            "left",
+            tmp_path / "cal",
+            lambda image: None,
+            None,
+            n_poses=40,
+            head_tilt_deg=30.0,
+            side="either",
+        )
+        clicked = 0
+        while clicked < collect_module.SIDE_MIN_CLICKS and session.pose_index < len(session.poses):
+            session.next_pose()
+            obs = session.current_observation()
+            if (
+                session.model.hinge_axis_cosine(obs.arm, obs.head_ticks, session.theta) < 0
+            ):  # only these show it
+                session.click(100, 100)
+                clicked += 1
+        assert clicked == collect_module.SIDE_MIN_CLICKS
+        assert session.side == "negative" and any("negative side" in note for note in session.notes)
+        head = client.head_state()
+        limits = collect_module.head_limits(head)
+        ticks = {n: head[n]["ticks"] for n in ("head_neck", "head_eyes")}
+        for pose in session.poses[session.pose_index :]:
+            target = center_head(session.model, session.theta, pose, ticks, limits)
+            assert session.model.hinge_axis_cosine(pose, target, session.theta) < 0
+    with client.session():  # resuming learns it again from the saved clicks
+        resumed = CollectSession(
+            client, "left", tmp_path / "cal", lambda image: None, None, n_poses=4, resume=True, side="either"
+        )
+        assert resumed.side == "negative"

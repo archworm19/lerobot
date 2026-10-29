@@ -276,14 +276,15 @@ class CalibrationModel:
         x_arm_tip = self.arm_tree.link_pose(TIP_FRAME, self.arm_angles(arm), arm_params)
         return (x_root_base @ self.T @ x_arm_tip)[:3, 3]
 
-    def hinge_axis_angle(
+    def hinge_axis_cosine(
         self, arm: dict[str, float], head_ticks: dict[str, int], theta: dict[str, float] | None = None
     ) -> float:
-        """How far (degrees, 0-90) the gripper's hinge axis is from the line of sight between the tip and the camera.
+        """Cosine of the angle between the gripper's hinge axis and the line of sight from the tip to the camera.
 
-        The hinge axis is the axis the moving jaw turns about, i.e. the normal of the plane the jaws open in. At 0 the
-        camera looks at the gripper from the side and sees the jaws meet; at 90 it looks along the jaw plane, and
-        the jaws hide the pinch point behind each other or behind the gripper body.
+        The hinge axis is the axis the moving jaw turns about (the SO-101 URDF's `gripper` joint axis), i.e. the
+        normal of the plane the jaws open in. Near +1 or -1 the camera sees the jaws meet from one side or the
+        other; near 0 it looks along the jaw plane and the pinch point hides. The sign says which side faces the
+        camera, which matters when something (a wrist camera) sits on one side of the gripper.
         """
         theta = theta or {}
         head_params, arm_params = self.split(theta)
@@ -292,8 +293,23 @@ class CalibrationModel:
         x_jaw = x_root_base @ self.T @ self.arm_tree.link_pose(hinge.child, self.arm_angles(arm), arm_params)
         axis = x_jaw[:3, :3] @ (hinge.axis / np.linalg.norm(hinge.axis))
         sight = self.camera_pose(head_ticks, theta)[:3, 3] - self.tip_in_root(arm, theta)
-        cosine = abs(float(axis @ sight)) / np.linalg.norm(sight)
-        return float(np.degrees(np.arccos(np.clip(cosine, 0.0, 1.0))))
+        return float(axis @ sight) / float(np.linalg.norm(sight))
+
+    def hinge_axis_angle(
+        self,
+        arm: dict[str, float],
+        head_ticks: dict[str, int],
+        theta: dict[str, float] | None = None,
+        side: str = "either",
+    ) -> float:
+        """How far (degrees) the gripper's hinge axis is from pointing at the camera (see `hinge_axis_cosine`).
+
+        `side` "either" allows both sides of the gripper (0-90 degrees); "positive" / "negative" require that side to
+        face the camera (0-180 degrees: past 90 the camera sees the other side).
+        """
+        cosine = self.hinge_axis_cosine(arm, head_ticks, theta)
+        signed = {"either": abs(cosine), "positive": cosine, "negative": -cosine}[side]
+        return float(np.degrees(np.arccos(np.clip(signed, -1.0, 1.0))))
 
     def predict(self, obs: Observation, theta: dict[str, float] | None = None) -> Prediction:
         """The tip's pixel, depth and camera-frame position for one observation's joints."""

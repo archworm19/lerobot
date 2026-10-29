@@ -77,6 +77,11 @@ NECK_RANGE_TICKS = (
 FACING_MAX_DEG = (
     50.0  # the gripper's hinge axis must be within this of the line of sight (pinch point visible)
 )
+# The side of the gripper that must face the camera. The wrist camera is mounted on the "negative" side (opposite
+# the SO-101 URDF's jaw hinge axis), where its board hides the pinch point: all 40 left-arm clicks of the first
+# session were seen from the positive side, and right-arm frames from the negative side showed only the board.
+DEFAULT_SIDE = "positive"
+SIDE_MIN_CLICKS = 3  # clicks, all seen from one side of the gripper, after which only that side is planned
 NECK_PRIOR_NO_HOME = np.radians(45.0)  # head pan zero prior sigma when the neck has no recorded home
 TABLE_CLEARANCE = 0.04  # meters the tip must stay above the table (the model is good to a centimeter or two)
 # cv2.waitKeyEx codes differ by platform (macOS, Linux GTK, Windows, Qt).
@@ -136,6 +141,8 @@ class CollectSession:
         bootstrap: bool = True,
         max_roll: float = MAX_ROLL_DEG,
         head_from: Path | None = None,
+        side: str = DEFAULT_SIDE,
+        learn_side: bool = True,
     ):
         """Connect the pieces and take a first frame.
 
@@ -144,6 +151,11 @@ class CollectSession:
         `bootstrap.seed_pose_for_view`, which shows the tip near the middle of the picture at the head's current
         pose. `head_tilt_deg` says how far below horizontal the camera looks now (default: estimated from the table
         plane in the depth image; `bootstrap=False` skips both). `notes` collects what was decided, for printing.
+
+        `side` is which side of the gripper must face the camera ("positive" by default, "negative" or "either"; see
+        `CalibrationModel.hinge_axis_cosine` and `DEFAULT_SIDE`). With "either" and `learn_side`, once `SIDE_MIN_CLICKS` clicks were
+        all seen from the same side, the rest of the poses are planned for that side only (a wrist camera on the
+        other side hides the pinch point).
 
         `head_from` is the output folder of an earlier `fit` (usually the other arm's): its head and camera
         parameters become this session's priors, with its head reference ticks, so the head is known from the first
@@ -155,6 +167,8 @@ class CollectSession:
             None  # the table's height in the root frame, if the depth image showed it
         )
         self.max_roll = max_roll
+        self.side, self.learn_side = side, learn_side
+        self.delta_scale, self.bootstrap = delta_scale, bootstrap
         self.arm_id = f"{arm}_arm"
         self.poses, self.pose_index = poses or [], 0
         self.max_vel, self.max_accel, self.head_step_deg = max_vel, max_accel, head_step_deg
@@ -198,6 +212,8 @@ class CollectSession:
                 )
             if bootstrap:
                 self._estimate_head_tilt(head_tilt_deg)
+        if self.observations:
+            self._learn_side(replan=False)
         if poses is None:
             self.poses = self._plan(n_poses, delta_scale, seed_pose, bootstrap)
         self.render()
@@ -320,7 +336,7 @@ class CollectSession:
             target = head_ticks or center_head(self.model, self.theta, pose, ticks, limits)
             if target is None:
                 return None
-            roll, angle = best_roll(self.model, self.theta, pose, target, self.max_roll)
+            roll, angle = best_roll(self.model, self.theta, pose, target, self.max_roll, side=self.side)
             if angle > FACING_MAX_DEG:
                 return None
             pose = {**pose, "wrist_roll.pos": roll}
@@ -331,7 +347,9 @@ class CollectSession:
             full = {**{f"{j}.pos": 0.0 for j in ARM_JOINTS}, **seed_pose, "gripper.pos": 1.0}
             seed_pose = adjust(full, ticks) or {
                 **full,
-                "wrist_roll.pos": best_roll(self.model, self.theta, full, ticks, self.max_roll)[0],
+                "wrist_roll.pos": best_roll(
+                    self.model, self.theta, full, ticks, self.max_roll, side=self.side
+                )[0],
             }
         poses = plan_poses(n, seed_pose, delta_scale, adjust=adjust)
         if len(poses) < n:
@@ -434,6 +452,27 @@ class CollectSession:
 
     # ---- clicks ---------------------------------------------------------------------------------------------
 
+    def _learn_side(self, replan: bool = True) -> None:
+        """If the clicks so far were all seen from one side of the gripper, plan only that side from now on."""
+        if not self.learn_side or self.side != "either" or len(self.observations) < SIDE_MIN_CLICKS:
+            return
+        cosines = [self.model.hinge_axis_cosine(o.arm, o.head_ticks, self.theta) for o in self.observations]
+        if all(c > 0 for c in cosines):
+            self.side = "positive"
+        elif all(c < 0 for c in cosines):
+            self.side = "negative"
+        else:
+            return
+        self._note(
+            f"all {len(cosines)} clicks saw the pinch point from the {self.side} side of the gripper: "
+            "planning only that side from now on"
+        )
+        remaining = len(self.poses) - self.pose_index
+        if replan and remaining > 0:
+            seed = self.poses[self.pose_index - 1] if self.pose_index > 0 else None
+            fresh = self._plan(remaining + 1, self.delta_scale, seed, self.bootstrap)[1:]
+            self.poses = self.poses[: self.pose_index] + fresh
+
     def click(self, u: float, v: float) -> Observation:
         """Record a click at pixel (u, v) of the current frame, save it, and refit."""
         obs = self.current_observation()
@@ -452,6 +491,7 @@ class CollectSession:
         save_observations(self.observations_path, self.model, self.observations)
         self.message = f"click {len(self.observations)} saved"
         self._refit()
+        self._learn_side()
         self.render()
         return obs
 
@@ -564,9 +604,16 @@ def main() -> None:
         "--max-roll",
         type=float,
         default=MAX_ROLL_DEG,
-        help="largest wrist roll used to show the pinch point, deg (100)",
+        help="largest wrist roll used to show the pinch point, deg (130)",
     )
     parser.add_argument("--resume", action="store_true", help="continue an earlier --out-dir")
+    parser.add_argument(
+        "--side",
+        choices=["either", "positive", "negative"],
+        default=DEFAULT_SIDE,
+        help="side of the gripper that must face the camera: positive (default; the wrist camera is on the "
+        "negative side), negative, or either (then learned from the first clicks)",
+    )
     parser.add_argument(
         "--head-from",
         type=Path,
@@ -602,6 +649,7 @@ def main() -> None:
             bootstrap=not args.no_bootstrap,
             max_roll=args.max_roll,
             head_from=args.head_from,
+            side=args.side,
         )
         for note in session.notes:
             print(note)
