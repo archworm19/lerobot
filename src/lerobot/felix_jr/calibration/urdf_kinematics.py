@@ -10,6 +10,7 @@ Perturbations are a dict `{parameter name: value}` applied on top of the URDF va
 - `pos:<joint>:x|y|z` (m): added to the joint's origin translation, in the parent link's frame.
 - `rot:<joint>:roll|pitch|yaw` (rad): an extra rotation of the joint's origin about the joint frame's own
   x / y / z axes, applied after the URDF's origin rotation (e.g. a camera mount that is slightly tilted).
+  Several of them on one joint combine into a single roll-pitch-yaw rotation (`Rz(yaw) Ry(pitch) Rx(roll)`).
 """
 
 import xml.etree.ElementTree as ET
@@ -45,6 +46,24 @@ def rotation_about_axis(axis: np.ndarray, angle: float) -> np.ndarray:
     return np.eye(3) + np.sin(angle) * kx + (1 - np.cos(angle)) * kx @ kx
 
 
+def rpy_from_rotation(rotation: np.ndarray) -> tuple[float, float, float]:
+    """Inverse of `rotation_from_rpy`: (roll, pitch, yaw) with pitch in [-pi/2, pi/2]."""
+    sin_pitch = -rotation[2, 0]
+    if (
+        abs(sin_pitch) > 1 - 1e-12
+    ):  # gimbal lock: only roll - yaw (or roll + yaw) is determined; put it in yaw
+        return (
+            0.0,
+            float(np.copysign(np.pi / 2, sin_pitch)),
+            float(np.arctan2(-rotation[0, 1], rotation[1, 1])),
+        )
+    return (
+        float(np.arctan2(rotation[2, 1], rotation[2, 2])),
+        float(np.arcsin(sin_pitch)),
+        float(np.arctan2(rotation[1, 0], rotation[0, 0])),
+    )
+
+
 def pose(rotation: np.ndarray, translation: np.ndarray) -> np.ndarray:
     """4x4 homogeneous transform from a 3x3 rotation and a translation."""
     out = np.eye(4)
@@ -69,7 +88,13 @@ class Joint:
     child: str
     xyz: np.ndarray
     rpy: np.ndarray
+    # The joint's motion axis, as a vector in the joint (= child link) frame. A revolute/continuous joint
+    # rotates the child about this axis; a prismatic joint slides it along this axis. Not necessarily unit
+    # length (the code normalizes it), and unused for fixed/floating joints. URDF defaults to x if absent.
     axis: np.ndarray
+    # Position limits from `<limit lower upper>`: rad for revolute, m for prismatic. They bound the joint
+    # position q (the commanded range), not the link's geometry. None when the URDF gives none (continuous
+    # and fixed joints). Nothing here enforces them: `joint_transform` happily accepts any q.
     lower: float | None = None
     upper: float | None = None
 
@@ -120,15 +145,37 @@ class UrdfTree:
     def joint_transform(
         self, joint: Joint, q: float = 0.0, perturb: dict[str, float] | None = None
     ) -> np.ndarray:
-        """X_parent_child for `joint` at position `q`, with any perturbations of that joint applied."""
+        """The pose of this joint's child link in its parent link's frame, at joint position `q`.
+
+        This is a single link-to-link step. It does not know about the rest of the tree; `link_pose`
+        multiplies these steps along the chain from the root. In Drake notation, with parent P and child C:
+
+            X_PC(q) = X_PC(0) @ X_C0C(q)
+
+        - X_PC(0) is the URDF `<origin>` (translation `xyz`, rotation `rpy`), plus any `pos:` / `rot:`
+          perturbations. It is where the child's frame sits when the joint is at zero.
+        - X_C0C(q) is the joint's own motion, in the child's frame: a rotation by `q + zero:<joint>` about
+          `joint.axis` (revolute, continuous) or a translation of `q + zero:<joint>` along it (prismatic).
+          Fixed and floating joints have no motion term, so `q` is ignored.
+
+        `perturb` is the same flat `{name: value}` dict described in the module docstring (`zero:`, `pos:`,
+        `rot:` keys). Only keys for this joint are read; keys for other joints and missing keys (= 0) are
+        ignored. A flat dict, rather than a dataclass, keeps parameter names usable as plain strings for
+        the sensitivity analysis, which enumerates and perturbs them one at a time.
+
+        Returns a 4x4 homogeneous matrix `[[R, p], [0, 1]]`, X_PC: it maps points expressed in the child
+        frame to the parent frame (`p_P = X_PC @ p_C`).
+        """
         p = perturb or {}
         name = joint.name
         xyz = joint.xyz + np.array([p.get(f"pos:{name}:{a}", 0.0) for a in ("x", "y", "z")])
         rot = rotation_from_rpy(*joint.rpy)
         extra = [p.get(f"rot:{name}:{a}", 0.0) for a in ("roll", "pitch", "yaw")]
         if any(extra):
+            # Right-multiply: the extra rotation is about the joint frame's own axes, after the URDF rotation.
             rot = rot @ rotation_from_rpy(*extra)
-        x = pose(rot, xyz)
+        x = pose(rot, xyz)  # X_PC(0)
+        # Right-multiply again: the joint moves about its axis, which is expressed in the child frame.
         if joint.type in ("revolute", "continuous"):
             angle = q + p.get(f"zero:{name}", 0.0)
             x = x @ pose(rotation_about_axis(joint.axis, angle), np.zeros(3))
@@ -141,7 +188,14 @@ class UrdfTree:
     def link_pose(
         self, link: str, q: dict[str, float] | None = None, perturb: dict[str, float] | None = None
     ) -> np.ndarray:
-        """X_root_link. `q` maps joint names to positions (missing joints are at 0)."""
+        """X_root_link: the 4x4 pose of `link`'s frame in the root link's frame.
+
+        Forward kinematics: starts at the identity (X_root,root) and right-multiplies each joint's
+        X_parent,child down the chain, so after joints J1..Jn the result is
+        X_root,L = X_root,P1 @ X_P1,P2 @ ... @ X_Pn,L.
+        `q` maps joint names to positions (rad / m; missing joints are at 0). `perturb` is the dict
+        described in the module docstring.
+        """
         q = q or {}
         x = np.eye(4)
         for joint in self.chain(link):

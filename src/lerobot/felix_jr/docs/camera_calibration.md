@@ -124,6 +124,19 @@ URDF references but we do not have, and the calibration needs to perturb joint o
 which `RobotKinematics` does not expose (only joint angles). For runtime FK and IK on the real robot,
 placo / `RobotKinematics` remain the natural choice once meshes are available.
 
+**Cross-checked against placo.** `tests/felix_jr/test_urdf_kinematics_vs_placo.py` compares our numpy forward
+kinematics with placo (and with LeRobot's `RobotKinematics`) on a mesh-stripped copy of `xlerobot.urdf`: random
+positions of every joint, five frames, agreement to about 1e-15 m. It also applies each kind of parameter error
+(joint zero offset, origin position, mount rotation) both our way and by patching the URDF text and loading the
+patched copy in placo, and checks the projected pixels end to end. Two things the tests turned up:
+
+- **placo cannot use `xlerobot.urdf` as it is.** The URDF's root `joint_0` is `floating`, and placo adds its own
+  free base, which scrambles its joint indexing: `set_joint("head_tilt_joint", ...)` writes to the wrong slot
+  and no frame moves (and `get_joint_limits` returns another joint's limits). Setting `joint_0` to `fixed`, as
+  our numpy code treats it, fixes it. Do the same before using `RobotKinematics` on this URDF.
+- **Combining rotation errors:** several rotation errors on one joint are applied as one roll-pitch-yaw rotation
+  (`Rz(yaw) Ry(pitch) Rx(roll)`); applying them one after another gives a different result.
+
 ## Step 2: Repeatability test (hardware)
 
 **Question:** how far does the same commanded pose land from itself? This is the floor: constant offsets
