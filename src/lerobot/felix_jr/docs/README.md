@@ -17,8 +17,9 @@ Serial ports for each arm are in [current_ports.md](current_ports.md). Findings 
 | `home.py` | Shared: follower construction (`make_follower`), home pose files, the trapezoid-profile `move_all`. |
 | `depth.py` | Shared: align RealSense depth to the color image, depth-edge overlays and checks. |
 | `scene.py`, `overlay.py` | Shared: ask a color + depth capture for 3D points, projections and path checks; draw paths on it. |
+| `ports.py` | Shared: the saved arm-to-port cache (`setup.find_ports` writes it, `resolve(robot_id)` reads it). |
 | `base_follower.py` | Shared: `SO101FollowerWithBase` (per-joint P gains, optional wheel servos). |
-| `setup/` | One-time, per-robot: `record_home`, `wheels`, `head`. |
+| `setup/` | One-time, per-robot: `find_ports`, `record_home`, `wheels`, `head`. |
 | `checks/` | Hardware sign-of-life tests: `wiggle_test`, `wheel_test`. |
 | `diagnostics/` | Tuning and debugging: `lift_test`, `dump_servo_config`, `set_servo_id`, `realsense_check`, `alignment_from_saved`. |
 | `server/` | Robot server for the Raspberry Pi and its client (`FelixClient`); plan in `server_plan.md`. |
@@ -29,6 +30,15 @@ Serial ports for each arm are in [current_ports.md](current_ports.md). Findings 
 ## First-time order
 
 Use each arm's own port and id (`left_arm`, `right_arm`).
+
+0. **Find each arm's port.** Plug in both arms' USB cables, then:
+   `uv run python -m lerobot.felix_jr.setup.find_ports`
+   It asks you to unplug one arm's USB cable at a time (the servo power can stay on), sees which port vanished,
+   waits for you to plug it back in, and prints the result, e.g. `/dev/tty.usbmodem5AE60837301 right_arm`. Use
+   those names wherever a `<PORT>` appears below, and copy them into [current_ports.md](current_ports.md).
+   The ports are remembered by the USB adapter's serial number, so `find_ports --show` still reports the right
+   port name if it changes after a replug (on the Pi `/dev/ttyACM0` and `/dev/ttyACM1` can swap). Without the
+   script, LeRobot's `uv run lerobot-find-port` does the same for one cable at a time, without saving anything.
 
 1. **Calibrate each arm** with LeRobot's own tool (writes the calibration file this code relies on):
    `uv run lerobot-calibrate --robot.type=so101_follower --robot.port=<PORT> --robot.id=<ID>`
