@@ -119,12 +119,13 @@ class FelixClient:
         """Joint positions: `{"left_arm": {"shoulder_pan.pos": deg, ...}, ..., "moving": bool}`."""
         return self._call("get_state")[0]["state"]
 
-    def capture(self, color_format: str = "png") -> Capture:
+    def capture(self, color_format: str = "png", after: float | None = None) -> Capture:
         """The latest color + depth frames with the camera calibration and joint state.
 
-        `color_format` "jpeg" trades some quality for a smaller message.
+        `color_format` "jpeg" trades some quality for a smaller message. With `after` (the `done_at` of a head
+        move), the server waits for a frame taken after that time, so the image shows the result of the move.
         """
-        result, frames, meta = self._call("capture", color_format=color_format)
+        result, frames, meta = self._call("capture", color_format=color_format, after=after)
         images = {m["name"]: decode_image(data) for m, data in zip(meta, frames, strict=True)}
         return Capture(
             color=images["color"],
@@ -133,3 +134,23 @@ class FelixClient:
             state=result["state"],
             timestamp=result["timestamp"],
         )
+
+    def head_state(self) -> dict[str, dict[str, Any]]:
+        """Per head servo: `ticks` now, `sign`, and the recorded `limit_pos`, `limit_neg`, `home`, `level`."""
+        return self.get_state()["head"]
+
+    def head_move(self, name: str, delta_deg: float | None = None, to: str | None = None) -> dict[str, Any]:
+        """Move head servo `name` (`head_eyes` tilts, `head_neck` turns).
+
+        Give `delta_deg` (positive = down / left) or `to` ("home" / "level"). Blocks until it settles. Returns
+        `{ticks, goal, clamped, reached, done_at}`.
+        """
+        return self._call("head_move", name=name, delta_deg=delta_deg, to=to)[0]
+
+    def head_record(self, name: str, what: str) -> dict[str, Any]:
+        """Save head servo `name`'s present position as `what` (`limit_pos`, `limit_neg`, `home`, `level`)."""
+        return self._call("head_record", name=name, what=what)[0]
+
+    def head_torque_limit(self, name: str, limit: int) -> dict[str, Any]:
+        """Cap head servo `name`'s torque, 1-1000 (1000 = no cap), until it loses power."""
+        return self._call("head_torque_limit", name=name, limit=limit)[0]

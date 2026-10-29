@@ -8,9 +8,14 @@
 Commands (see `protocol.py` for the message format):
 
 - `hello`: protocol version, git commit and which parts of the robot exist.
-- `get_state`: joint positions of every arm.
-- `capture` (`color_format`: "png" | "jpeg"): the latest color + raw depth frames, the camera calibration and the
-  joint state at that moment.
+- `get_state`: joint positions of every arm, and the head servos' ticks with their recorded range.
+- `capture` (`color_format`: "png" | "jpeg", `after`: server time): the latest color + raw depth frames, the
+  camera calibration and the joint state at that moment. With `after` (e.g. a head move's `done_at`) it waits for
+  a frame taken after that time.
+- `head_move` (`name`, and `delta_deg` or `to`): move a head servo (positive = down / left), clamped to its
+  recorded limits; returns when it has settled, with `done_at` for `capture(after=...)`.
+- `head_record` (`name`, `what`): save the servo's present position as `limit_pos`, `limit_neg`, `home` or `level`.
+- `head_torque_limit` (`name`, `limit`): cap a head servo's torque (1-1000) until it loses power.
 
 Only the server's own thread touches the hardware. When motion commands arrive, they will run on a worker thread
 so that `stop` and `get_state` can still be answered; the ROUTER socket already allows that.
@@ -115,15 +120,36 @@ class RobotServer:
         """Joint state of every arm."""
         return {"state": self.hardware.state(), "timestamp": time.time()}, []
 
-    def cmd_capture(self, color_format: str = "png") -> tuple[dict[str, Any], list[dict]]:
+    def cmd_capture(
+        self, color_format: str = "png", after: float | None = None
+    ) -> tuple[dict[str, Any], list[dict]]:
         """The latest color and raw depth images (binary frames), calibration and joint state."""
-        snap = self.hardware.capture()
+        snap = self.hardware.capture(after=after)
         frames = [
             {"name": "color", "format": color_format, "data": encode_image(snap.color, color_format)},
             {"name": "raw_depth", "format": "png", "data": encode_image(snap.raw_depth, "png")},
         ]
         result = {"timestamp": snap.timestamp, "calibration": snap.calibration, "state": snap.state}
         return result, frames
+
+    def _head(self):
+        if self.hardware.head is None:
+            raise RuntimeError("this robot has no head servos")
+        return self.hardware.head
+
+    def cmd_head_move(
+        self, name: str, delta_deg: float | None = None, to: str | None = None
+    ) -> tuple[dict[str, Any], list[dict]]:
+        """Move head servo `name` by `delta_deg` or to a recorded position `to`; see `HeadController.move`."""
+        return self._head().move(name, delta_deg=delta_deg, to=to), []
+
+    def cmd_head_record(self, name: str, what: str) -> tuple[dict[str, Any], list[dict]]:
+        """Record head servo `name`'s position as `what`; see `HeadController.record`."""
+        return self._head().record(name, what), []
+
+    def cmd_head_torque_limit(self, name: str, limit: int) -> tuple[dict[str, Any], list[dict]]:
+        """Cap head servo `name`'s torque; see `HeadController.torque_limit`."""
+        return self._head().torque_limit(name, limit), []
 
 
 def main() -> None:

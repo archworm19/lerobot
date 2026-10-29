@@ -17,7 +17,12 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from lerobot.felix_jr.server.head import HeadController, RangeStore
+
 DEFAULT_LIBREALSENSE_BUILD = "/home/zcecere/CodeRepository/librealsense/build"
+# A frame is only trusted to show the scene after a move once it arrived this long (seconds) after the move
+# finished: the camera's exposure and the USB transfer both lag the frame's arrival time.
+FRAME_LATENCY_S = 0.1
 
 
 @dataclass
@@ -46,22 +51,91 @@ class Hardware(Protocol):
     def state(self) -> dict[str, Any]:
         """Joint positions per arm (`{"left_arm": {"shoulder_pan.pos": deg, ...}}`) and `"moving": bool`."""
 
-    def capture(self) -> Snapshot:
-        """The latest camera frames together with the current joint state."""
+    def capture(self, after: float | None = None) -> Snapshot:
+        """The latest camera frames together with the current joint state.
+
+        With `after` (a server `time.time()` value, e.g. a move's `done_at`), waits for a frame that arrived
+        more than `FRAME_LATENCY_S` later, so the image shows the scene after the move.
+        """
 
     def close(self) -> None:
         """Release the camera and the serial ports."""
 
+    # `head`: a `HeadController`, or None if the robot has no head servos. Set by the implementations.
+    head: HeadController | None
+
+
+class FakeHeadBackend:
+    """Head servos that reach any goal instantly. They start at raw 2048 (mid-range)."""
+
+    def __init__(self, names: tuple[str, ...] = ("head_neck", "head_eyes")):
+        """Simulated servos called `names`."""
+        self._ticks = dict.fromkeys(names, 2048)
+        self.torque_limits = dict.fromkeys(names, 1000)
+
+    def names(self) -> list[str]:
+        """See `HeadBackend.names`."""
+        return list(self._ticks)
+
+    def read_ticks(self, name: str) -> int:
+        """See `HeadBackend.read_ticks`."""
+        return self._ticks[name]
+
+    def write_goal(self, name: str, ticks: int) -> None:
+        """See `HeadBackend.write_goal`."""
+        self._ticks[name] = int(ticks)
+
+    def write_torque_limit(self, name: str, limit: int) -> None:
+        """See `HeadBackend.write_torque_limit`."""
+        self.torque_limits[name] = int(limit)
+
+
+class BusHeadBackend:
+    """The head servos of a follower with `with_head=True`, in raw ticks through its motor bus."""
+
+    def __init__(self, robot):
+        """`robot`: a connected `SO101FollowerWithBase` with head servos."""
+        self.robot = robot
+
+    def names(self) -> list[str]:
+        """See `HeadBackend.names`."""
+        return list(self.robot.head_motors)
+
+    def read_ticks(self, name: str) -> int:
+        """See `HeadBackend.read_ticks`."""
+        return int(self.robot.bus.read("Present_Position", name, normalize=False))
+
+    def write_goal(self, name: str, ticks: int) -> None:
+        """See `HeadBackend.write_goal`."""
+        self.robot.bus.write("Goal_Position", name, int(ticks), normalize=False)
+
+    def write_torque_limit(self, name: str, limit: int) -> None:
+        """See `HeadBackend.write_torque_limit`."""
+        self.robot.bus.write("Torque_Limit", name, int(limit), normalize=False)
+
 
 class FakeHardware:
-    """A robot with a synthetic scene: a flat wall 1 m away with a box 0.6 m away, and arms at rest."""
+    """A robot with a synthetic scene: a flat wall 1 m away with a box 0.6 m away, and arms at rest.
+
+    The eyes servo tilts the picture: each tick away from the middle shifts the image by `PIXELS_PER_TICK`
+    rows, so a head move visibly changes what `capture` returns.
+    """
 
     WIDTH, HEIGHT, FX = 320, 240, 200.0
+    PIXELS_PER_TICK = 0.1
 
-    def __init__(self, arms: tuple[str, ...] = ("left_arm", "right_arm")):
-        """A fake robot with arms named `arms`."""
+    def __init__(
+        self, arms: tuple[str, ...] = ("left_arm", "right_arm"), head_range_path: Path | None = None
+    ):
+        """A fake robot with arms named `arms`.
+
+        `head_range_path` is where the head's recorded range is kept (default: not saved).
+        """
         self.arms = arms
         self.captures = 0
+        self.head: HeadController | None = HeadController(
+            FakeHeadBackend(), {"head_neck": -1, "head_eyes": 1}, RangeStore(head_range_path)
+        )
 
     def info(self) -> dict[str, Any]:
         """See `Hardware.info`."""
@@ -72,10 +146,13 @@ class FakeHardware:
         joints = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
         arm = {f"{j}.pos": 0.0 for j in joints}
         arm["gripper.pos"] = 50.0
-        return {**{name: dict(arm) for name in self.arms}, "moving": False}
+        out = {**{name: dict(arm) for name in self.arms}, "moving": False}
+        if self.head is not None:
+            out["head"] = self.head.state()
+        return out
 
-    def capture(self) -> Snapshot:
-        """See `Hardware.capture`."""
+    def capture(self, after: float | None = None) -> Snapshot:
+        """See `Hardware.capture` (a fake frame is always fresh, so `after` changes nothing)."""
         self.captures += 1
         h, w = self.HEIGHT, self.WIDTH
         color = np.zeros((h, w, 3), dtype=np.uint8)
@@ -84,6 +161,9 @@ class FakeHardware:
         depth = np.full((h, w), 1000, dtype=np.uint16)  # 1 raw unit = 1 mm
         depth[80:160, 120:200] = 600
         depth[20:40, 20:60] = 0  # a hole with no depth
+        if self.head is not None:
+            shift = round((self.head.backend.read_ticks("head_eyes") - 2048) * self.PIXELS_PER_TICK)
+            color, depth = np.roll(color, shift, axis=0), np.roll(depth, shift, axis=0)
         intr = {"width": w, "height": h, "fx": self.FX, "fy": self.FX, "ppx": w / 2, "ppy": h / 2}
         calibration = {
             "depth_scale_m_per_unit": 0.001,
@@ -141,12 +221,18 @@ class _LatestFrames:
                 with self._lock:
                     self._error = e
 
-    def get(self, wait_s: float = 5.0) -> tuple[np.ndarray, np.ndarray, float]:
+    def get(self, after: float | None = None, wait_s: float = 5.0) -> tuple[np.ndarray, np.ndarray, float]:
+        """The newest (color, depth, arrival time).
+
+        With `after`, waits for one that arrived more than `FRAME_LATENCY_S` after that time. Raises
+        RuntimeError after `wait_s` seconds without a usable frame.
+        """
         deadline = time.time() + wait_s
+        newer_than = 0.0 if after is None else after + FRAME_LATENCY_S
         while True:
             with self._lock:
                 latest, error = self._latest, self._error
-            if latest is not None and time.time() - latest[2] < 2.0:
+            if latest is not None and time.time() - latest[2] < 2.0 and latest[2] > newer_than:
                 return latest
             if time.time() > deadline:
                 raise RuntimeError(f"no recent camera frame: {error!r}")
@@ -179,6 +265,7 @@ class RealHardware:
         )  # imported here so a camera-only run needs no serial libs
 
         self.robots = {}
+        self.head: HeadController | None = None
         self._frames: _LatestFrames | None = None
         self._pipeline = None
         self._calibration: dict[str, Any] | None = None
@@ -189,6 +276,12 @@ class RealHardware:
                 robot = make_follower(port, robot_id)
                 robot.connect(calibrate=False)
                 self.robots[robot_id] = robot
+                if getattr(robot, "with_head", False):
+                    self.head = HeadController(
+                        BusHeadBackend(robot),
+                        robot.head_signs,
+                        RangeStore(robot.calibration_dir / f"{robot.id}_head_range.json"),
+                    )
         except Exception:
             self.close()
             raise
@@ -241,13 +334,15 @@ class RealHardware:
         out: dict[str, Any] = {"moving": False}
         for robot_id, robot in self.robots.items():
             out[robot_id] = {k: float(v) for k, v in robot.get_observation().items()}
+        if self.head is not None:
+            out["head"] = self.head.state()
         return out
 
-    def capture(self) -> Snapshot:
+    def capture(self, after: float | None = None) -> Snapshot:
         """See `Hardware.capture`. Needs the camera."""
         if self._frames is None or self._calibration is None:
             raise RuntimeError("this server was started without a camera")
-        color, depth, timestamp = self._frames.get()
+        color, depth, timestamp = self._frames.get(after=after)
         return Snapshot(color, depth, self._calibration, self.state(), timestamp)
 
     def close(self) -> None:

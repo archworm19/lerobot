@@ -13,7 +13,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2  # 2: capture(after=), head_* commands, head state in get_state
 DEFAULT_PORT = 5555
 
 

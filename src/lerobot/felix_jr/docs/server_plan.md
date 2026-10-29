@@ -122,8 +122,14 @@ capture()            ----------------->  ...
 
 ## Status
 
-Built (`felix_jr/server/`, tests in `tests/felix_jr/test_server.py`): `protocol.py` (wire format), `hardware.py`
-(`FakeHardware`, `RealHardware`), `server.py` (`hello`, `get_state`, `capture`) and `client.py` (`FelixClient`).
+Built (`felix_jr/server/`, tests in `tests/felix_jr/test_server.py` and `test_head.py`): `protocol.py` (wire
+format, version 2), `hardware.py` (`FakeHardware`, `RealHardware`), `head.py` (`HeadController`: head moves in raw
+ticks with recorded limits, home and level), `server.py` and `client.py` (`FelixClient`).
+
+Commands so far: `hello`, `get_state` (arms and head), `capture` (with `after=<time>` to wait for a frame taken
+after a move finished, since the camera lags), `head_move`, `head_record`, `head_torque_limit`. Tried on the Pi:
+`hello`, `get_state` and `capture`. Not yet on the real hardware: the head commands and `capture(after=)`.
+`setup/head_range.py` is the first tool built on them.
 
 ```bash
 # on the Pi (add --fake to run with no hardware)

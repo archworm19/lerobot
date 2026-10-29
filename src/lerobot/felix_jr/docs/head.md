@@ -64,11 +64,13 @@ The arm-only tools (teleop, `lift_test`, `dump_servo_config`) pass `with_head=Fa
 
 ## Not done yet
 
-- No range-of-motion calibration for the head. The servos are given a full-range placeholder, so their
-  normalized "degrees" are measured from raw 2048 and mean nothing until a real center and limits are recorded.
-  The URDF suggests about -43 deg (up) to +83 deg (down) for the tilt and a very large pan range; the real
+- The eyes' tilt range is set by `setup.head_range` (see the README, section 4): up limit, down limit, home and
+  level, saved as raw ticks in `<id>_head_range.json`. The neck has none yet (the script takes `--name head_neck`),
+  and the servos' normalized "degrees" in `get_observation` are still a full-range placeholder measured from
+  raw 2048. The URDF suggests about -43 deg (up) to +83 deg (down) for the tilt and a very large pan range; the real
   limits are set by the mount and the camera cable.
-- No head control API (a "look at this point" or `set_head_angles`).
+- Head control exists only through the robot server (`head_move`, `head_record`, `head_torque_limit`, raw ticks
+  with the saved signs, clamped to the recorded limits). There is no "look at this point" yet.
 - No check that the head moves correctly together with the arm teleop.
 
 ## About `xlerobot.urdf`

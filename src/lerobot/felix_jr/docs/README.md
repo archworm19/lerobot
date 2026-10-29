@@ -103,6 +103,10 @@ b. **Start the server on the Pi, camera only:**
      sudo udevadm trigger`) and replug the camera.
 c. **Check it from the laptop** (use the Pi's hostname or IP):
    `uv run python -m lerobot.felix_jr.checks.server_check tcp://<pi>:5555 --save-dir ~/pi_capture`
+
+   Typical: `uv run python -m lerobot.felix_jr.checks.server_check tcp://zcecere@ikeabot.local:5555 --save-dir ~/pi_c
+apture`
+
    Expect `camera True`, the arms list empty (camera only), and ten captures with their image shapes and times. Compare
    `--jpeg` against the default PNG: PNG is lossless but larger, so slower over Wi-Fi. A `TimeoutError` means
    the laptop can't reach port 5555 (wrong host, or a firewall on the Pi).
@@ -112,8 +116,29 @@ d. **Look at the capture.** `uv run python -m lerobot.felix_jr.diagnostics.align
 e. **Add the arms.** Stop the server, then start it with their ports (from `setup.find_ports --show`):
    `uv run python -m lerobot.felix_jr.server.server --left-port <LEFT_PORT> --right-port <RIGHT_PORT>`
    and rerun the `server_check` from step c. It should now list both arms and print their joint positions.
-   The server only reads the arms, it doesn't move them. The positions are only meaningful if the arm files from
-   section 2c are in place, so compare them against a pose you know (e.g. the arm resting at home).
+   The server doesn't move the arms, but connecting switches their torque on (they hold where they are), and
+   stopping the server (Ctrl+C) switches it off again, so the arms go limp: support them if they are not resting.
+   The positions are only meaningful if the arm files from section 2c are in place, so compare them against a
+   pose you know (e.g. the arm resting at home).
+
+### 4. Set the head's tilt range and home (once, needs the server)
+
+The eyes servo (it tilts the camera) has no range yet, so it could be driven into its mechanical stop or the camera
+cable. This script lets you tilt the head in small steps while watching the camera, and record the limits and home.
+
+1. Start the server on the Pi with the left arm's port (the head plugs into that board), as in section 3e:
+   `uv run python -m lerobot.felix_jr.server.server --left-port <LEFT_PORT>`
+2. On your computer:
+   `uv run python -m lerobot.felix_jr.setup.head_range tcp://<pi>:5555`
+   A window shows the camera image. Click it, then: up / down arrow tilts the head by `--step` degrees (default 2);
+   `u` records the **up limit**, `d` the **down limit**, `h` **home**, `z` **level** (camera looking straight
+   ahead, used later for hand-eye calibration); `g` / `l` go to home / level; `q` quits (going home first).
+3. Approach each end of the range slowly and record the limit *before* the camera cable or the mount is strained.
+   The script caps the servo's torque while it runs (`--torque-limit`, default 300 of 1000), so a blocked servo
+   only pushes gently.
+
+Everything recorded is saved on the Pi in `<id>_head_range.json` next to the arm's calibration, and later head
+moves are clamped to the limits. The script's docstring lists every option.
 
 ## Checks and teleop (after either setup)
 
