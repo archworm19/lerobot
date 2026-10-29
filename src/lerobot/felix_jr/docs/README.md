@@ -194,7 +194,30 @@ how to judge the result are in [camera_calibration.md](camera_calibration.md), "
 3. Fit: `uv run python -m lerobot.felix_jr.calibration.fit ~/cal_left/observations.json --out-dir ~/cal_left`
    Read `fit_report.md`: the held-out pixel error before and after, which parameters were learned, and the
    largest remaining errors (re-click or undo those). It also writes the calibrated URDFs.
-4. Do the right arm with `--arm right` (and the same head), then compare.
+4. Do the right arm, starting from what the left arm taught about the head and camera:
+   `uv run python -m lerobot.felix_jr.calibration.collect tcp://<pi>:5555 --arm right --out-dir ~/cal_right --head-from ~/cal_left`
+   then `calibration.fit ~/cal_right/observations.json --out-dir ~/cal_right` as before. See below.
+
+**Reusing the left arm's head and camera for the right arm (`--head-from`).** The head, its servos and the camera
+are the same whichever arm is being clicked, so the left fit already knows most of what matters for the right
+arm's first frames (the head's zero offsets, the camera's offsets on the head). `--head-from <left fit folder>`
+reads `kinematic_calibration.json` from that folder and:
+
+- uses its head and camera parameters as *priors* for the right arm: mean = the left fit's value, sigma = the left
+  fit's posterior sigma (at least 0.3 deg / 0.5 mm). The right arm's clicks can still correct them, but not
+  without evidence. The arm mount, arm joints and tip are not carried over: they belong to each arm.
+- uses the left session's head reference ticks, so its zero offsets mean the same thing now. The servos'
+  encoders are absolute, so this holds across sessions and power cycles; it is why a missing neck home does not
+  matter here.
+- skips the tilt estimate from the table (the left fit knows the tilt better); the table is still measured, to
+  keep poses above it.
+
+Only do this if nothing on the head changed in between: the camera was not remounted, the head not taken apart,
+the head servos not re-set-up (the script refuses if the saved head directions changed). Check the right fit's
+report: the head parameters should land within about two of their (left) sigmas of the left values, and the
+held-out error should be as good as the left arm's. If either is off, calibrate the right arm without
+`--head-from`. Fitting both arms' clicks together in one fit, with one shared head, would be slightly better
+still; it is not implemented.
 
 `calibration.design` only plans poses; `collect --resume` continues an earlier folder.
 

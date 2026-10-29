@@ -404,3 +404,25 @@ def load_observations(path: Path) -> tuple[CalibrationModel, list[Observation]]:
         for i, o in enumerate(data["observations"])
     ]
     return model, observations
+
+
+def head_priors(
+    calibration: dict[str, Any], floor_deg: float = 0.3, floor_mm: float = 0.5
+) -> dict[str, tuple[float, float]]:
+    """Priors `{name: (mean, sigma)}` for the head and camera parameters, from an earlier fit's results.
+
+    `calibration` is a `kinematic_calibration.json` (`fit.py`). The head and camera are shared by both arms, so
+    what one arm's clicks taught about them is the starting point for the other arm: the mean is the fitted value
+    and the sigma its posterior sigma, at least `floor_deg` / `floor_mm` (a fit is never quite as sure as its
+    covariance says). Arm, mount and tip parameters are not included: they belong to the arm.
+    """
+    names = {p.name for p in parameter_set(calibration["settings"]["arm"]) if p.group == "head"}
+    out = {}
+    for name in sorted(names & set(calibration["parameters"])):
+        angular = name.startswith(("zero:", "rot:"))
+        floor = np.radians(floor_deg) if angular else floor_mm / 1000.0
+        out[name] = (
+            float(calibration["parameters"][name]),
+            max(float(calibration["sigma_post"][name]), floor),
+        )
+    return out

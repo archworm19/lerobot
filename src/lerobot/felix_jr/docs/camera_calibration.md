@@ -223,6 +223,14 @@ you did not collect (the workspace where the VLM will plan), by clicking a few m
 (4) Check the report's "largest remaining errors": a mis-click shows up there, and `u` in `collect` undoes the
 last click. (5) A parameter marked "no" in the Learned column was not determined; do not read meaning into it.
 
+**First result (left arm, 40 clicks).** Pixel error on the 8 held-out clicks: about 498 px before calibration
+(mostly the unknown neck reference) and 2.0 px after, with click noise of about 3 px; all clicks 2.7 px RMS, worst
+5.5 px. Learned: head tilt zero +33.3 deg (+/-2.0), head pan zero -5.8 deg (+/-4.7), the camera's lateral offset
+**+20.9 mm (+/-6.4)**, as suspected from the RealSense adapter, camera roll +1.0 and yaw +3.5 deg, the SO-101 mount
+offset (+23 mm sideways, -14 mm down), the elbow zero -3.5 deg, and the tip offset (z -9 mm). Most joint origin
+positions stayed at their priors, as expected. The right arm can start from the left arm's head and camera
+(`collect --head-from`, README section 6).
+
 **Not done yet:** the second arm (fit its own mount, joint and tip parameters with the head and camera fixed), a
 marker instead of clicks, using depth at the click (`--use-depth`, off by default because dark shiny parts give
 poor depth), and applying the result to the runtime (projecting planned trajectories into the image).

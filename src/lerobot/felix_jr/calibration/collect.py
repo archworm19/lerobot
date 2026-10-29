@@ -35,6 +35,7 @@ inside a client session, so if you press Ctrl+C or the script dies, the robot go
 """
 
 import argparse
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,7 @@ from lerobot.felix_jr.calibration.model import (
     TICKS_PER_TURN,
     CalibrationModel,
     Observation,
+    head_priors,
     load_observations,
     save_observations,
 )
@@ -133,6 +135,7 @@ class CollectSession:
         head_tilt_deg: float | None = None,
         bootstrap: bool = True,
         max_roll: float = MAX_ROLL_DEG,
+        head_from: Path | None = None,
     ):
         """Connect the pieces and take a first frame.
 
@@ -141,6 +144,10 @@ class CollectSession:
         `bootstrap.seed_pose_for_view`, which shows the tip near the middle of the picture at the head's current
         pose. `head_tilt_deg` says how far below horizontal the camera looks now (default: estimated from the table
         plane in the depth image; `bootstrap=False` skips both). `notes` collects what was decided, for printing.
+
+        `head_from` is the output folder of an earlier `fit` (usually the other arm's): its head and camera
+        parameters become this session's priors, with its head reference ticks, so the head is known from the first
+        frame and only this arm's parameters are left to learn (see `model.head_priors`).
         """
         self.client, self.arm, self.out_dir, self.show = client, arm, out_dir, show
         self.notes: list[str] = []
@@ -165,6 +172,11 @@ class CollectSession:
             self.message = f"resumed with {len(self.observations)} clicks"
             self.theta.update({name: mean for name, (mean, _) in self.model.prior_overrides.items()})
             self._refit()
+        elif head_from is not None:
+            self.observations = []
+            self._load_head(Path(head_from), client.head_state())
+            if bootstrap:
+                self._estimate_table()
         else:
             head = client.head_state()
             self.model = CalibrationModel(
@@ -195,6 +207,45 @@ class CollectSession:
     def _note(self, text: str) -> None:
         self.notes.append(text)
         self.message = text
+
+    def _load_head(self, folder: Path, head: dict[str, dict[str, Any]]) -> None:
+        """Build the model with the head and camera of an earlier fit (see `__init__`, `head_from`)."""
+        calibration = json.loads((folder / "kinematic_calibration.json").read_text())
+        earlier = calibration["settings"]
+        signs_now = {n: head[n]["sign"] for n in HEAD_JOINTS}
+        if signs_now != earlier["head_signs"]:
+            raise ValueError(
+                f"the head's saved directions changed since that fit ({earlier['head_signs']} then, {signs_now} now): "
+                "its head parameters do not apply; run without --head-from"
+            )
+        priors = head_priors(calibration)
+        self.model = CalibrationModel(
+            self.arm,
+            self.capture.calibration["color_intrinsics"],
+            earlier["head_signs"],
+            earlier["head_refs"],  # the same reference ticks, so its zero offsets mean the same thing here
+            prior_overrides=priors,
+        )
+        self.theta.update({name: mean for name, (mean, _) in priors.items()})
+        tilt_mean, tilt_sigma = priors["zero:head_tilt_joint"]
+        pan_mean, pan_sigma = priors["zero:head_pan_joint"]
+        lateral = priors["pos:fixed_head_camera_link:y"]
+        self._note(
+            f"head and camera from {folder} ({earlier['arm']} arm fit): tilt zero {np.degrees(tilt_mean):+.1f} "
+            f"+/- {np.degrees(tilt_sigma):.1f} deg, pan zero {np.degrees(pan_mean):+.1f} +/- {np.degrees(pan_sigma):.1f} deg, "
+            f"camera lateral offset {1000 * lateral[0]:+.1f} +/- {1000 * lateral[1]:.1f} mm"
+        )
+
+    def _estimate_table(self) -> None:
+        """Find the table's height from the depth image (when the head is already known)."""
+        plane = estimate_up_vector(self.capture.scene())
+        if plane is None:
+            self._note("no table plane in the depth image: poses are not checked against the table")
+            return
+        ticks = {n: int(self.capture.state["head"][n]["ticks"]) for n in HEAD_JOINTS}
+        self.table_z = table_height(self.model, ticks, self.theta, plane)
+        base_z = self.model.head_tree.link_pose(self.model.base_link)[2, 3]
+        self.notes.append(f"the table is {100 * (base_z - self.table_z):.0f} cm below the arm base")
 
     def _estimate_head_tilt(self, pitch_deg: float | None) -> None:
         """Set the head tilt zero (as a prior with a 5 degree sigma) from the camera's pitch.
@@ -516,6 +567,11 @@ def main() -> None:
         help="largest wrist roll used to show the pinch point, deg (100)",
     )
     parser.add_argument("--resume", action="store_true", help="continue an earlier --out-dir")
+    parser.add_argument(
+        "--head-from",
+        type=Path,
+        help="fit output folder of the other arm: reuse its head and camera parameters (as priors)",
+    )
     args = parser.parse_args()
 
     window = "calibration (click the tip; n = next pose; q = quit)"
@@ -545,6 +601,7 @@ def main() -> None:
             head_tilt_deg=args.head_tilt_deg,
             bootstrap=not args.no_bootstrap,
             max_roll=args.max_roll,
+            head_from=args.head_from,
         )
         for note in session.notes:
             print(note)
