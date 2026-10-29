@@ -204,6 +204,14 @@ how to judge the result are in [camera_calibration.md](camera_calibration.md), "
 
 ## When something looks wrong
 
+- `ConnectionError ... Incorrect status packet!` while a script or the server starts: a garbled reply on the servo
+  bus. The followers retry the startup configuration three times, so this should now only appear if the bus is
+  really unhealthy (check the servo power supply and the cable). `PortInUseError: ... in use by another process
+  (pid N)` means another felix_jr program (often the previous server, which takes several seconds to shut down
+  because it goes to rest first) still holds the port; wait for it or stop it. Two programs on one bus corrupt each
+  other's packets, so every follower locks its serial port while connected (`port_lock.py`; LeRobot's own tools do
+  not take the lock).
+
 - `diagnostics.lift_test` drives only `shoulder_lift` and prints the servo's load, current and voltage per
   phase. `--p-lift N` and `--max-step DEG` override the P gain and the per-command cap for one run.
 - `diagnostics.dump_servo_config --left <PORT> --right <PORT>` prints the limit and gain registers of every arm

@@ -265,6 +265,7 @@ def main() -> None:
     if args.fake:
         hardware: Hardware = FakeHardware(**motion_kwargs)
     else:
+        from lerobot.felix_jr.port_lock import PortInUseError
         from lerobot.felix_jr.server.hardware import RealHardware
 
         arms = {
@@ -272,16 +273,19 @@ def main() -> None:
             for robot_id, port in (("left_arm", args.left_port), ("right_arm", args.right_port))
             if port
         }
-        hardware = RealHardware(
-            arms=arms,
-            camera=not args.no_camera,
-            width=args.width,
-            height=args.height,
-            fps=args.fps,
-            librealsense_build=args.librealsense_build,
-            home_on_exit=not args.no_home_on_exit,
-            **motion_kwargs,
-        )
+        try:
+            hardware = RealHardware(
+                arms=arms,
+                camera=not args.no_camera,
+                width=args.width,
+                height=args.height,
+                fps=args.fps,
+                librealsense_build=args.librealsense_build,
+                home_on_exit=not args.no_home_on_exit,
+                **motion_kwargs,
+            )
+        except PortInUseError as e:
+            raise SystemExit(str(e)) from None
     server = RobotServer(hardware)
     signal.signal(signal.SIGTERM, lambda *_: server.shutdown())  # systemd stop: same clean exit as Ctrl+C
     log.info(

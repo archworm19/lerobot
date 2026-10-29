@@ -14,6 +14,7 @@ range of motion is not calibrated yet. The extra servos are deliberately kept ou
 joints, so `move_all`, `record_home` and the wiggle test work unchanged.
 """
 
+import contextlib
 import json
 import logging
 import time
@@ -21,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
+from lerobot.felix_jr.port_lock import acquire_port_lock, release_port_lock
 from lerobot.motors import Motor, MotorCalibration, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus, OperatingMode
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
@@ -34,6 +36,9 @@ STEPS_PER_DEG = 4096.0 / 360.0
 # elbow_flex fall 10-35 deg behind when lifting the arm against gravity; 32 tracks within a few degrees
 # (see lift_test.py). The wrist joints carry little load and are fine at 16.
 DEFAULT_JOINT_P_GAINS = {"shoulder_lift": 32, "elbow_flex": 32}
+CONFIGURE_ATTEMPTS = (
+    3  # a bus glitch ("Incorrect status packet!") on the first writes after connecting is retried
+)
 
 
 class SO101FollowerWithBase(SO101Follower):
@@ -53,6 +58,7 @@ class SO101FollowerWithBase(SO101Follower):
         with_head: bool = False,
     ):
         super().__init__(config)
+        self._port_lock: int | None = None
         self.joint_p_gains = dict(DEFAULT_JOINT_P_GAINS if joint_p_gains is None else joint_p_gains)
         self.with_base = with_base
         self.with_head = with_head
@@ -102,7 +108,41 @@ class SO101FollowerWithBase(SO101Follower):
             )
         super().calibrate()
 
+    def connect(self, calibrate: bool = True) -> None:
+        """Connect, holding a lock on the serial port so no other felix_jr program uses it meanwhile.
+
+        Raises `port_lock.PortInUseError` if one does. The lock is released on `disconnect`, or here if
+        connecting fails.
+        """
+        if self._port_lock is None:
+            self._port_lock = acquire_port_lock(self.config.port)
+        try:
+            super().connect(calibrate)
+        except BaseException:
+            release_port_lock(self._port_lock)
+            self._port_lock = None
+            raise
+
     def configure(self) -> None:
+        """Configure the servos, retrying a few times: the first writes after connecting can hit a bus glitch.
+
+        Every write here is idempotent, so starting over after a `ConnectionError` is safe.
+        """
+        for attempt in range(1, CONFIGURE_ATTEMPTS + 1):
+            try:
+                self._configure_once()
+                return
+            except ConnectionError as e:
+                if attempt == CONFIGURE_ATTEMPTS:
+                    raise
+                logger.warning(
+                    f"{self}: configuring failed ({e}); retrying ({attempt}/{CONFIGURE_ATTEMPTS - 1})"
+                )
+                with contextlib.suppress(Exception):
+                    self.bus.port_handler.ser.reset_input_buffer()  # drop any half-received packet
+                time.sleep(0.3)
+
+    def _configure_once(self) -> None:
         self._configure_motors()
         if self.joint_p_gains:
             with self.bus.torque_disabled(list(self.joint_p_gains)):  # P gain lives in EEPROM
@@ -311,4 +351,8 @@ class SO101FollowerWithBase(SO101Follower):
             self.stop_base()  # velocity mode keeps spinning until told otherwise
         except Exception as e:
             logger.warning(f"Could not stop the base before disconnecting: {e!r}")
-        super().disconnect()
+        try:
+            super().disconnect()
+        finally:
+            release_port_lock(self._port_lock)  # taken in `connect`
+            self._port_lock = None
