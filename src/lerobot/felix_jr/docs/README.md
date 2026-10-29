@@ -21,9 +21,10 @@ Serial ports for each arm are in [current_ports.md](current_ports.md). Findings 
 | `setup/` | One-time, per-robot: `record_home`, `wheels`, `head`. |
 | `checks/` | Hardware sign-of-life tests: `wiggle_test`, `wheel_test`. |
 | `diagnostics/` | Tuning and debugging: `lift_test`, `dump_servo_config`, `set_servo_id`, `realsense_check`, `alignment_from_saved`. |
+| `server/` | Robot server for the Raspberry Pi and its client (`FelixClient`); plan in `server_plan.md`. |
 | `teleop/` | `spacemouse_teleop`. |
 | `calibration/` | Camera-to-robot calibration work: numpy URDF kinematics (`urdf_kinematics`) and the URDF sensitivity analysis (`sensitivity`); plan in `camera_calibration.md`. |
-| `docs/` | This file, `tuning_notes.md`, `realsense_m1.md`, `scene_tools.md`, `head.md`, `camera_calibration.md`, `sensitivity_default_urdf.md`, `current_ports.md`. |
+| `docs/` | This file, `tuning_notes.md`, `realsense_m1.md`, `scene_tools.md`, `head.md`, `camera_calibration.md`, `sensitivity_default_urdf.md`, `server_plan.md`, `current_ports.md`. |
 
 ## First-time order
 
