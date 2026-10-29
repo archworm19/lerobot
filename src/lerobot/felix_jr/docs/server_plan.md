@@ -124,7 +124,7 @@ capture()            ----------------->  ...
 
 Built (`felix_jr/server/`, tests in `tests/felix_jr/test_server.py` and `test_head.py`): `protocol.py` (wire
 format, version 2), `hardware.py` (`FakeHardware`, `RealHardware`), `head.py` (`HeadController`: head moves in raw
-ticks with recorded limits, home and level), `server.py` and `client.py` (`FelixClient`).
+ticks with recorded limits and home), `server.py` and `client.py` (`FelixClient`).
 
 Commands so far: `hello`, `get_state` (arms and head), `capture` (with `after=<time>` to wait for a frame taken
 after a move finished, since the camera lags), `head_move`, `head_record`, `head_torque_limit`. Tried on the Pi:

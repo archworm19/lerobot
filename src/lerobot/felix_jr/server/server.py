@@ -14,7 +14,7 @@ Commands (see `protocol.py` for the message format):
   a frame taken after that time.
 - `head_move` (`name`, and `delta_deg` or `to`): move a head servo (positive = down / left), clamped to its
   recorded limits; returns when it has settled, with `done_at` for `capture(after=...)`.
-- `head_record` (`name`, `what`): save the servo's present position as `limit_pos`, `limit_neg`, `home` or `level`.
+- `head_record` (`name`, `what`): save the servo's present position as `limit_pos`, `limit_neg` or `home`.
 - `head_torque_limit` (`name`, `limit`): cap a head servo's torque (1-1000) until it loses power.
 
 Only the server's own thread touches the hardware. When motion commands arrive, they will run on a worker thread

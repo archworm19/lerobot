@@ -131,8 +131,8 @@ cable. This script lets you tilt the head in small steps while watching the came
 2. On your computer:
    `uv run python -m lerobot.felix_jr.setup.head_range tcp://<pi>:5555`
    A window shows the camera image. Click it, then: up / down arrow tilts the head by `--step` degrees (default 2);
-   `u` records the **up limit**, `d` the **down limit**, `h` **home**, `z` **level** (camera looking straight
-   ahead, used later for hand-eye calibration); `g` / `l` go to home / level; `q` quits (going home first).
+   `u` records the **up limit**, `d` the **down limit**, `h` **home**; `g` goes to home; `q` quits (going home
+   first).
 3. Approach each end of the range slowly and record the limit *before* the camera cable or the mount is strained.
    The script caps the servo's torque while it runs (`--torque-limit`, default 300 of 1000), so a blocked servo
    only pushes gently.

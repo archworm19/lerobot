@@ -10,8 +10,7 @@ window shows the camera image after every move. Click it so it receives the keys
   u                            record this position as the UP limit
   d                            record this position as the DOWN limit
   h                            record this position as HOME (where the head rests)
-  z                            record this position as LEVEL (the camera looks straight ahead; for hand-eye work)
-  g / l                        go to HOME / LEVEL
+  g                            go to HOME
   r                            refresh the image without moving
   q or Esc                     quit (goes to HOME first if one is recorded)
 
@@ -42,20 +41,18 @@ KEY_ACTIONS = {
     ord("u"): "limit_neg",
     ord("d"): "limit_pos",
     ord("h"): "home",
-    ord("z"): "level",
     ord("g"): "go_home",
-    ord("l"): "go_level",
     ord("r"): "refresh",
     ord("q"): "quit",
     27: "quit",
 }
-RECORD_LABELS = {"limit_neg": "up limit", "limit_pos": "down limit", "home": "home", "level": "level"}
+RECORD_LABELS = {"limit_neg": "up limit", "limit_pos": "down limit", "home": "home"}
 
 
 def decode_key(key: int) -> str | None:
     """The action for a `cv2.waitKeyEx` code, or None for a key that does nothing.
 
-    Actions: up, down, limit_neg, limit_pos, home, level, go_home, go_level, refresh, quit.
+    Actions: up, down, limit_neg, limit_pos, home, go_home, refresh, quit.
     """
     if key in UP_KEYS:
         return "up"
@@ -94,10 +91,10 @@ class HeadRangeSession:
         """Text for the image: where the servo is and what has been recorded."""
         s = self.client.head_state()[self.name]
         lines = [f"{self.name}: {s['ticks']} ticks"]
-        if s["level"] is not None:
-            deg = s["sign"] * (s["ticks"] - s["level"]) / TICKS_PER_DEG
+        if s["home"] is not None:
+            deg = s["sign"] * (s["ticks"] - s["home"]) / TICKS_PER_DEG
             positive = "down" if self.name == "head_eyes" else "left"
-            lines[0] += f", {deg:+.1f} deg from level (+ is {positive})"
+            lines[0] += f", {deg:+.1f} deg from home (+ is {positive})"
         recorded = ", ".join(
             f"{label} {s[key]}" for key, label in RECORD_LABELS.items() if s[key] is not None
         )
@@ -124,10 +121,10 @@ class HeadRangeSession:
                 self.message = (
                     "" if result["reached"] and not result["clamped"] else self._why_stopped(result)
                 )
-            elif action in ("go_home", "go_level"):
-                result = self.client.head_move(self.name, to=action.removeprefix("go_"))
+            elif action == "go_home":
+                result = self.client.head_move(self.name, to="home")
                 after = result["done_at"]
-                self.message = f"moved to {action.removeprefix('go_')}"
+                self.message = "moved to home"
             elif action in RECORD_LABELS:
                 self.client.head_record(self.name, action)
                 self.message = f"saved {RECORD_LABELS[action]}"

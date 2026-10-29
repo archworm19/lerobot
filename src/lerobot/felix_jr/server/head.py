@@ -9,7 +9,6 @@ Recorded per servo (raw ticks, saved in `<id>_head_range.json` next to the arm's
 - `limit_pos` / `limit_neg`: how far the servo may go in its positive / negative direction (down / up for the
   eyes). Moves are clamped to them once recorded.
 - `home`: where the head rests.
-- `level`: where the camera looks straight ahead (the URDF's zero tilt), for later hand-eye work.
 
 `HeadController` talks to the servos through a small `HeadBackend`, so the same code runs on the real bus
 (`hardware.BusHeadBackend`) and on a simulation (`hardware.FakeHeadBackend`).
@@ -28,7 +27,7 @@ SETTLE_TOLERANCE = 3  # ticks from the goal that count as "arrived"
 SETTLE_TIMEOUT_S = 1.0
 STALL_POLLS = 4  # this many polls without any movement, away from the goal, mean the servo is stuck
 POLL_S = 0.05
-RANGE_KEYS = ("limit_pos", "limit_neg", "home", "level")
+RANGE_KEYS = ("limit_pos", "limit_neg", "home")
 MAX_TORQUE_LIMIT = 1000  # STS3215 Torque_Limit register: 0-1000 = 0-100 %
 
 
@@ -49,7 +48,7 @@ class HeadBackend(Protocol):
 
 
 class RangeStore:
-    """The recorded limits, home and level of each head servo, kept in a JSON file (or just in memory)."""
+    """The recorded limits and home of each head servo, kept in a JSON file (or just in memory)."""
 
     def __init__(self, path: Path | None = None):
         """Load `path` if it exists. With `path=None` nothing is written to disk."""
@@ -93,7 +92,7 @@ class HeadController:
             raise ValueError(f"unknown head servo {name!r}; have {self.backend.names()}")
 
     def state(self) -> dict[str, dict[str, Any]]:
-        """Per servo: `ticks` (now), `sign`, and the recorded `limit_pos`, `limit_neg`, `home`, `level`.
+        """Per servo: `ticks` (now), `sign`, and the recorded `limit_pos`, `limit_neg`, `home`.
 
         Values that were never recorded are None.
         """
@@ -123,7 +122,7 @@ class HeadController:
         """Move servo `name` and wait until it has settled.
 
         Give exactly one of: `delta_deg`, a move in degrees from where it is now (positive = down / left); or
-        `to`, "home" or "level" (a recorded position). The goal is clamped to the recorded limits and the move
+        `to`, "home" (the recorded home position). The goal is clamped to the recorded limits and the move
         is made in steps of at most `SUB_STEP_DEG`. If the servo stops short of a step (it is blocked), it is
         told to hold where it is and the move ends.
 
@@ -135,8 +134,8 @@ class HeadController:
             raise ValueError("give exactly one of delta_deg and to")
         start = self.backend.read_ticks(name)
         if to is not None:
-            if to not in ("home", "level"):
-                raise ValueError(f"`to` must be 'home' or 'level', not {to!r}")
+            if to != "home":
+                raise ValueError(f"`to` must be 'home', not {to!r}")
             target = self.store.get(name).get(to)
             if target is None:
                 raise ValueError(f"no {to} recorded for {name}; record one first")
