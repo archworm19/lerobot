@@ -6,7 +6,8 @@ import cv2
 import numpy as np
 import pytest
 
-from lerobot.felix_jr.calibration import design
+from lerobot.felix_jr.calibration import collect as collect_module, design
+from lerobot.felix_jr.calibration.bootstrap import Plane, up_from_pitch
 from lerobot.felix_jr.calibration.collect import CollectSession, decode_key, parse_seed
 from lerobot.felix_jr.calibration.design import (
     JOINT_LIMITS,
@@ -212,3 +213,99 @@ def test_the_overlay_marks_the_prediction_and_the_clicks(robot, tmp_path):
     assert out.shape == image.shape and out.any() and not image.any()  # a copy, with something drawn
     assert annotate(image, [], None, []).sum() == 0
     assert cv2 is not None
+
+
+def test_plan_poses_can_veto_candidates():
+    allowed = plan_poses(20, keep=lambda pose: pose["shoulder_lift.pos"] <= 0.0, rng_seed=3)
+    assert allowed[0]["shoulder_lift.pos"] == 0.0 and all(p["shoulder_lift.pos"] <= 0.0 for p in allowed)
+    assert len(allowed) == 20
+    assert len(plan_poses(20, keep=lambda pose: False)) == 1  # only the seed pose survives
+
+
+def test_a_given_head_pitch_sets_the_tilt_prior_and_the_first_pose_shows_the_tip(robot, tmp_path):
+    fake, client = robot
+    with client.session():
+        shown = []
+        session = CollectSession(
+            client, "left", tmp_path / "cal", shown.append, None, n_poses=8, head_tilt_deg=15.0
+        )
+        assert any("head tilt zero set" in note for note in session.notes)
+        mean, sigma = session.model.prior_overrides["zero:head_tilt_joint"]
+        assert session.theta["zero:head_tilt_joint"] == mean and sigma == pytest.approx(np.radians(5.0))
+        assert len(session.poses) == 8 and session.poses[0]["gripper.pos"] == 1.0
+        assert any(note.startswith("first pose:") for note in session.notes)
+        ticks = {n: fake.head.backend.read_ticks(n) for n in ("head_neck", "head_eyes")}
+        predicted = session.model.predict(
+            Observation(arm=session.poses[0], head_ticks=ticks, pixel=(0, 0)), session.theta
+        )
+        assert np.linalg.norm(predicted.uv - [160, 120]) < 60  # the fake camera is 320x240
+        session.click(100, 100)  # the prior travels with the saved clicks
+        _, observations = load_observations(tmp_path / "cal" / "observations.json")
+        import json
+
+        saved = json.loads((tmp_path / "cal" / "observations.json").read_text())["settings"]
+        assert "zero:head_tilt_joint" in saved["prior_overrides"]
+
+
+def test_without_a_table_plane_the_session_says_so_and_still_plans_poses(robot, tmp_path):
+    fake, client = robot
+    with client.session():
+        session = CollectSession(client, "left", tmp_path / "cal", lambda image: None, None, n_poses=5)
+        assert any("no table plane" in note for note in session.notes)  # the fake scene is a flat wall
+        assert session.model.prior_overrides == {} and session.table_z is None
+        assert len(session.poses) == 5
+
+
+def test_bootstrap_can_be_switched_off(robot, tmp_path):
+    fake, client = robot
+    with client.session():
+        session = CollectSession(
+            client, "left", tmp_path / "cal", lambda image: None, None, n_poses=4, bootstrap=False
+        )
+        assert session.notes == [] and session.model.prior_overrides == {}
+        assert all(abs(session.poses[0][f"{j}.pos"]) < 1e-9 for j in ARM_JOINTS)  # the plain center seed
+
+
+def test_a_known_table_keeps_every_planned_pose_above_it(robot, tmp_path, monkeypatch):
+    fake, client = robot
+    monkeypatch.setattr(
+        collect_module, "estimate_up_vector", lambda scene: Plane(up_from_pitch(np.radians(15.0)), -0.5, 0.2)
+    )
+    with client.session():
+        session = CollectSession(client, "left", tmp_path / "cal", lambda image: None, None, n_poses=10)
+        assert session.table_z is not None
+        assert any("below the arm base" in note for note in session.notes)
+        floor = session.table_z + collect_module.TABLE_CLEARANCE
+        assert all(session.model.tip_in_root(p, session.theta)[2] >= floor - 1e-9 for p in session.poses)
+
+
+def test_head_limits_use_recorded_limits_or_a_range_around_the_present_position():
+    head = {
+        "head_eyes": {"ticks": 1324, "limit_neg": 1013, "limit_pos": 1620},
+        "head_neck": {"ticks": 1520, "limit_neg": None, "limit_pos": None},
+    }
+    limits = collect_module.head_limits(head)
+    assert limits["head_eyes"] == (1013, 1620)
+    assert limits["head_neck"] == (
+        1520 - collect_module.NECK_RANGE_TICKS,
+        1520 + collect_module.NECK_RANGE_TICKS,
+    )
+    head["head_neck"]["ticks"] = 100  # near the end of the raw range
+    assert collect_module.head_limits(head)["head_neck"][0] == 0
+
+
+def test_every_planned_pose_can_be_brought_into_view_by_the_head_within_its_limits(robot, tmp_path):
+    fake, client = robot
+    with client.session():
+        session = CollectSession(
+            client, "left", tmp_path / "cal", lambda image: None, None, n_poses=12, head_tilt_deg=15.0
+        )
+        head = client.head_state()
+        limits = collect_module.head_limits(head)
+        ticks = {n: head[n]["ticks"] for n in ("head_neck", "head_eyes")}
+        for pose in session.poses[1:]:  # the seed pose is checked at the head's current pose
+            target = center_head(session.model, session.theta, pose, ticks, limits)
+            assert target is not None
+            tip = session.model.predict(Observation(arm=pose, head_ticks=target, pixel=(0, 0)), session.theta)
+            assert session.model.in_view(tip.uv, margin=collect_module.VIEW_MARGIN - 1)
+            assert all(limits[n][0] <= target[n] <= limits[n][1] for n in target)

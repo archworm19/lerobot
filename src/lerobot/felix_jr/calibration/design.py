@@ -12,6 +12,8 @@ the tip may land elsewhere and the person nudges the head; after a few clicks th
 the tip lands where it was predicted.
 """
 
+from collections.abc import Callable
+
 import numpy as np
 
 from lerobot.felix_jr.calibration.model import (
@@ -50,18 +52,20 @@ def plan_poses(
     delta_scale: float = 1.0,
     candidates: int = 600,
     rng_seed: int = 0,
+    keep: Callable[[dict[str, float]], bool] | None = None,
 ) -> list[dict[str, float]]:
     """`n` arm poses (`{"shoulder_pan.pos": deg, ..., "gripper.pos": 1.0}`) spread around `seed_pose`.
 
     The first pose is the seed itself. `delta_scale` scales the region (`DEFAULT_DELTA`). Selection is
     farthest-point: each next pose is the candidate farthest from the ones already chosen, in joint space with
-    each joint divided by its region size.
+    each joint divided by its region size. `keep(pose)` can veto candidates (e.g. a tip that would be below the
+    table); the seed pose itself is always first. If too few candidates pass, fewer than `n` poses come back.
     """
     rng = np.random.default_rng(rng_seed)
     seed = {**CENTER_POSE, **{k.removesuffix(".pos"): v for k, v in (seed_pose or {}).items()}}
-    seed = {
-        j: min(max(v, JOINT_LIMITS[j][0] * LIMIT_MARGIN), JOINT_LIMITS[j][1] * LIMIT_MARGIN)
-        for j, v in seed.items()
+    seed = {  # only the arm joints (a pose from `seed_pose_for_view` also carries the gripper), inside the limits
+        j: min(max(seed[j], JOINT_LIMITS[j][0] * LIMIT_MARGIN), JOINT_LIMITS[j][1] * LIMIT_MARGIN)
+        for j in ARM_JOINTS
     }
     scale = np.array([DEFAULT_DELTA[j] * delta_scale for j in ARM_JOINTS])
     lows = np.array(
@@ -71,9 +75,20 @@ def plan_poses(
         [min(seed[j] + s, JOINT_LIMITS[j][1] * LIMIT_MARGIN) for j, s in zip(ARM_JOINTS, scale, strict=True)]
     )
     pool = rng.uniform(lows, highs, size=(candidates, len(ARM_JOINTS)))
+    if keep is not None:
+        allowed = [
+            keep(
+                {
+                    **{f"{j}.pos": float(v) for j, v in zip(ARM_JOINTS, row, strict=True)},
+                    "gripper.pos": CLOSED,
+                }
+            )
+            for row in pool
+        ]
+        pool = pool[np.array(allowed, dtype=bool)]
     chosen = [np.array([seed[j] for j in ARM_JOINTS])]
-    distance = np.linalg.norm((pool - chosen[0]) / scale, axis=1)
-    while len(chosen) < n:
+    distance = np.linalg.norm((pool - chosen[0]) / scale, axis=1) if len(pool) else np.array([])
+    while len(chosen) < n and len(pool):
         pick = int(np.argmax(distance))
         chosen.append(pool[pick])
         distance = np.minimum(distance, np.linalg.norm((pool - pool[pick]) / scale, axis=1))

@@ -15,9 +15,14 @@ is; a cyan circle marks the predicted tip. Then:
   r                   refit now and print the report line
   q or Esc            finish (the robot is sent to rest)
 
-If the tip is not visible after nudging the head, press `n` for another pose. The first few clicks are the hard
-ones: the head's zero offsets are unknown to about 20 degrees, so the tip may be far from the circle. Each click
-refits the model (`fit.py`), so the circle gets closer and the head lands on the tip by itself. Vary the head too:
+At the start the script works out where the camera is pointing, so the first frames already show the gripper:
+it reads the camera's pitch from the table plane in the depth image (override with `--head-tilt-deg`, how far
+below horizontal the camera looks now), uses it as the head tilt's starting value, and searches for a first arm
+pose whose tip lands in the middle of the picture at the head's current pose. Every planned pose keeps the tip above
+the table and within what the head can bring into view. It prints what it decided (`--no-bootstrap` skips all of
+this). If the tip is not visible after nudging the head, press `n` for another pose. The head's pan zero is still
+unknown to about 20 degrees, so the circle can be off sideways at first; each click refits the model (`fit.py`),
+so the circle gets closer and the head lands on the tip by itself. Vary the head too:
 after a few poses, nudge the head a few degrees before clicking, so the head's parameters are not confounded with
 the arm's. Aim for 30-60 clicks; the fit report says which parameters they pinned down.
 
@@ -37,6 +42,14 @@ from typing import Any
 import cv2
 import numpy as np
 
+from lerobot.felix_jr.calibration.bootstrap import (
+    TILT_PRIOR_SIGMA,
+    estimate_tilt_zero,
+    estimate_up_vector,
+    seed_pose_for_view,
+    table_height,
+    up_from_pitch,
+)
 from lerobot.felix_jr.calibration.design import center_head, plan_poses
 from lerobot.felix_jr.calibration.fit import FitConfig, fit, pixel_errors, rms
 from lerobot.felix_jr.calibration.model import (
@@ -54,6 +67,11 @@ from lerobot.felix_jr.server.protocol import DEFAULT_PORT, ServerError
 
 TICKS_PER_DEG = TICKS_PER_TURN / 360.0
 MIN_CLICKS_TO_FIT = 4
+VIEW_MARGIN = 60  # pixels from the image border a planned tip must stay
+NECK_RANGE_TICKS = (
+    450  # +/- ticks (about 40 deg) the neck may be turned from where it is, if no limit is recorded
+)
+TABLE_CLEARANCE = 0.04  # meters the tip must stay above the table (the model is good to a centimeter or two)
 # cv2.waitKeyEx codes differ by platform (macOS, Linux GTK, Windows, Qt).
 UP_KEYS = {63232, 65362, 2490368, 0, ord("i")}
 DOWN_KEYS = {63233, 65364, 2621440, 1, ord("k")}
@@ -97,18 +115,34 @@ class CollectSession:
         arm: str,
         out_dir: Path,
         show: Callable[[np.ndarray], None],
-        poses: list[dict[str, float]],
+        poses: list[dict[str, float]] | None,
         max_vel: float = 30.0,
         max_accel: float = 60.0,
         head_step_deg: float = 2.0,
         resume: bool = False,
         color_format: str = "png",
         fit_iterations: int = 10,
+        n_poses: int = 40,
+        delta_scale: float = 1.0,
+        seed_pose: dict[str, float] | None = None,
+        head_tilt_deg: float | None = None,
+        bootstrap: bool = True,
     ):
-        """Connect the pieces and take a first frame. `poses` are the planned arm poses (`design.plan_poses`)."""
+        """Connect the pieces and take a first frame.
+
+        `poses` are the planned arm poses (`design.plan_poses`). With `poses=None` they are planned here, after the
+        head tilt has been estimated: around `seed_pose` if given, else around a pose found by
+        `bootstrap.seed_pose_for_view`, which shows the tip near the middle of the picture at the head's current
+        pose. `head_tilt_deg` says how far below horizontal the camera looks now (default: estimated from the table
+        plane in the depth image; `bootstrap=False` skips both). `notes` collects what was decided, for printing.
+        """
         self.client, self.arm, self.out_dir, self.show = client, arm, out_dir, show
+        self.notes: list[str] = []
+        self.table_z: float | None = (
+            None  # the table's height in the root frame, when the depth image showed it
+        )
         self.arm_id = f"{arm}_arm"
-        self.poses, self.pose_index = poses, 0
+        self.poses, self.pose_index = poses or [], 0
         self.max_vel, self.max_accel, self.head_step_deg = max_vel, max_accel, head_step_deg
         self.color_format, self.fit_iterations = color_format, fit_iterations
         self.message = "click the tip of the closed gripper; n = next pose"
@@ -122,6 +156,7 @@ class CollectSession:
         if resume and self.observations_path.is_file():
             self.model, self.observations = load_observations(self.observations_path)
             self.message = f"resumed with {len(self.observations)} clicks"
+            self.theta.update({name: mean for name, (mean, _) in self.model.prior_overrides.items()})
             self._refit()
         else:
             head = client.head_state()
@@ -135,7 +170,94 @@ class CollectSession:
                 },
             )
             self.observations: list[Observation] = []
+            if bootstrap:
+                self._estimate_head_tilt(head_tilt_deg)
+        if poses is None:
+            self.poses = self._plan(n_poses, delta_scale, seed_pose, bootstrap)
         self.render()
+
+    # ---- the start of a session ----------------------------------------------------------------------------
+
+    def _note(self, text: str) -> None:
+        self.notes.append(text)
+        self.message = text
+
+    def _estimate_head_tilt(self, pitch_deg: float | None) -> None:
+        """Set the head tilt zero (as a prior with a 5 degree sigma) from the camera's pitch.
+
+        The pitch is given (`pitch_deg`, degrees below horizontal) or measured from the table plane in the depth
+        image. Leaves the zero at the model's default if neither is available or the estimate does not fit.
+        """
+        ticks = {n: int(self.capture.state["head"][n]["ticks"]) for n in HEAD_JOINTS}
+        plane = None
+        if pitch_deg is not None:
+            up, source = (
+                up_from_pitch(np.radians(pitch_deg)),
+                f"given as {pitch_deg:.1f} deg below horizontal",
+            )
+        else:
+            found = estimate_up_vector(self.capture.scene())
+            if found is None:
+                self._note(
+                    "no table plane in the depth image: the head tilt starts at the model's zero (about 20 deg "
+                    "unsure); give --head-tilt-deg if you can estimate how far down the camera looks"
+                )
+                return
+            plane = found
+            up, fraction = plane.normal, plane.fraction
+            source = f"table plane ({100 * fraction:.0f}% of the depth points)"
+        tilt, miss = estimate_tilt_zero(self.model, ticks, up)
+        if miss > 6.0:
+            self._note(
+                f"the {source} does not match the model's camera (off by {miss:.1f} deg): head tilt left at zero"
+            )
+            return
+        self.model.prior_overrides["zero:head_tilt_joint"] = (tilt, TILT_PRIOR_SIGMA)
+        self.theta["zero:head_tilt_joint"] = tilt
+        if plane is not None:
+            self.table_z = table_height(self.model, ticks, self.theta, plane)
+            base_z = self.model.head_tree.link_pose(self.model.base_link)[2, 3]
+            self.notes.append(f"the table is {100 * (base_z - self.table_z):.0f} cm below the arm base")
+        pitch = float(np.degrees(np.arcsin(np.clip(-up[2], -1.0, 1.0))))
+        self._note(
+            f"camera looks {pitch:.1f} deg below horizontal ({source}); head tilt zero set to {np.degrees(tilt):+.1f} deg"
+        )
+
+    def _plan(
+        self, n: int, delta_scale: float, seed_pose: dict[str, float] | None, bootstrap: bool
+    ) -> list[dict[str, float]]:
+        """The arm poses to visit: around `seed_pose`, or around a pose that shows the tip at the current head pose."""
+        ticks = {name: int(self.capture.state["head"][name]["ticks"]) for name in HEAD_JOINTS}
+        if seed_pose is None and bootstrap:
+            seed_pose = seed_pose_for_view(self.model, self.theta, ticks, table_z=self.table_z)
+            if seed_pose is None:
+                self._note("no arm pose shows the tip at this head pose: starting from the center pose")
+            else:
+                shown = ", ".join(
+                    f"{k.removesuffix('.pos')} {v:+.0f}" for k, v in seed_pose.items() if k != "gripper.pos"
+                )
+                self._note(f"first pose: {shown}")
+        if not bootstrap:
+            return plan_poses(n, seed_pose, delta_scale)
+        limits = head_limits(self.client.head_state())
+        floor = None if self.table_z is None else self.table_z + TABLE_CLEARANCE
+
+        def keep(pose: dict[str, float]) -> bool:
+            """Above the table, and the head can bring the tip into the picture within its limits."""
+            if floor is not None and self.model.tip_in_root(pose, self.theta)[2] < floor:
+                return False
+            target = center_head(self.model, self.theta, pose, ticks, limits)
+            if target is None:
+                return False
+            tip = self.model.predict(Observation(arm=pose, head_ticks=target, pixel=(0.0, 0.0)), self.theta)
+            return self.model.in_view(tip.uv, margin=VIEW_MARGIN)
+
+        poses = plan_poses(n, seed_pose, delta_scale, keep=keep)
+        if len(poses) < n:
+            self._note(
+                f"only {len(poses)} of {n} poses can show the tip within the head's range and above the table"
+            )
+        return poses
 
     # ---- showing --------------------------------------------------------------------------------------------
 
@@ -201,16 +323,12 @@ class CollectSession:
             return
         state = self.client.get_state()
         head = self.client.head_state()
-        limits = {
-            n: (head[n]["limit_neg"], head[n]["limit_pos"])
-            if head[n]["limit_neg"] is not None and head[n]["limit_pos"] is not None
-            else (0, TICKS_PER_TURN - 1)
-            for n in head
-        }
-        # head limits are recorded as "pos" = the servo's positive direction (down / left), in raw ticks
-        limits = {n: (min(lo, hi), max(lo, hi)) for n, (lo, hi) in limits.items()}
         targets = center_head(
-            self.model, self.theta, state[self.arm_id], {n: head[n]["ticks"] for n in HEAD_JOINTS}, limits
+            self.model,
+            self.theta,
+            state[self.arm_id],
+            {n: head[n]["ticks"] for n in HEAD_JOINTS},
+            head_limits(head),
         )
         done = status["finished_at"]
         if targets is not None:
@@ -314,6 +432,23 @@ class CollectSession:
         return True
 
 
+def head_limits(head: dict[str, dict[str, Any]]) -> dict[str, tuple[int, int]]:
+    """Allowed raw ticks per head servo from `client.head_state()`: the recorded limits, else a range around now.
+
+    Limits are recorded as the servo's positive / negative direction (down / left, up / right), in raw ticks, so
+    the lower and upper bound are whichever of the two is smaller. Without recorded limits the servo may move
+    `NECK_RANGE_TICKS` either side of where it is now (nothing is known about the cable or the mount).
+    """
+    limits = {}
+    for name, servo in head.items():
+        if servo["limit_neg"] is not None and servo["limit_pos"] is not None:
+            low, high = sorted((servo["limit_neg"], servo["limit_pos"]))
+        else:
+            low, high = servo["ticks"] - NECK_RANGE_TICKS, servo["ticks"] + NECK_RANGE_TICKS
+        limits[name] = (max(low, 0), min(high, TICKS_PER_TURN - 1))
+    return limits
+
+
 def parse_seed(text: str | None) -> dict[str, float] | None:
     """`"shoulder_pan=10,elbow_flex=-5"` -> `{"shoulder_pan": 10.0, "elbow_flex": -5.0}` (None for no text)."""
     if not text:
@@ -334,7 +469,15 @@ def main() -> None:
         "--delta-scale", type=float, default=1.0, help="scale of the pose region (1 = +/-20 deg)"
     )
     parser.add_argument(
-        "--seed-pose", help='region center, e.g. "shoulder_lift=-10,elbow_flex=10" (default: all 0)'
+        "--seed-pose", help='region center, e.g. "shoulder_lift=-10,elbow_flex=10" (default: searched for)'
+    )
+    parser.add_argument(
+        "--head-tilt-deg",
+        type=float,
+        help="how far below horizontal the camera looks now (default: from the table plane)",
+    )
+    parser.add_argument(
+        "--no-bootstrap", action="store_true", help="skip the head tilt estimate and the first-pose search"
     )
     parser.add_argument("--resume", action="store_true", help="continue an earlier --out-dir")
     args = parser.parse_args()
@@ -350,18 +493,24 @@ def main() -> None:
         cv2.imshow(window, cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    poses = plan_poses(args.n, parse_seed(args.seed_pose), args.delta_scale)
     with FelixClient(args.endpoint, timeout_s=20.0) as client, client.session():
         session = CollectSession(
             client,
             args.arm,
             args.out_dir,
             show,
-            poses,
+            None,
             max_vel=args.max_vel,
             head_step_deg=args.step,
             resume=args.resume,
+            n_poses=args.n,
+            delta_scale=args.delta_scale,
+            seed_pose=parse_seed(args.seed_pose),
+            head_tilt_deg=args.head_tilt_deg,
+            bootstrap=not args.no_bootstrap,
         )
+        for note in session.notes:
+            print(note)
         cv2.setMouseCallback(window, on_mouse)
         try:
             while True:

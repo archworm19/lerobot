@@ -128,11 +128,12 @@ def fit(
 ) -> FitResult:
     """MAP fit of `params` (default: `parameter_set(model.arm)`) to the clicks. See the module docstring."""
     cfg = cfg or FitConfig()
-    params = params or parameter_set(model.arm)
+    params = params or parameter_set(model.arm, model.prior_overrides)
     if not observations:
         raise ValueError("no observations to fit")
     prior = np.array([p.sigma for p in params])
-    x = np.array([(theta0 or {}).get(p.name, 0.0) for p in params])
+    mean = np.array([p.mean for p in params])
+    x = np.array([(theta0 or {}).get(p.name, p.mean) for p in params])
     steps = 1e-2 * prior  # finite-difference step per parameter
 
     def residuals(vec: np.ndarray) -> np.ndarray:
@@ -141,7 +142,7 @@ def fit(
     def robust_cost(r_obs: np.ndarray, vec: np.ndarray) -> float:
         per_obs = np.linalg.norm(r_obs.reshape(len(observations), -1), axis=1)
         huber = np.where(per_obs <= cfg.huber, 0.5 * per_obs**2, cfg.huber * (per_obs - 0.5 * cfg.huber))
-        return float(huber.sum() + 0.5 * np.sum((vec / prior) ** 2))
+        return float(huber.sum() + 0.5 * np.sum(((vec - mean) / prior) ** 2))
 
     def jacobian(vec: np.ndarray) -> np.ndarray:
         cols = []
@@ -162,7 +163,7 @@ def fit(
         w = np.repeat(weights, r_obs.size // len(observations))
         jw = j_obs.T * w
         hessian = jw @ j_obs + np.diag(1.0 / prior**2)
-        gradient = jw @ r_obs + x / prior**2
+        gradient = jw @ r_obs + (x - mean) / prior**2
         weighted_hessian = hessian
         cost = robust_cost(r_obs, x)
         history.append(cost)
@@ -264,6 +265,7 @@ def save_result(
         "parameters": final.theta,
         "sigma_post": final.sigma_post,
         "prior_sigma": {p.name: p.sigma for p in final.params},
+        "prior_mean": {p.name: p.mean for p in final.params},
         "X_Base_so101": model.T.tolist(),
         "pixel_rms": {"all": rms(final.pixel_errors), "holdout": holdout_stats},
     }

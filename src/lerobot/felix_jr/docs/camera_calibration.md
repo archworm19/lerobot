@@ -181,6 +181,23 @@ circle converges on the tip. `fit` writes `kinematic_calibration.json`, `xlerobo
   right. RealSense's self-calibration tools (on-chip, tare) improve the *depth* stereo pair, not the color camera's
   place on the robot, so they are not part of this; run them only if depth looks wrong (not verified here).
 
+**Starting a session** (`calibration/bootstrap.py`). The head's home is not level (on this robot the camera looks
+about 16 degrees down there), so a model that assumes zero sends the head too far down and the first frames show
+the elbow instead of the gripper. Before the first click, `collect`:
+
+- finds the table in the depth image (RANSAC over upward-facing planes, so a wall behind it is ignored) and reads
+  the camera's pitch from its normal, which pins the head tilt zero to a degree or two; this becomes the fit's
+  *prior* (mean the estimate, sigma 5 degrees), saved with the clicks so `fit` uses the same one;
+- gets the table's height from the same plane, and keeps every planned tip at least 4 cm above it;
+- searches for a first arm pose whose tip lands in the middle of the picture at the head's current pose, and
+  plans the other poses around it, keeping only those the head can bring into view within its recorded limits
+  (the neck defaults to +/-40 degrees from where it is when no limit is recorded).
+
+On the capture saved from the Pi, it reads 15.8 degrees below horizontal (tilt zero +16 degrees), puts the table
+3 cm below the arm base, and yields 40 or more poses per arm; the first pose's tip stays in the picture even if the
+pan zero is 20 degrees off or the tilt 5 degrees off. What it cannot know is the head's pan zero (about 20 degrees
+unsure), which the first clicks pin down.
+
 **What the fit can and cannot learn.** `fit` reports each parameter's posterior sigma next to its prior. In a
 simulation with the true parameters known (tests/felix_jr/test_calibration_fit.py), 20 to 80 clicks with 1.5 px of
 click noise brought the pixel error at clicks held out from the fit from about 220 px (uncalibrated) to about 2 px.

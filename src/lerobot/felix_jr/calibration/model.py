@@ -76,11 +76,16 @@ SIGMAS = {
 
 @dataclass(frozen=True)
 class Param:
-    """One fitted parameter: its name, prior sigma (radians or meters) and group (head, mount, arm, tip)."""
+    """One fitted parameter: its name, prior sigma (radians or meters) and group (head, mount, arm, tip).
+
+    `mean` is the prior mean (0 unless an estimate from the data, e.g. the head tilt from the table plane,
+    replaces it).
+    """
 
     name: str
     sigma: float
     group: str
+    mean: float = 0.0
 
     @property
     def angular(self) -> bool:
@@ -97,8 +102,11 @@ class Param:
         return float(np.degrees(value) if self.angular else value * 1000.0)
 
 
-def parameter_set(arm: str = "left") -> list[Param]:
+def parameter_set(arm: str = "left", overrides: dict[str, tuple[float, float]] | None = None) -> list[Param]:
     """The parameters fitted for `arm` ("left" / "right"), with their priors (see `SIGMAS`).
+
+    `overrides` maps a parameter name to a replacement `(prior mean, prior sigma)`, for estimates made before the
+    fit (see `bootstrap.py`).
 
     The head tower is not included: moving the head tower and moving the arm mount shift every pixel identically
     (a unit test of the sensitivity analysis asserts it), so only one of them can be found, and the mount is it.
@@ -116,6 +124,9 @@ def parameter_set(arm: str = "left") -> list[Param]:
         params.append(Param(f"{ARM_PREFIX}zero:{joint}", SIGMAS["arm zero"], "arm"))
         params += [Param(f"{ARM_PREFIX}pos:{joint}:{a}", SIGMAS["arm origin"], "arm") for a in xyz]
     params += [Param(f"{ARM_PREFIX}pos:{TIP_JOINT}:{a}", SIGMAS["tip"], "tip") for a in xyz]
+    for i, p in enumerate(params):
+        if overrides and p.name in overrides:
+            params[i] = Param(p.name, overrides[p.name][1], p.group, overrides[p.name][0])
     return params
 
 
@@ -162,6 +173,7 @@ class CalibrationModel:
         head_tree: UrdfTree | None = None,
         arm_tree: UrdfTree | None = None,
         mount_transform: np.ndarray | None = None,
+        prior_overrides: dict[str, tuple[float, float]] | None = None,
     ):
         """Build the model.
 
@@ -169,7 +181,10 @@ class CalibrationModel:
         `head_refs`: per head servo, the saved sign and the reference tick count (see the module docstring).
         `mount_transform` is X_Base_so101; it is computed from the two URDFs unless given. Pass the saved one
         when the trees are calibrated copies (their pivots moved, so recomputing it would give another answer).
+        `prior_overrides` replaces the prior of some parameters, `{name: (mean, sigma)}`, and is saved with the
+        clicks so the fit uses the same priors.
         """
+        self.prior_overrides: dict[str, tuple[float, float]] = dict(prior_overrides or {})
         self.arm = arm
         self.head_tree = head_tree or UrdfTree(XLEROBOT_URDF)
         self.arm_tree = arm_tree or UrdfTree(SO101_URDF)
@@ -295,12 +310,19 @@ class CalibrationModel:
             },
             "head_signs": self.head_signs,
             "head_refs": self.head_refs,
+            "prior_overrides": {k: list(v) for k, v in self.prior_overrides.items()},
         }
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any]) -> "CalibrationModel":
         """Inverse of `settings`."""
-        return cls(settings["arm"], settings["intrinsics"], settings["head_signs"], settings["head_refs"])
+        return cls(
+            settings["arm"],
+            settings["intrinsics"],
+            settings["head_signs"],
+            settings["head_refs"],
+            prior_overrides={k: tuple(v) for k, v in settings.get("prior_overrides", {}).items()},
+        )
 
 
 def load_calibrated_model(directory: Path) -> tuple[CalibrationModel, dict[str, float]]:
@@ -320,6 +342,7 @@ def load_calibrated_model(directory: Path) -> tuple[CalibrationModel, dict[str, 
         head_tree=UrdfTree(xml=(directory / "xlerobot_calibrated.urdf").read_text()),
         arm_tree=UrdfTree(xml=(directory / "so101_calibrated.urdf").read_text()),
         mount_transform=np.array(data["X_Base_so101"]),
+        prior_overrides={k: tuple(v) for k, v in s.get("prior_overrides", {}).items()},
     )
     return model, data["parameters"]
 

@@ -184,8 +184,11 @@ how to judge the result are in [camera_calibration.md](camera_calibration.md), "
    next planned pose and turns the head towards the circle; click the very end of the closed gripper; arrow keys
    nudge the head (do this now and then, so the head's parameters are not confounded with the arm's); `u` undoes
    a click; `q` finishes and the robot goes to rest. The first few clicks are hard: the circle is far off until the
-   head's zero offsets are learned. Watch the arm: poses are within about +/-20 degrees of the center pose, but
-   nothing checks for collisions. Ctrl+C is safe (the robot stops and goes to rest).
+   head's zero offsets are learned. At the start it prints what it worked out: the camera's pitch (read from the
+   table in the depth image; give `--head-tilt-deg` if there is no table in view), the table's height below the
+   arm base, and the first pose. Poses stay above the table and within the head's range, but nothing checks for
+   collisions with other objects: clear the space and watch the arm. Ctrl+C is safe (the robot stops and goes to
+   rest).
 3. Fit: `uv run python -m lerobot.felix_jr.calibration.fit ~/cal_left/observations.json --out-dir ~/cal_left`
    Read `fit_report.md`: the held-out pixel error before and after, which parameters were learned, and the
    largest remaining errors (re-click or undo those). It also writes the calibrated URDFs.
