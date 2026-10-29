@@ -29,34 +29,99 @@ Serial ports for each arm are in [current_ports.md](current_ports.md). Findings 
 
 ## First-time order
 
-Use each arm's own port and id (`left_arm`, `right_arm`).
+Two kinds of setup. **A new arm** is done once per arm, and its results stay with the arm. **A new computer**
+is done once per computer that will talk to the arms. A brand-new robot on its first computer needs both: do the
+new-computer steps 2a-2b first (the arm steps need a port), then the new-arm steps, then the checks.
 
-0. **Find each arm's port.** Plug in both arms' USB cables, then:
-   `uv run python -m lerobot.felix_jr.setup.find_ports`
-   It asks you to unplug one arm's USB cable at a time (the servo power can stay on), sees which port vanished,
-   waits for you to plug it back in, and prints the result, e.g. `/dev/tty.usbmodem5AE60837301 right_arm`. Use
-   those names wherever a `<PORT>` appears below, and copy them into [current_ports.md](current_ports.md).
-   The ports are remembered by the USB adapter's serial number, so `find_ports --show` still reports the right
-   port name if it changes after a replug (on the Pi `/dev/ttyACM0` and `/dev/ttyACM1` can swap). Without the
-   script, LeRobot's `uv run lerobot-find-port` does the same for one cable at a time, without saving anything.
+Arms are called `left_arm` and `right_arm`; use each arm's own port and id.
 
-1. **Calibrate each arm** with LeRobot's own tool (writes the calibration file this code relies on):
+### 1. Set up a new arm (once per arm)
+
+Needs the arm's port: run `setup.find_ports` (step 2b) first if this computer doesn't know it yet.
+
+1. **Calibrate** with LeRobot's own tool. It writes the calibration into the servos and into
+   `<id>.json` on this computer, which this code relies on:
    `uv run lerobot-calibrate --robot.type=so101_follower --robot.port=<PORT> --robot.id=<ID>`
-2. **Record each arm's home pose.** Hold the arm in its rest pose, then:
+2. **Record the home pose.** Hold the arm in its rest pose, then:
    `uv run python -m lerobot.felix_jr.setup.record_home <PORT> <ID>`
 3. **Set up the wheels** (only if the base is fitted). Needs the arm unplugged from the board and one wheel
    disconnected from the other for the first step; the script prompts through it. Pass the port and id of the
    arm whose board the wheels plug into (the right arm here):
    `uv run python -m lerobot.felix_jr.setup.wheels <PORT> <ID>`
-3b. **Set up the head** (only if it is fitted; details in [head.md](head.md)). Same pattern: the arm unplugged
+4. **Set up the head** (only if it is fitted; details in [head.md](head.md)). Same pattern: the arm unplugged
    from the board and the neck disconnected from the eyes for the first step. Pass the port and id of the arm
    whose board the head plugs into (the left arm here):
    `uv run python -m lerobot.felix_jr.setup.head <PORT> <ID>`
-4. **Check the arms move.** `uv run python -m lerobot.felix_jr.checks.wiggle_test --left <PORT> --right <PORT>`
+
+Then run the checks below. Redo the calibration (steps 1-2) if an arm is taken apart or a servo is replaced.
+
+### 2. Set up on a new computer
+
+The servos keep their calibration and IDs, so nothing needs recalibrating. This computer needs the software, the
+port names, and a copy of the arm files.
+
+a. **Install.** `uv sync --locked --extra feetech` (arms, wheels and head). On the Pi add `--extra pyzmq-dep`
+   for the server (see [server_plan.md](server_plan.md)). A plain `uv sync` lacks `pyserial`, so the scripts
+   would fail with `No module named 'serial'`.
+b. **Find each arm's port.** Plug in both arms' USB cables, then:
+   `uv run python -m lerobot.felix_jr.setup.find_ports`
+   It asks you to unplug one arm's USB cable at a time (the servo power can stay on), sees which port vanished,
+   waits for you to plug it back in, and prints the result, e.g. `/dev/tty.usbmodem5AE60837301 right_arm`. Use
+   those names wherever a `<PORT>` appears, and copy them into [current_ports.md](current_ports.md). The ports
+   are remembered by the USB adapter's serial number, so `find_ports --show` still reports the right port name
+   if it changes after a replug (on the Pi `/dev/ttyACM0` and `/dev/ttyACM1` can swap). Without the script,
+   LeRobot's `uv run lerobot-find-port` does the same for one cable at a time, without saving anything.
+c. **Copy the arm files** from a computer where the arms were already set up. They are everything in
+   `~/.cache/huggingface/lerobot/calibration/robots/so_follower/`: `<id>.json` (calibration), `<id>_home.json`,
+   and `<id>_base.json` / `<id>_head.json` where fitted. Keep the same ids and the same folder, e.g.
+   `rsync -av ~/.cache/huggingface/lerobot/calibration/robots/so_follower/ <host>:.cache/huggingface/lerobot/calibration/robots/so_follower/`
+   Note the `robots/` level: the folder is `calibration/robots/so_follower`, not `calibration/so_follower`.
+   Files in the wrong folder are silently ignored (the scripts report a missing home pose).
+   Without the calibration file LeRobot would run a fresh calibration, which gives slightly different ranges
+   and no longer matches the saved home poses and sign files. If it asks "Press ENTER to use provided
+   calibration file", pressing ENTER is the right answer: it writes the file to the servos.
+d. **Check** with the arm checks below.
+
+### 3. Test the camera server (Pi, with the laptop)
+
+The server (`server/`, plan in [server_plan.md](server_plan.md)) runs on the Pi; experiments talk to it from the
+laptop. Test it camera-only first, then with the arms. Section 2a (install, with `--extra pyzmq-dep`) comes first.
+
+a. **Rehearse on the laptop with no robot.** Start a fake server in one terminal and check it from another:
+   `uv run python -m lerobot.felix_jr.server.server --fake`
+   `uv run python -m lerobot.felix_jr.checks.server_check`
+   It should print the server info, the joint positions of each arm, ten timed captures and a median time.
+b. **Start the server on the Pi, camera only:**
+   `uv run python -m lerobot.felix_jr.server.server`
+   It finds the source-built `pyrealsense2` under `/home/zcecere/CodeRepository/librealsense/build` (change it
+   with `--librealsense-build`), starts the camera and logs `listening on tcp://0.0.0.0:5555`. If it fails:
+   - `no pyrealsense2*.so under ...`: the bindings were not built there (`-DBUILD_PYTHON_BINDINGS=ON`).
+   - an import error naming the Python version: the venv's Python (3.12 here) must match the one the bindings were
+     built for.
+   - a USB permission error opening the camera: install librealsense's udev rules
+     (`config/99-realsense-libusb.rules` in the librealsense repo, then `sudo udevadm control --reload-rules &&
+     sudo udevadm trigger`) and replug the camera.
+c. **Check it from the laptop** (use the Pi's hostname or IP):
+   `uv run python -m lerobot.felix_jr.checks.server_check tcp://<pi>:5555 --save-dir ~/pi_capture`
+   Expect `camera True`, the arms list empty (camera only), and ten captures with their image shapes and times. Compare
+   `--jpeg` against the default PNG: PNG is lossless but larger, so slower over Wi-Fi. A `TimeoutError` means
+   the laptop can't reach port 5555 (wrong host, or a firewall on the Pi).
+d. **Look at the capture.** `uv run python -m lerobot.felix_jr.diagnostics.alignment_from_saved ~/pi_capture`
+   writes `alignment.png` next to the saved color and depth; check that the depth looks sensible and matches
+   the color. The folder also loads with `Scene.from_saved` (see [scene_tools.md](scene_tools.md)).
+e. **Add the arms.** Stop the server, then start it with their ports (from `setup.find_ports --show`):
+   `uv run python -m lerobot.felix_jr.server.server --left-port <LEFT_PORT> --right-port <RIGHT_PORT>`
+   and rerun the `server_check` from step c. It should now list both arms and print their joint positions.
+   The server only reads the arms, it doesn't move them. The positions are only meaningful if the arm files from
+   section 2c are in place, so compare them against a pose you know (e.g. the arm resting at home).
+
+## Checks and teleop (after either setup)
+
+1. **Check the arms move.** `uv run python -m lerobot.felix_jr.checks.wiggle_test --left <PORT> --right <PORT>`
    (`--no-base` / `--no-head` ignore the wheel / head servos).
-5. **Check the wheels** with the robot lifted:
+2. **Check the wheels** with the robot lifted:
    `uv run python -m lerobot.felix_jr.checks.wheel_test <PORT> <ID>`
-6. **Teleop.** `uv run python -m lerobot.felix_jr.teleop.spacemouse_teleop <PORT> <ID> --max-step 15`.
+3. **Teleop.** `uv run python -m lerobot.felix_jr.teleop.spacemouse_teleop <PORT> <ID> --max-step 15`.
    See the script's docstring for every option.
 
 ## When something looks wrong

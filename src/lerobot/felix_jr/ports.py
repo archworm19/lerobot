@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lerobot.utils.constants import HF_LEROBOT_CALIBRATION
+from lerobot.utils.import_utils import require_package
 
 PORTS_FILE = HF_LEROBOT_CALIBRATION / "felix_jr" / "ports.json"
 
@@ -34,6 +35,7 @@ def list_serial_ports() -> list[PortInfo]:
 
     On macOS each adapter shows up as both `/dev/cu.*` and `/dev/tty.*`; both are listed.
     """
+    require_package("pyserial", extra="feetech", import_name="serial")
     from serial.tools import list_ports
 
     return [

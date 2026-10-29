@@ -108,11 +108,17 @@ capture()            ----------------->  ...
   with `pyrealsense2` directly instead of LeRobot's `RealSenseCamera`, because a source build has no pip
   metadata, so LeRobot's availability check reports it as not installed and the camera class refuses to run.
   The Python version of the project's venv has to match the one the bindings were built for.
+- **Python environment on the Pi.** A plain `uv sync` has no serial or ZeroMQ libraries. Install the extras the
+  server needs: `uv sync --locked --extra feetech --extra pyzmq-dep` (`feetech` brings `pyserial` and the servo
+  SDK). Do not add `--extra intelrealsense`: it would install the PyPI `pyrealsense2` wheel, which does not exist
+  for aarch64; the source build is used instead.
 - **USB power.** The servos have their own supply, so the Pi's USB only powers the D415 and the two servo
   controllers' logic. If the camera drops out under load, try a powered USB hub.
-- **Calibration has to be redone on the Pi.** That covers arm calibration, home poses, wheel signs and head signs
-  (`~/.cache/huggingface/lerobot/calibration/robots/so_follower/`). Follow the first-time order in `README.md`.
-  Serial port names will also differ, so add a Pi section to `current_ports.md`.
+- **The Pi needs the arm files, not a new calibration.** The servos keep their calibration and IDs, so copy the
+  files in `~/.cache/huggingface/lerobot/calibration/robots/so_follower/` (calibration, home poses, wheel and
+  head signs) from the computer where the arms were set up. Port names differ on the Pi, so run
+  `setup.find_ports` there and add a Pi section to `current_ports.md`. The steps are in `README.md`,
+  "Set up on a new computer". Recalibrate only if an arm has been taken apart or a servo replaced.
 
 ## Status
 
