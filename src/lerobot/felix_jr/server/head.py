@@ -23,9 +23,13 @@ from typing import Any, Protocol
 TICKS_PER_TURN = 4096
 TICKS_PER_DEG = TICKS_PER_TURN / 360.0
 SUB_STEP_DEG = 5.0  # a long move is made in steps of at most this, each settled before the next
-SETTLE_TOLERANCE = 3  # ticks from the goal that count as "arrived"
+SETTLE_TOLERANCE = 8  # ticks (about 0.7 deg) from the goal that count as "arrived"
+# A servo that stops moving farther than this from its goal (about 3 deg) is called blocked and told to hold. Closer
+# than this it is only "short": the load or the servo's low P gain keeps it from the last few ticks, which is
+# normal, so the goal stays commanded and the servo keeps pulling towards it.
+BLOCKED_ERROR = 34
 SETTLE_TIMEOUT_S = 1.0
-STALL_POLLS = 4  # this many polls without any movement, away from the goal, mean the servo is stuck
+STALL_POLLS = 4  # this many polls without any movement, away from the goal, mean the servo has stopped
 POLL_S = 0.05
 RANGE_KEYS = ("limit_pos", "limit_neg", "home")
 MAX_TORQUE_LIMIT = 1000  # STS3215 Torque_Limit register: 0-1000 = 0-100 %
@@ -86,6 +90,7 @@ class HeadController:
         self.store = store
         self._sleep = sleep
         self._clock = clock
+        self._goals: dict[str, int] = {}  # the last goal each servo was told to hold
 
     def _check(self, name: str) -> None:
         if name not in self.backend.names():
@@ -118,21 +123,32 @@ class HeadController:
                     lo = max(lo, recorded[key])
         return lo, hi
 
+    def _base(self, name: str) -> int:
+        """Where a relative move starts.
+
+        That is the last commanded goal while the servo is still near it, else where the servo is. Counting
+        from the goal keeps repeated small moves from losing the few ticks the servo falls short each time (a
+        gravity-loaded servo at a low P gain always does).
+        """
+        actual = self.backend.read_ticks(name)
+        last = self._goals.get(name)
+        return last if last is not None and abs(actual - last) <= BLOCKED_ERROR else actual
+
     def move(self, name: str, delta_deg: float | None = None, to: str | None = None) -> dict[str, Any]:
         """Move servo `name` and wait until it has settled.
 
-        Give exactly one of: `delta_deg`, a move in degrees from where it is now (positive = down / left); or
-        `to`, "home" (the recorded home position). The goal is clamped to the recorded limits and the move
-        is made in steps of at most `SUB_STEP_DEG`. If the servo stops short of a step (it is blocked), it is
-        told to hold where it is and the move ends.
+        Give exactly one of: `delta_deg`, a move in degrees from where the servo was last told to be (positive
+        = down / left); or `to`, "home" (the recorded home position). The goal is clamped to the recorded
+        limits and the move is made in steps of at most `SUB_STEP_DEG`.
 
-        Returns `{name, ticks, goal, clamped, reached, done_at}`: where it ended up, the (clamped) goal,
-        whether the goal was clamped, whether the goal was reached, and the server time it finished.
+        Returns `{name, ticks, goal, clamped, reached, error_ticks, done_at}`: where it ended up, the
+        (clamped) goal, whether the goal was clamped, whether the servo got there (False only if it is
+        blocked: it stopped more than `BLOCKED_ERROR` ticks short, and was told to hold where it is), how many
+        ticks it is short of the goal (`goal - ticks`), and the server time it finished.
         """
         self._check(name)
         if (delta_deg is None) == (to is None):
             raise ValueError("give exactly one of delta_deg and to")
-        start = self.backend.read_ticks(name)
         if to is not None:
             if to != "home":
                 raise ValueError(f"`to` must be 'home', not {to!r}")
@@ -140,66 +156,77 @@ class HeadController:
             if target is None:
                 raise ValueError(f"no {to} recorded for {name}; record one first")
         else:
-            target = start + self.signs.get(name, 1) * round(float(delta_deg) * TICKS_PER_DEG)
+            target = self._base(name) + self.signs.get(name, 1) * round(float(delta_deg) * TICKS_PER_DEG)
+        return self._go(name, target)
+
+    def _go(self, name: str, target: int) -> dict[str, Any]:
+        """Take servo `name` to raw `target` (clamped to the recorded limits); see `move` for the result."""
         lo, hi = self.bounds(name)
         goal = min(max(target, lo), hi)
-
         sub_step = round(SUB_STEP_DEG * TICKS_PER_DEG)
-        commanded, reached = start, True  # steps are counted from what was commanded, so the loop always ends
+        commanded, blocked = (
+            self.backend.read_ticks(name),
+            False,
+        )  # counted from what was commanded: always ends
         while commanded != goal:
             commanded += min(max(goal - commanded, -sub_step), sub_step)
             self.backend.write_goal(name, commanded)
-            position, reached = self._settle(name, commanded)
-            if not reached:
-                self.backend.write_goal(name, position)  # blocked: hold here instead of pushing
+            position, status = self._settle(name, commanded)
+            if status == "blocked":
+                self.backend.write_goal(name, position)  # hold here instead of pushing
+                blocked = True
                 break
+        ticks = self.backend.read_ticks(name)
+        self._goals[name] = ticks if blocked else goal
         return {
             "name": name,
-            "ticks": self.backend.read_ticks(name),
+            "ticks": ticks,
             "goal": goal,
             "clamped": goal != target,
-            "reached": reached,
+            "reached": not blocked,
+            "error_ticks": goal - ticks,
             "done_at": self._clock(),
         }
 
-    def _settle(self, name: str, goal: int) -> tuple[int, bool]:
-        """Wait until servo `name` is at `goal`.
+    def _settle(self, name: str, goal: int) -> tuple[int, str]:
+        """Wait until servo `name` is at `goal`. Returns (position, status).
 
-        Returns (position, arrived); not arrived if it stopped moving short of the goal or took too long.
+        Status is "arrived" (within `SETTLE_TOLERANCE`), "short" (it stopped moving, or took too long, but is
+        within `BLOCKED_ERROR` of the goal) or "blocked" (stopped or too slow, farther than that).
         """
         started, last, still = self._clock(), None, 0
         while True:
             position = self.backend.read_ticks(name)
             if abs(position - goal) <= SETTLE_TOLERANCE:
-                return position, True
+                return position, "arrived"
             still = still + 1 if position == last else 0
             if still >= STALL_POLLS or self._clock() - started > SETTLE_TIMEOUT_S:
-                return position, False
+                return position, "short" if abs(position - goal) <= BLOCKED_ERROR else "blocked"
             last = position
             self._sleep(POLL_S)
 
     def wiggle(self, name: str, degrees: float) -> dict[str, Any]:
         """Nudge servo `name` in both directions, coming back to where it started after each.
 
-        It goes `degrees` in the positive direction (down / left), then the same the other way. Moves go
-        through `move`, so recorded limits apply.
+        It goes `degrees` in the positive direction (down / left), then the same the other way. Moves are
+        clamped to the recorded limits.
 
         Returns `to_pos` and `to_neg`: how far it actually went in each direction, in degrees measured in the
         direction it was asked to go (both close to `degrees` if it followed the command); `limited`: a move was
-        shortened by a recorded limit; `blocked`: the servo stopped short of a goal without a limit being the
-        reason.
+        shortened by a recorded limit; `blocked`: the servo stopped well short of a goal without a limit being
+        the reason.
         """
         self._check(name)
         sign = self.signs.get(name, 1)
-        base = self.backend.read_ticks(name)
+        measured_from = self.backend.read_ticks(name)
+        base = self._base(name)
         achieved, limited, blocked = [], False, False
         for direction in (+1, -1):
-            out = self.move(name, delta_deg=direction * degrees)
+            out = self._go(name, base + direction * sign * round(degrees * TICKS_PER_DEG))
             limited |= out["clamped"]
             blocked |= not out["reached"]
-            achieved.append(direction * sign * (out["ticks"] - base) / TICKS_PER_DEG)
-            back = self.move(name, delta_deg=sign * (base - out["ticks"]) / TICKS_PER_DEG)
-            blocked |= not back["reached"]
+            achieved.append(direction * sign * (out["ticks"] - measured_from) / TICKS_PER_DEG)
+            blocked |= not self._go(name, base)["reached"]
         return {"to_pos": achieved[0], "to_neg": achieved[1], "limited": limited, "blocked": blocked}
 
     def record(self, name: str, what: str) -> dict[str, Any]:

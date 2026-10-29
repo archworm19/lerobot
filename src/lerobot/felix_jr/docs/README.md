@@ -73,7 +73,8 @@ b. **Find each arm's port.** Plug in both arms' USB cables, then:
    LeRobot's `uv run lerobot-find-port` does the same for one cable at a time, without saving anything.
 c. **Copy the arm files** from a computer where the arms were already set up. They are everything in
    `~/.cache/huggingface/lerobot/calibration/robots/so_follower/`: `<id>.json` (calibration), `<id>_home.json`,
-   and `<id>_base.json` / `<id>_head.json` where fitted. Keep the same ids and the same folder, e.g.
+   and `<id>_base.json` / `<id>_head.json` / `<id>_head_range.json` where fitted. Keep the same ids and the same
+   folder, e.g.
    `rsync -av ~/.cache/huggingface/lerobot/calibration/robots/so_follower/ <host>:.cache/huggingface/lerobot/calibration/robots/so_follower/`
    Note the `robots/` level: the folder is `calibration/robots/so_follower`, not `calibration/so_follower`.
    Files in the wrong folder are silently ignored (the scripts report a missing home pose).
