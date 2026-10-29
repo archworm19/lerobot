@@ -9,10 +9,24 @@
 
 Every method blocks until the reply arrives and raises `TimeoutError` if the server stays silent, or
 `ServerError` if the server reports a failure.
+
+Moving the robot: wrap the script in a session, so the robot goes to rest when the script ends (normally, with
+Ctrl+C, or if the script dies and the heartbeats stop):
+
+  with robot.session():                        # on_disconnect="home" by default
+      robot.move_joints({"left_arm": {"shoulder_pan.pos": 10.0}})     # blocks until done
+      status = robot.home()
+      assert status["state"] == "done"         # "stopped" if something called stop() or the watchdog fired
+
+Without a session the robot stays wherever the last motion left it.
 """
 
+import contextlib
 import itertools
 import logging
+import threading
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,6 +36,8 @@ import zmq
 from lerobot.felix_jr.server.protocol import (
     DEFAULT_PORT,
     PROTOCOL_VERSION,
+    MotionBusyError,
+    MotionFailedError,
     ServerError,
     decode_image,
     pack,
@@ -29,6 +45,36 @@ from lerobot.felix_jr.server.protocol import (
 )
 
 log = logging.getLogger("felix_client")
+
+
+class _Heartbeat:
+    """Sends a `heartbeat` request every `period_s` on its own socket.
+
+    That way the server's watchdog hears from a client that is busy (or waiting on a long reply) in another
+    thread.
+    """
+
+    def __init__(self, context: zmq.Context, endpoint: str, period_s: float):
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, args=(context, endpoint, period_s), daemon=True, name="felix-heartbeat"
+        )
+        self._thread.start()
+
+    def _run(self, context: zmq.Context, endpoint: str, period_s: float) -> None:
+        socket = context.socket(zmq.DEALER)  # sockets are not thread-safe: this one belongs to this thread
+        socket.connect(endpoint)
+        try:
+            while not self._stop.wait(period_s):
+                socket.send_multipart(pack({"id": 0, "cmd": "heartbeat", "args": {}}))
+                while socket.poll(0):
+                    socket.recv_multipart()  # drop the replies
+        finally:
+            socket.close(linger=0)
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2.0)
 
 
 @dataclass
@@ -108,6 +154,8 @@ class FelixClient:
             if header.get("id") != req_id:
                 continue  # a stale reply from an earlier request
             if not header["ok"]:
+                if header["error"].startswith("MotionBusyError"):
+                    raise MotionBusyError(header["error"])
                 raise ServerError(header["error"])
             return header["result"], frames, header.get("frames", [])
 
@@ -147,6 +195,14 @@ class FelixClient:
         """
         return self._call("head_move", name=name, delta_deg=delta_deg, to=to)[0]
 
+    def head_wiggle(self, name: str, degrees: float = 8.0) -> dict[str, Any]:
+        """Nudge head servo `name` `degrees` each way and back to where it started.
+
+        Returns `to_pos` / `to_neg` (how far it went in each direction, in degrees), `limited` (a recorded limit
+        shortened a move) and `blocked` (the servo stopped well short of a goal).
+        """
+        return self._call("head_wiggle", name=name, degrees=degrees)[0]
+
     def head_record(self, name: str, what: str) -> dict[str, Any]:
         """Save head servo `name`'s present position as `what` (`limit_pos`, `limit_neg`, `home`)."""
         return self._call("head_record", name=name, what=what)[0]
@@ -154,3 +210,119 @@ class FelixClient:
     def head_torque_limit(self, name: str, limit: int) -> dict[str, Any]:
         """Cap head servo `name`'s torque, 1-1000 (1000 = no cap), until it loses power."""
         return self._call("head_torque_limit", name=name, limit=limit)[0]
+
+    # ---- motion ---------------------------------------------------------------------------------------------
+
+    def motion_status(self) -> dict[str, Any]:
+        """The running or most recent motion: `{moving, state, motion_id, kind, reason, result}`.
+
+        `state` is idle, running, done, stopped or failed.
+        """
+        return self._call("motion_status")[0]
+
+    def wait_motion(self, timeout_s: float = 120.0, poll_s: float = 0.1) -> dict[str, Any]:
+        """Wait until no motion is running and return its final status.
+
+        Raises `MotionFailedError` if it failed, and `TimeoutError` if it is still running after `timeout_s`
+        (it is not stopped; call `stop()` if you want that). Polling also tells the watchdog you are alive.
+        """
+        deadline = time.monotonic() + timeout_s
+        while True:
+            status = self.motion_status()
+            if not status["moving"]:
+                if status["state"] == "failed":
+                    raise MotionFailedError(f"{status['kind']} failed: {status['reason']}", status)
+                return status
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"{status['kind']} still running after {timeout_s:.0f} s")
+            time.sleep(poll_s)
+
+    def move_joints(
+        self,
+        targets: dict[str, dict[str, float]],
+        max_vel: float | None = None,
+        max_accel: float | None = None,
+        tol: float = 1.5,
+        timeout: float = 10.0,
+        wait: bool = True,
+    ) -> dict[str, Any]:
+        """Move the arms to `targets`, all together: `{"left_arm": {"shoulder_pan.pos": deg, ...}, ...}`.
+
+        This is one target pose, reached from wherever the arms are now; for a path or a replan, call it again
+        with the next target (each call ends at rest). Joints are in degrees (the gripper 0-100); joints not
+        listed stay put. `max_vel` / `max_accel` default
+        to 60 deg/s and 120 deg/s^2; `tol` and `timeout` control the settling at the end. With `wait` (the
+        default) it returns the final status (see `wait_motion`), else `{motion_id}` right away.
+        """
+        started = self._call(
+            "move_joints", targets=targets, max_vel=max_vel, max_accel=max_accel, tol=tol, timeout=timeout
+        )[0]
+        return self.wait_motion() if wait else started
+
+    def home(
+        self,
+        max_vel: float | None = None,
+        max_accel: float | None = None,
+        wait: bool = True,
+        arms: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Go to rest: the arms to their recorded home poses (default: all), then the head to its home."""
+        started = self._call("home", max_vel=max_vel, max_accel=max_accel, arms=arms)[0]
+        return self.wait_motion() if wait else started
+
+    def base_velocity(
+        self, left_degps: float, right_degps: float, seconds: float, wait: bool = True
+    ) -> dict[str, Any]:
+        """Drive the wheels (deg/s, positive = forward) for `seconds` (at most 5), then stop them.
+
+        The final status's `result["measured"]` holds the measured (left, right) speeds.
+        """
+        started = self._call(
+            "base_velocity", left_degps=left_degps, right_degps=right_degps, seconds=seconds
+        )[0]
+        return self.wait_motion() if wait else started
+
+    def stop(self) -> dict[str, Any]:
+        """Abort the running motion. The arms hold where they are. Returns `{was_moving}`."""
+        return self._call("stop")[0]
+
+    def get_homes(self) -> dict[str, dict[str, float]]:
+        """The recorded home pose of every arm (they are recorded on the robot, with `setup.record_home`)."""
+        return self._call("get_homes")[0]["homes"]
+
+    @contextlib.contextmanager
+    def session(self, on_disconnect: str = "home", heartbeat_s: float = 1.0) -> Iterator["FelixClient"]:
+        """Tell the server this client is in charge, and what to do when it ends or goes silent.
+
+        With `on_disconnect="home"` (default) the robot goes to rest when the block ends, however it ends
+        (normally, an exception, Ctrl+C): the motion is stopped and the arms go home. A background heartbeat
+        keeps the server informed meanwhile; if the script dies or the network drops, the heartbeats stop and
+        the server goes to rest by itself after a few seconds. "hold" leaves the robot where it is.
+
+        If going to rest is itself interrupted, the session is left open on purpose, so the server finishes
+        the job when the heartbeats stop.
+        """
+        self._call("session_open", on_disconnect=on_disconnect)
+        heartbeat = _Heartbeat(self._context, self.endpoint, heartbeat_s)
+        try:
+            yield self
+        finally:
+            finished = False
+            try:
+                if on_disconnect == "home":
+                    self._go_to_rest()
+                finished = True
+            except Exception:
+                log.exception("could not go to rest from the client; the server will try when it loses us")
+            finally:
+                heartbeat.stop()
+                if finished:
+                    with contextlib.suppress(Exception):
+                        self._call("session_close", timeout_s=2.0)
+
+    def _go_to_rest(self) -> None:
+        """Stop whatever is moving, wait for it to end, then go home."""
+        self.stop()
+        with contextlib.suppress(MotionFailedError):
+            self.wait_motion(timeout_s=10.0)
+        self.home()

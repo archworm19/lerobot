@@ -7,6 +7,7 @@ The home pose is saved next to the arm's calibration file as `<id>_home.json`, i
 import json
 import time
 import numpy as np
+from collections.abc import Callable
 from pathlib import Path
 
 from lerobot.felix_jr.base_follower import SO101FollowerWithBase
@@ -152,6 +153,8 @@ def move_all(
     rate_hz: float = 30.0,  # waypoint rate
     timeout: float = 10.0,  # seconds allowed for the settle phase after the trajectory ends
     min_dwell_time: float = 0.2,  # seconds all joints must stay within tolerance
+    should_stop: Callable[[], bool] | None = None,  # polled every tick; True aborts and holds the last waypoint
+    on_tick: Callable[[], None] | None = None,  # called every tick (e.g. to publish a progress snapshot)
 ) -> bool:
     """Move several arms at once along synchronized trapezoidal trajectories.
 
@@ -160,6 +163,9 @@ def move_all(
     lerobot `max_relative_target` clamp stays on as a safety net. Afterwards the final targets are held
     until every joint is within `tol` for `min_dwell_time`, or `timeout` expires.
     This is meant to run in a single thread ~ if you want parallel, spin this up as separate python process.
+
+    `should_stop` lets another thread cancel: once it returns True, no further waypoints are sent (the servos
+    keep holding the last one, and the next trajectory starts from it) and the function returns False.
     """
     period = 1.0 / rate_hz
 
@@ -184,6 +190,10 @@ def move_all(
     # execute the trajectory at a fixed rate
     t0 = time.perf_counter()
     while (t := time.perf_counter() - t0) < total_time:
+        if should_stop is not None and should_stop():
+            return False
+        if on_tick is not None:
+            on_tick()
         for robot_id, robot in robots.items():
             waypoint = {
                 k: starts[robot_id][k]
@@ -200,6 +210,10 @@ def move_all(
     settle_start = time.perf_counter()
     dwell_start: float | None = None
     while True:
+        if should_stop is not None and should_stop():
+            return False
+        if on_tick is not None:
+            on_tick()
         off_target: dict[str, float] = {}
         for robot_id, robot in robots.items():
             robot.send_action(targets[robot_id])

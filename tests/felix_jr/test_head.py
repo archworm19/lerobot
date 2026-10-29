@@ -151,6 +151,63 @@ def test_wiggle_reports_a_blocked_servo():
     assert result["blocked"] and result["to_pos"] == 0.0
 
 
+class Sagging(FakeHeadBackend):
+    """Servos that always end `sag` ticks short of a goal in the raw-down direction (like a loaded camera)."""
+
+    def __init__(self, sag: int):
+        super().__init__()
+        self.sag, self.writes = sag, []
+
+    def write_goal(self, name, ticks):
+        self.writes.append(ticks)
+        super().write_goal(name, ticks - self.sag)
+
+
+def fake_time():
+    now = [0.0]
+    return {"sleep": lambda s: now.__setitem__(0, now[0] + s), "clock": lambda: now[0]}
+
+
+def test_a_servo_that_falls_a_little_short_is_not_blocked_and_presses_do_not_lose_ticks():
+    backend = Sagging(sag=6)  # within SETTLE_TOLERANCE
+    controller = HeadController(backend, SIGNS, RangeStore(), **fake_time())
+    backend.write_goal(EYES, 2048 + 6)  # start exactly at 2048 (the servo sags 6 ticks from this goal)
+    step = round(2.0 * TICKS_PER_DEG)
+    for press in range(1, 6):
+        out = controller.move(EYES, delta_deg=2.0)
+        assert out["reached"] and out["error_ticks"] == 6
+        assert out["goal"] == 2048 + press * step  # presses add up from the goal, not from where it sagged
+    assert backend.read_ticks(EYES) == 2048 + 5 * step - 6
+
+
+def test_a_servo_stuck_a_few_degrees_short_keeps_its_goal_instead_of_holding():
+    backend = Sagging(sag=20)  # beyond the tolerance, but well within BLOCKED_ERROR
+    controller = HeadController(backend, SIGNS, RangeStore(), **fake_time())
+    backend.write_goal(EYES, 2048 + 20)
+    out = controller.move(EYES, delta_deg=2.0)
+    assert out["reached"] is True  # short, not blocked
+    assert out["error_ticks"] == 20
+    assert backend.writes[-1] == out["goal"]  # still commanding the goal, so the servo keeps pulling
+
+
+def test_relative_moves_start_from_where_the_servo_is_if_it_was_moved_by_hand():
+    backend = FakeHeadBackend()
+    controller = HeadController(backend, SIGNS, RangeStore(), **fake_time())
+    controller.move(EYES, delta_deg=2.0)
+    backend._ticks[EYES] += 300  # someone turned it
+    controller.move(EYES, delta_deg=2.0)
+    assert backend.read_ticks(EYES) == 2048 + round(2.0 * TICKS_PER_DEG) + 300 + round(2.0 * TICKS_PER_DEG)
+
+
+def test_wiggle_on_a_sagging_servo_is_not_reported_as_blocked():
+    backend = Sagging(sag=12)
+    controller = HeadController(backend, SIGNS, RangeStore(), **fake_time())
+    backend.write_goal(EYES, 2048 + 12)
+    result = controller.wiggle(EYES, 8.0)
+    assert not result["blocked"]
+    assert result["to_pos"] == pytest.approx(8.0, abs=1.5) and result["to_neg"] == pytest.approx(8.0, abs=1.5)
+
+
 def test_range_store_persists(tmp_path):
     path = tmp_path / "sub" / "left_arm_head_range.json"
     controller = HeadController(FakeHeadBackend(), SIGNS, RangeStore(path))

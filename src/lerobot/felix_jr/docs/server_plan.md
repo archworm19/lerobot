@@ -127,9 +127,27 @@ format, version 2), `hardware.py` (`FakeHardware`, `RealHardware`), `head.py` (`
 ticks with recorded limits and home), `server.py` and `client.py` (`FelixClient`).
 
 Commands so far: `hello`, `get_state` (arms and head), `capture` (with `after=<time>` to wait for a frame taken
-after a move finished, since the camera lags), `head_move`, `head_record`, `head_torque_limit`. Tried on the Pi:
-`hello`, `get_state` and `capture`. Not yet on the real hardware: the head commands and `capture(after=)`.
-`setup/head_range.py` is the first tool built on them.
+after a move finished, since the camera lags), the head commands (`head_move`, `head_wiggle`, `head_record`,
+`head_torque_limit`), and the motion commands (`move_joints`, `home`, `base_velocity`, `motion_status`, `stop`,
+`get_homes`, `heartbeat`, `session_open` / `session_close`). Protocol version 3. Tried on the Pi: `hello`,
+`get_state`, `capture`, and the head range tool. Not yet on the real hardware: the motion commands.
+`setup/head_range.py` and `checks/server_wiggle.py` are the tools built on them.
+
+Motion design (`server/motion.py`):
+
+- `move_joints` takes **one target pose per arm** (all arms together, from wherever they are) and returns a motion
+  id at once; the client polls. To follow a path or replan, send the next target when one ends, or `stop` and send
+  a new one. There is no multi-waypoint path yet: every call ends at rest. An arm must have a recorded home pose
+  (it does not need to be at it).
+- One motion at a time, on a worker thread, which owns the serial bus. While it runs, `get_state` and `capture`
+  answer from a snapshot the motion refreshes every 0.2 s, and head commands get `MotionBusyError`.
+- `stop` aborts and holds in place. Going to rest is `home`: the saved home pose of each arm, the head's recorded
+  home, wheels stopped.
+- Rest happens on a client session ending (`client.session()`), on a lost session (no heartbeat for 5 s, started by
+  the server itself, slowly, and not subject to the watchdog), and on server shutdown (before the servos are
+  released). A running motion is also stopped if no request arrives for 3 s. Wheel commands are time-bounded
+  (at most 5 s).
+- Not done: a replace-in-flight command, multi-waypoint paths, authentication, and a systemd unit.
 
 ```bash
 # on the Pi (add --fake to run with no hardware)

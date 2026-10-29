@@ -13,12 +13,25 @@ from typing import Any
 import cv2
 import numpy as np
 
-PROTOCOL_VERSION = 2  # 2: capture(after=), head_* commands, head state in get_state
+PROTOCOL_VERSION = 3  # 3: motion commands, sessions; 2: capture(after=), head_* commands
 DEFAULT_PORT = 5555
 
 
 class ServerError(RuntimeError):
     """The server answered a request with an error."""
+
+
+class MotionBusyError(ServerError):
+    """The server refused a request because a motion is already running."""
+
+
+class MotionFailedError(RuntimeError):
+    """A motion ended in the `failed` state; `status` is the server's `motion_status` at that point."""
+
+    def __init__(self, message: str, status: dict[str, Any]):
+        """`message` says what failed; `status` is the final motion status."""
+        super().__init__(message)
+        self.status = status
 
 
 def encode_image(image: np.ndarray, fmt: str = "png", jpeg_quality: int = 95) -> bytes:

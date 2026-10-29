@@ -8,6 +8,7 @@ LeRobot's availability check reports it as not installed and the camera class re
 
 import contextlib
 import glob
+import logging
 import sys
 import threading
 import time
@@ -18,6 +19,9 @@ from typing import Any, Protocol
 import numpy as np
 
 from lerobot.felix_jr.server.head import HeadController, RangeStore
+from lerobot.felix_jr.server.motion import MotionController
+
+log = logging.getLogger("felix_hardware")
 
 DEFAULT_LIBREALSENSE_BUILD = "/home/zcecere/CodeRepository/librealsense/build"
 # A frame is only trusted to show the scene after a move once it arrived this long (seconds) after the move
@@ -61,8 +65,10 @@ class Hardware(Protocol):
     def close(self) -> None:
         """Release the camera and the serial ports."""
 
-    # `head`: a `HeadController`, or None if the robot has no head servos. Set by the implementations.
+    # Set by the implementations: `head` is a `HeadController`, or None if there are no head servos; `motion`
+    # runs the arm and wheel motions (and answers `state()`).
     head: HeadController | None
+    motion: MotionController
 
 
 class FakeHeadBackend:
@@ -128,6 +134,167 @@ def make_head_controller(robot) -> HeadController | None:
     )
 
 
+class FakeArms:
+    """Simulated arms (and a wheel base on the last one) that follow a trajectory in a fraction of real time.
+
+    A trajectory of `d` seconds takes `d * time_scale` seconds. The arms start at their home pose. Using the
+    "bus" (`observe`, the wheels) from a second thread while a trajectory runs is counted in `violations`, as
+    that would corrupt the packets on a real serial bus. `trajectories` records every request.
+    """
+
+    HOME = {
+        "shoulder_pan.pos": 0.0,
+        "shoulder_lift.pos": -100.0,
+        "elbow_flex.pos": 95.0,
+        "wrist_flex.pos": 70.0,
+        "wrist_roll.pos": 0.0,
+        "gripper.pos": 1.0,
+    }
+
+    def __init__(self, ids: tuple[str, ...] = ("left_arm", "right_arm"), time_scale: float = 0.05):
+        """Arms called `ids`, each at its home pose."""
+        self.ids, self.time_scale = list(ids), time_scale
+        self.pos = {i: dict(self.HOME) for i in ids}
+        self.violations = 0
+        self.trajectories: list[tuple[dict, float, float]] = []
+        self.wheels = (0.0, 0.0)
+        self._active: int | None = None  # id of the thread running a trajectory
+
+    def _use_bus(self) -> None:
+        if self._active is not None and self._active != threading.get_ident():
+            self.violations += 1
+
+    def arm_ids(self) -> list[str]:
+        """See `ArmBackend.arm_ids`."""
+        return list(self.ids)
+
+    def observe(self) -> dict[str, dict[str, float]]:
+        """See `ArmBackend.observe`."""
+        self._use_bus()
+        return {i: dict(p) for i, p in self.pos.items()}
+
+    def homes(self) -> dict[str, dict[str, float]]:
+        """See `ArmBackend.homes`."""
+        return {i: dict(self.HOME) for i in self.ids}
+
+    def run_trajectory(self, targets, max_vel, max_accel, tol, timeout, should_stop, on_tick) -> bool:
+        """See `ArmBackend.run_trajectory`: a straight-line move at `max_vel`, plus the time to speed up."""
+        self.trajectories.append((targets, max_vel, max_accel))
+        self._active = threading.get_ident()
+        try:
+            starts = {i: {k: self.pos[i][k] for k in joints} for i, joints in targets.items()}
+            biggest = max(
+                (abs(v - starts[i][k]) for i, j in targets.items() for k, v in j.items()), default=0.0
+            )
+            duration = max(0.02, (biggest / max_vel + max_vel / max_accel) * self.time_scale)
+            started = time.monotonic()
+            while (elapsed := time.monotonic() - started) < duration:
+                if should_stop():
+                    return False
+                fraction = elapsed / duration
+                for i, joints in targets.items():
+                    for k, v in joints.items():
+                        self.pos[i][k] = starts[i][k] + fraction * (v - starts[i][k])
+                on_tick()
+                time.sleep(0.005)
+            for i, joints in targets.items():
+                self.pos[i].update(joints)
+            return True
+        finally:
+            self._active = None
+
+    def has_base(self) -> bool:
+        """See `ArmBackend.has_base`."""
+        return True
+
+    def set_base_velocity(self, left_degps: float, right_degps: float) -> None:
+        """See `ArmBackend.set_base_velocity`."""
+        self._use_bus()
+        self.wheels = (left_degps, right_degps)
+
+    def base_velocity(self) -> tuple[float, float]:
+        """See `ArmBackend.base_velocity` (the wheels follow instantly)."""
+        self._use_bus()
+        return self.wheels
+
+    def stop_base(self) -> None:
+        """See `ArmBackend.stop_base`."""
+        self._use_bus()
+        self.wheels = (0.0, 0.0)
+
+
+class RealArms:
+    """The connected `SO101FollowerWithBase` arms, driven with `home.move_all`."""
+
+    def __init__(self, robots: dict[str, Any]):
+        """`robots` maps a robot id to its connected follower.
+
+        Home poses are read from the saved files; an arm without one can be read but not moved.
+        """
+        from lerobot.felix_jr.home import load_home
+
+        self.robots = robots
+        self._homes: dict[str, dict[str, float]] = {}
+        for robot_id, robot in robots.items():
+            home = load_home(robot)
+            if home is None:
+                log.warning("%s has no recorded home (setup.record_home): it cannot be moved", robot_id)
+            else:
+                self._homes[robot_id] = home
+
+    def arm_ids(self) -> list[str]:
+        """See `ArmBackend.arm_ids`."""
+        return list(self.robots)
+
+    def observe(self) -> dict[str, dict[str, float]]:
+        """See `ArmBackend.observe`."""
+        return {
+            robot_id: {k: float(v) for k, v in robot.get_observation().items()}
+            for robot_id, robot in self.robots.items()
+        }
+
+    def homes(self) -> dict[str, dict[str, float]]:
+        """See `ArmBackend.homes`."""
+        return {robot_id: dict(home) for robot_id, home in self._homes.items()}
+
+    def run_trajectory(self, targets, max_vel, max_accel, tol, timeout, should_stop, on_tick) -> bool:
+        """See `ArmBackend.run_trajectory`."""
+        from lerobot.felix_jr.home import move_all
+
+        return move_all(
+            {robot_id: self.robots[robot_id] for robot_id in targets},
+            targets,
+            tol=tol,
+            max_vel=max_vel,
+            max_accel=max_accel,
+            timeout=timeout,
+            should_stop=should_stop,
+            on_tick=on_tick,
+        )
+
+    def _base_robot(self):
+        return next((r for r in self.robots.values() if getattr(r, "with_base", False)), None)
+
+    def has_base(self) -> bool:
+        """See `ArmBackend.has_base`."""
+        return self._base_robot() is not None
+
+    def set_base_velocity(self, left_degps: float, right_degps: float) -> None:
+        """See `ArmBackend.set_base_velocity`."""
+        self._base_robot().set_base_velocity(left_degps, right_degps)
+
+    def base_velocity(self) -> tuple[float, float]:
+        """See `ArmBackend.base_velocity`."""
+        speeds = self._base_robot().get_base_velocity()
+        return float(speeds["base_left_wheel"]), float(speeds["base_right_wheel"])
+
+    def stop_base(self) -> None:
+        """See `ArmBackend.stop_base`."""
+        robot = self._base_robot()
+        if robot is not None:
+            robot.stop_base()
+
+
 class FakeHardware:
     """A robot with a synthetic scene: a flat wall 1 m away with a box 0.6 m away, and arms at rest.
 
@@ -139,31 +306,39 @@ class FakeHardware:
     PIXELS_PER_TICK = 0.1
 
     def __init__(
-        self, arms: tuple[str, ...] = ("left_arm", "right_arm"), head_range_path: Path | None = None
+        self,
+        arms: tuple[str, ...] = ("left_arm", "right_arm"),
+        head_range_path: Path | None = None,
+        arm_time_scale: float = 0.25,
+        **motion_kwargs: Any,
     ):
         """A fake robot with arms named `arms`.
 
-        `head_range_path` is where the head's recorded range is kept (default: not saved).
+        `head_range_path` is where the head's recorded range is kept (default: not saved). `arm_time_scale`
+        shortens simulated arm motions (see `FakeArms`); `motion_kwargs` go to `MotionController` (e.g. a
+        short `watchdog_s` for tests).
         """
-        self.arms = arms
         self.captures = 0
+        self.arm_backend = FakeArms(arms, arm_time_scale)
         self.head: HeadController | None = HeadController(
             FakeHeadBackend(), {"head_neck": -1, "head_eyes": 1}, RangeStore(head_range_path)
         )
+        self.motion = MotionController(self.arm_backend, head=self.head, **motion_kwargs)
 
     def info(self) -> dict[str, Any]:
         """See `Hardware.info`."""
-        return {"arms": list(self.arms), "head": True, "base": True, "camera": True, "fake": True}
+        return {
+            "arms": self.arm_backend.arm_ids(),
+            "head": True,
+            "base": True,
+            "camera": True,
+            "motion": True,
+            "fake": True,
+        }
 
     def state(self) -> dict[str, Any]:
         """See `Hardware.state`."""
-        joints = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
-        arm = {f"{j}.pos": 0.0 for j in joints}
-        arm["gripper.pos"] = 50.0
-        out = {**{name: dict(arm) for name in self.arms}, "moving": False}
-        if self.head is not None:
-            out["head"] = self.head.state()
-        return out
+        return self.motion.state()
 
     def capture(self, after: float | None = None) -> Snapshot:
         """See `Hardware.capture` (a fake frame is always fresh, so `after` changes nothing)."""
@@ -189,7 +364,8 @@ class FakeHardware:
         return Snapshot(color, depth, calibration, self.state(), time.time())
 
     def close(self) -> None:
-        """Nothing to release."""
+        """Stop any motion and go to rest (there is nothing else to release)."""
+        self.motion.shutdown(go_home=True)
 
 
 def add_librealsense_to_path(build_dir: str | Path) -> Path:
@@ -272,14 +448,22 @@ class RealHardware:
         height: int = 480,
         fps: int = 30,
         librealsense_build: str | Path | None = DEFAULT_LIBREALSENSE_BUILD,
+        home_on_exit: bool = True,
+        **motion_kwargs: Any,
     ):
-        """Open the camera (unless `camera` is False) and connect each arm. Closes everything on failure."""
+        """Open the camera (unless `camera` is False) and connect each arm. Closes everything on failure.
+
+        `home_on_exit`: on `close`, send the arms (and head) to their recorded home before the servos are
+        released, since releasing switches torque off. `motion_kwargs` go to `MotionController`.
+        """
         from lerobot.felix_jr.home import (
             make_follower,
         )  # imported here so a camera-only run needs no serial libs
 
         self.robots = {}
         self.head: HeadController | None = None
+        self.motion: MotionController | None = None
+        self._home_on_exit = home_on_exit
         self._frames: _LatestFrames | None = None
         self._pipeline = None
         self._calibration: dict[str, Any] | None = None
@@ -291,6 +475,7 @@ class RealHardware:
                 robot.connect(calibrate=False)
                 self.robots[robot_id] = robot
                 self.head = make_head_controller(robot) or self.head
+            self.motion = MotionController(RealArms(self.robots), head=self.head, **motion_kwargs)
         except Exception:
             self.close()
             raise
@@ -335,17 +520,13 @@ class RealHardware:
             "head": any(getattr(r, "with_head", False) for r in self.robots.values()),
             "base": any(getattr(r, "with_base", False) for r in self.robots.values()),
             "camera": self._frames is not None,
+            "motion": True,
             "fake": False,
         }
 
     def state(self) -> dict[str, Any]:
         """See `Hardware.state`."""
-        out: dict[str, Any] = {"moving": False}
-        for robot_id, robot in self.robots.items():
-            out[robot_id] = {k: float(v) for k, v in robot.get_observation().items()}
-        if self.head is not None:
-            out["head"] = self.head.state()
-        return out
+        return self.motion.state()
 
     def capture(self, after: float | None = None) -> Snapshot:
         """See `Hardware.capture`. Needs the camera."""
@@ -355,7 +536,10 @@ class RealHardware:
         return Snapshot(color, depth, self._calibration, self.state(), timestamp)
 
     def close(self) -> None:
-        """Stop the camera and disconnect the arms; safe to call twice."""
+        """Go to rest, stop the camera and disconnect the arms; safe to call twice."""
+        if self.motion is not None:
+            self.motion.shutdown(go_home=self._home_on_exit)  # before the servos' torque is switched off
+            self.motion = None
         if self._frames is not None:
             self._frames.stop()
             self._frames = None

@@ -141,6 +141,33 @@ cable. This script lets you tilt the head in small steps while watching the came
 Everything recorded is saved on the Pi in `<id>_head_range.json` next to the arm's calibration, and later head
 moves are clamped to the limits. The script's docstring lists every option.
 
+### 5. Wiggle the robot through the server (Pi, with the laptop)
+
+The same wiggle as `checks.wiggle_test`, but the commands come from your computer through the server. It tests
+the motion commands, the stop and rest behaviour, and (optionally) the camera while the robot moves.
+
+1. On the Pi, stop anything else that uses the arms' ports, then start the server with both arms:
+   `uv run python -m lerobot.felix_jr.server.server --left-port <LEFT_PORT> --right-port <RIGHT_PORT>`
+   Each arm needs a recorded home (`setup.record_home`). On startup the server connects the arms; when it exits
+   (Ctrl+C or a stop from systemd) it sends them to their home poses first, then releases the servos. Use
+   `--no-home-on-exit` to skip that.
+2. Rehearse on your computer with a fake robot first: `server.server --fake`, then
+   `uv run python -m lerobot.felix_jr.checks.server_wiggle` (the fake arms move in a quarter of real time).
+3. On your computer, with the arms supported and the workspace clear:
+   `uv run python -m lerobot.felix_jr.checks.server_wiggle tcp://<pi>:5555 --no-base --capture-dir ~/wiggle_frames`
+   It prints the same lines as the local test, nudges each joint, goes home, then wiggles the head. Drop
+   `--no-base` for the wheels (robot lifted). `--capture-dir` saves a camera frame after each step, taken after
+   the move finished.
+4. Test the safety behaviour: press **Ctrl+C** part way through. The motion should stop and the robot go to
+   rest. Then try closing the terminal or pulling the laptop off the network mid-wiggle: after about 5 seconds
+   without heartbeats the server stops the motion and sends the robot to rest by itself, slowly.
+
+How it behaves, in short: `move_joints` takes one target pose per arm and returns at once, the client polls until
+it ends; `stop` aborts and holds in place; only one motion runs at a time; while arms move, `get_state` and
+`capture` answer from a snapshot (nothing else may use the serial bus then). Scripts that move the robot wrap
+themselves in `client.session()`, which sends it to rest on any exit; scripts that only read open no session and
+are never moved. Details are in `server/motion.py` and the module docstring of `server/client.py`.
+
 ## Checks and teleop (after either setup)
 
 1. **Check the arms move.** `uv run python -m lerobot.felix_jr.checks.wiggle_test --left <PORT> --right <PORT>`
