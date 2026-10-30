@@ -548,6 +548,8 @@ exclude = ["src/lerobot/policies/molmoact2/molmoact2_hf_model"]
 markers = [
     "multigpu: distributed tests needing 2-4 GPUs (CI: docker_publish.yml lane)",
     "multigpu_heavy: 8-GPU sweeps and soak tests; never run in CI",
+    "smoke: slow end-to-end tests with no hardware (tests/felix_jr/smoke_tests); skip with -m 'not smoke'",
+    "slow: unit tests that wait on real timeouts (watchdogs, heartbeats); skip with -m 'not slow'",
 ]
 
 [tool.mypy]

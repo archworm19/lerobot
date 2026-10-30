@@ -162,6 +162,7 @@ def test_state_during_a_motion_never_touches_the_bus(make_controller):
     controller.stop()
 
 
+@pytest.mark.slow
 def test_the_watchdog_stops_a_motion_when_requests_stop_arriving(make_controller):
     controller, arms = make_controller(time_scale=1.0, watchdog_s=0.3)
     controller.move_joints(FAR)
@@ -175,6 +176,7 @@ def test_the_watchdog_stops_a_motion_when_requests_stop_arriving(make_controller
     assert arms.pos["left_arm"][PAN] < 90.0
 
 
+@pytest.mark.slow
 def test_a_session_that_asked_for_it_sends_the_arms_home_when_the_client_goes_silent(make_controller):
     controller, arms = make_controller(session_timeout_s=0.3)
     controller.open_session("home")
@@ -191,6 +193,7 @@ def test_a_session_that_asked_for_it_sends_the_arms_home_when_the_client_goes_si
     assert controller.open_session("hold")["on_disconnect"] == "hold"
 
 
+@pytest.mark.slow
 def test_no_session_or_a_hold_session_never_moves_the_arms_by_itself(make_controller):
     controller, arms = make_controller(session_timeout_s=0.2, watchdog_s=0.2)
     controller.move_joints(FAR)
@@ -204,6 +207,7 @@ def test_no_session_or_a_hold_session_never_moves_the_arms_by_itself(make_contro
         controller.open_session("explode")
 
 
+@pytest.mark.slow
 def test_a_lost_session_stops_a_running_motion_then_goes_home(make_controller):
     controller, arms = make_controller(time_scale=0.3, session_timeout_s=0.3, watchdog_s=10.0)
     controller.open_session("home")
@@ -378,6 +382,7 @@ def test_wait_motion_times_out_without_stopping_and_reports_failures(slow_robot)
     assert info.value.status["state"] == "failed"
 
 
+@pytest.mark.slow
 def test_the_watchdog_works_through_the_server(slow_robot):
     _, client = slow_robot
     client.move_joints(FAR, wait=False)
@@ -396,6 +401,7 @@ def test_a_session_sends_the_robot_home_when_the_block_ends(robot):
     assert not fake.motion._session_home  # closed cleanly
 
 
+@pytest.mark.slow
 def test_ctrl_c_in_a_session_stops_the_motion_and_goes_home(slow_robot):
     fake, client = slow_robot
     with pytest.raises(KeyboardInterrupt), client.session():
@@ -413,6 +419,7 @@ def test_a_hold_session_leaves_the_robot_where_it_is(robot):
     assert fake.arm_backend.pos["left_arm"][PAN] == 90.0
 
 
+@pytest.mark.slow
 def test_the_heartbeat_keeps_an_idle_session_alive(robot):
     fake, client = robot
     with client.session(heartbeat_s=0.1):
@@ -422,6 +429,7 @@ def test_the_heartbeat_keeps_an_idle_session_alive(robot):
     assert at_home(fake.arm_backend)
 
 
+@pytest.mark.slow
 def test_a_client_that_dies_without_ending_its_session_gets_the_robot_sent_home(robot):
     fake, client = robot
     client._call("session_open", on_disconnect="home")  # opened, but no heartbeat and no clean end
@@ -429,6 +437,7 @@ def test_a_client_that_dies_without_ending_its_session_gets_the_robot_sent_home(
     assert wait_until(lambda: at_home(fake.arm_backend), timeout=4.0)
 
 
+@pytest.mark.slow
 def test_a_client_without_a_session_is_never_moved_by_the_server(robot):
     fake, client = robot
     client.move_joints(FAR)
@@ -436,6 +445,7 @@ def test_a_client_without_a_session_is_never_moved_by_the_server(robot):
     assert fake.arm_backend.pos["left_arm"][PAN] == 90.0
 
 
+@pytest.mark.slow
 def test_a_rest_the_server_starts_itself_is_not_cut_short_by_the_watchdog(make_controller):
     controller, arms = make_controller(time_scale=0.3, session_timeout_s=0.3, watchdog_s=0.3)
     controller.open_session("home")

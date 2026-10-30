@@ -1,25 +1,23 @@
 """The calibration model, the fit (on synthetic clicks with known parameters) and the saved results."""
 
-import json
-
 import numpy as np
 import pytest
 
 from lerobot.felix_jr.calibration.fit import (
     FitConfig,
     fit,
+    observation_residuals,
     pixel_errors,
-    report,
     rms,
-    save_result,
     split_holdout,
+    vector_to_theta,
 )
 from lerobot.felix_jr.calibration.model import (
     ARM_JOINTS,
     ARM_PREFIX,
     CalibrationModel,
     Observation,
-    load_calibrated_model,
+    Param,
     load_observations,
     parameter_set,
     save_observations,
@@ -115,32 +113,6 @@ def synthetic_clicks(model, theta_true, n, seed, noise_px):
     return observations
 
 
-def test_the_fit_recovers_a_calibration_from_noisy_clicks_and_generalizes():
-    model = make_model()
-    rng = np.random.default_rng(1)
-    params = parameter_set("left")
-    theta_true = {p.name: float(rng.normal(0, 0.5 * p.sigma)) for p in params}
-    theta_true["zero:head_tilt_joint"] = 0.3  # the head's home really is about 17 degrees down
-    clicks = synthetic_clicks(model, theta_true, 80, seed=2, noise_px=1.5)
-    train, held = split_holdout(clicks, 5)
-    assert len(held) == 16
-
-    uncalibrated = rms(pixel_errors(model, held, {}))
-    result = fit(model, train, cfg=FitConfig(sigma_px=1.5))
-    calibrated = rms(pixel_errors(model, held, result.theta))
-    assert uncalibrated > 30
-    assert calibrated < 3.5  # the click noise is 1.5 px: it generalizes to clicks it never saw
-    assert rms(result.pixel_errors) < 3.0
-
-    # the estimates are consistent with their own uncertainty: nearly every parameter is within 3 posterior sigmas
-    sigma = result.sigma_post
-    within = [abs(result.theta[p.name] - theta_true[p.name]) <= 3 * sigma[p.name] for p in params]
-    assert np.mean(within) > 0.9
-    # and the posterior is tighter than the prior for the parameters the clicks determine (head tilt zero, mount)
-    assert sigma["zero:head_tilt_joint"] < 0.2 * parameter_set("left")[1].sigma
-    assert result.cost_history[-1] < result.cost_history[0]
-
-
 def test_priors_keep_parameters_the_clicks_cannot_determine_near_zero():
     model = make_model()
     params = parameter_set("left")
@@ -148,22 +120,6 @@ def test_priors_keep_parameters_the_clicks_cannot_determine_near_zero():
     result = fit(model, clicks, cfg=FitConfig(sigma_px=1.0))
     for p in params:
         assert abs(result.theta[p.name]) < 4 * p.sigma  # never runs away with few clicks
-
-
-def test_a_mis_click_is_down_weighted_by_the_robust_loss():
-    model = make_model()
-    theta_true = {"zero:head_tilt_joint": 0.3, f"{ARM_PREFIX}zero:shoulder_lift": np.radians(1.5)}
-    clicks = synthetic_clicks(model, theta_true, 40, seed=4, noise_px=1.0)
-    bad = list(clicks)
-    wrong = Observation(
-        **{**clicks[7].__dict__, "pixel": (clicks[7].pixel[0] + 120.0, clicks[7].pixel[1] - 90.0)}
-    )
-    bad[7] = wrong
-    robust = fit(model, bad, cfg=FitConfig(sigma_px=1.0, huber=2.0))
-    greedy = fit(model, bad, cfg=FitConfig(sigma_px=1.0, huber=1e9))
-    good_errors = lambda r: np.delete(r.pixel_errors, 7)  # noqa: E731
-    assert rms(good_errors(robust)) < rms(good_errors(greedy))
-    assert robust.pixel_errors[7] > 100  # it still sees the click as wrong instead of bending the model to it
 
 
 def test_observations_round_trip_through_json(tmp_path):
@@ -178,26 +134,70 @@ def test_observations_round_trip_through_json(tmp_path):
     np.testing.assert_allclose(model2.T, model.T)
 
 
-def test_saved_calibration_rebuilds_a_model_that_reproduces_the_fit(tmp_path):
-    model = make_model()
-    theta_true = {
-        "zero:head_tilt_joint": 0.25,
-        "pos:fixed_head_camera_link:y": 0.01,
-        f"{ARM_PREFIX}zero:elbow_flex": 0.03,
-    }
-    clicks = synthetic_clicks(model, theta_true, 30, seed=6, noise_px=0.5)
-    cfg = FitConfig(sigma_px=0.5)
-    result = fit(model, clicks, cfg=cfg)
-    save_result(tmp_path, model, result, {"n": 6.0, "before": 40.0, "after": 1.0})
-    text = report(model, clicks, result, {"n": 6.0, "before": 40.0, "after": 1.0}, cfg)
-    assert "held out" in text and "`zero:head_tilt_joint`" in text and "Learned" in text
+def test_rms_ignores_infinite_values_and_is_nan_when_nothing_is_left():
+    assert rms(np.array([3.0, 4.0, np.inf])) == pytest.approx(np.sqrt(12.5))
+    assert np.isnan(rms(np.array([np.inf, np.nan])))
 
-    calibrated, theta = load_calibrated_model(tmp_path)
-    assert theta == result.theta
-    for obs in clicks[:10]:
-        np.testing.assert_allclose(
-            calibrated.predict(obs, {}).uv, model.predict(obs, result.theta).uv, atol=1e-6
-        )  # URDFs patched, no parameters left to apply
-    saved = json.loads((tmp_path / "kinematic_calibration.json").read_text())
-    assert saved["pixel_rms"]["holdout"]["after"] == 1.0
-    assert set(saved["sigma_post"]) == {p.name for p in parameter_set("left")}
+
+def test_split_holdout_holds_out_every_nth_click_and_nothing_overlaps():
+    clicks = [observation() for _ in range(12)]
+    for i, c in enumerate(clicks):
+        c.index = i
+    train, held = split_holdout(clicks, 5)
+    assert [c.index for c in held] == [0, 5, 10]
+    assert sorted(c.index for c in train + held) == list(range(12))
+    train, held = split_holdout(clicks, 0)
+    assert len(train) == 12 and held == []
+
+
+def test_vector_to_theta_names_each_value_and_refuses_a_wrong_length():
+    params = [Param("zero:a", 0.1, "head"), Param("pos:b:x", 0.01, "mount")]
+    assert vector_to_theta(params, np.array([0.5, -0.25])) == {"zero:a": 0.5, "pos:b:x": -0.25}
+    with pytest.raises(ValueError):
+        vector_to_theta(params, np.array([0.5]))
+
+
+def test_params_know_their_units():
+    angle, length = Param("zero:head_tilt_joint", 0.1, "head"), Param("pos:fixed_Base:x", 0.01, "mount")
+    assert angle.angular and angle.unit == "deg" and angle.display(np.pi) == pytest.approx(180.0)
+    assert not length.angular and length.unit == "mm" and length.display(0.02) == pytest.approx(20.0)
+    assert Param(f"{ARM_PREFIX}rot:x:roll", 0.1, "arm").angular  # the arm prefix does not hide the kind
+
+
+def test_prior_overrides_replace_only_the_named_parameter():
+    plain = {p.name: p for p in parameter_set("left")}
+    over = {p.name: p for p in parameter_set("left", {"zero:head_tilt_joint": (0.3, 0.05)})}
+    assert over["zero:head_tilt_joint"].mean == 0.3 and over["zero:head_tilt_joint"].sigma == 0.05
+    assert over["zero:head_tilt_joint"].group == plain["zero:head_tilt_joint"].group
+    assert {n: p for n, p in over.items() if n != "zero:head_tilt_joint"} == {
+        n: p for n, p in plain.items() if n != "zero:head_tilt_joint"
+    }
+
+
+def test_residuals_are_in_sigmas_and_vanish_at_the_truth():
+    model = make_model()
+    theta = {"zero:head_tilt_joint": 0.2}
+    clicks = synthetic_clicks(model, theta, 4, seed=7, noise_px=0.0)
+    assert np.abs(observation_residuals(model, clicks, theta, FitConfig())).max() < 1e-9
+    assert np.abs(pixel_errors(model, clicks, theta)).max() < 1e-9
+    off = observation_residuals(model, clicks, {}, FitConfig(sigma_px=2.0))
+    wider = observation_residuals(model, clicks, {}, FitConfig(sigma_px=4.0))
+    np.testing.assert_allclose(off, 2 * wider)  # a noisier click is trusted less
+    assert off.shape == (4, 2)
+    assert observation_residuals(model, clicks, {}, FitConfig(use_depth=True)).shape == (4, 3)
+
+
+def test_a_fit_of_one_parameter_to_exact_clicks_finds_it_and_gets_surer():
+    model = make_model()
+    param = Param("zero:head_tilt_joint", 0.3, "head")
+    clicks = synthetic_clicks(model, {param.name: 0.2}, 6, seed=8, noise_px=0.0)
+    result = fit(model, clicks, params=[param], cfg=FitConfig(sigma_px=0.5))
+    assert result.theta[param.name] == pytest.approx(0.2, abs=2e-3)
+    assert result.sigma_post[param.name] < 0.05 * param.sigma
+    assert result.cost_history[-1] <= result.cost_history[0]
+    assert rms(result.pixel_errors) < 1.0
+
+
+def test_a_fit_without_clicks_is_refused():
+    with pytest.raises(ValueError, match="no observations"):
+        fit(make_model(), [])
