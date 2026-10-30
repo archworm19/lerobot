@@ -205,6 +205,8 @@ reachy2 = [
 # leader (motorbridge-smart-servo / FashionStar UART servos).
 rebot = ["lerobot[motorbridge-dep]", "lerobot[motorbridge-smart-servo-dep]"]
 kinematics = ["lerobot[placo-dep]"]
+# felix_jr camera calibration: pinocchio (via placo) for the kinematics, scipy for the fit.
+felix_jr = ["lerobot[placo-dep]", "lerobot[scipy-dep]"]
 intelrealsense = [
     "pyrealsense2>=2.55.1.6486,<2.57.0 ; sys_platform != 'darwin'",
     "pyrealsense2-macosx>=2.54,<2.57.0 ; sys_platform == 'darwin'",

@@ -1,67 +1,71 @@
-"""Collect calibration clicks: you click the tip of the closed gripper in the camera image, pose after pose.
+"""Collect calibration clicks: you click the pinch point of the closed gripper in the camera image, view after view.
 
   uv run python -m lerobot.felix_jr.calibration.collect tcp://<pi>:5555 --arm left --out-dir ~/cal_left
-      [--n 40] [--step 2] [--max-vel 30] [--delta-scale 1] [--resume]
+      [--start-from calibration.urdf] [--with ~/cal_right ...] [--n 40] [--step 2] [--max-vel 30]
+      [--seed-pose "shoulder_lift=-10"] [--delta-scale 1] [--side positive] [--floor-z Z] [--resume]
 
-Start the server on the Pi with the arm (and the head, which plugs into the left arm's board). Close the gripper
-(the script commands it closed in every pose) and clear the workspace in front of the robot. A window shows the
-head camera. For each pose the arm moves (slowly) and the head turns to where the current model predicts the tip
-is; a cyan circle marks the predicted tip. Then:
+Start the server on the Pi with the arm (and the head, which plugs into the left arm's board). Clear the workspace
+in front of the robot; the script commands the gripper closed in every pose. A window shows the head camera. For each
+view the arm moves (slowly) and the head turns so that, as the current model predicts, the pinch point is in the
+middle of the picture and seen from the side the wrist camera does not block (`views.find_view`); a cyan circle
+marks the predicted pinch point. Then:
 
-  left mouse click    record the tip: click the very end of the closed gripper, where the fingertips meet
-  n                   move the arm to the next planned pose (the first `n` is the seed pose, the wiggle's center)
-  arrow keys          turn the head (up / down tilt, left / right pan) by --step degrees, e.g. to find the tip
+  left mouse click    record the pinch point: click where the closed fingertips meet
+  n                   go to the next view
+  arrow keys          turn the head (up / down tilt, left / right pan) by --step degrees, e.g. to find the gripper
   u                   undo the last click
-  r                   refit now and print the report line
-  q or Esc            finish (the robot is sent to rest)
+  r                   refit now and print how well the model explains the clicks
+  q or Esc            finish: fit everything and write `calibration.urdf` (the robot is sent to rest)
 
-At the start the script works out where the camera is pointing, so the first frames already show the gripper:
-it reads the camera's pitch from the table plane in the depth image (override with `--head-tilt-deg`, how far
-below horizontal the camera looks now), uses it as the head tilt's starting value, and searches for a first arm
-pose whose tip lands in the middle of the picture at the head's current pose. Every planned pose keeps the tip above
-the table and within what the head can bring into view. It prints what it decided (`--no-bootstrap` skips all of
-this). If the tip is not visible after nudging the head, press `n` for another pose. The head's pan zero is still
-unknown to about 20 degrees, so the circle can be off sideways at first; each click refits the model (`fit.py`),
-so the circle gets closer and the head lands on the tip by itself. Vary the head too:
-after a few poses, nudge the head a few degrees before clicking, so the head's parameters are not confounded with
-the arm's. Aim for 30-60 clicks; the fit report says which parameters they pinned down.
+**Starting point.** `--start-from` an earlier calibration (`calibration.urdf`) and the first view already shows the
+gripper. On a fresh robot the head's zero angles are unknown (tilt by about 20 degrees), so the first views may miss:
+nudge the head with the arrow keys until the gripper is in the picture and click; after a few clicks the model
+refits and the head lands on the pinch point by itself. Vary the head too: after a few views, nudge it a few degrees
+before clicking, so the head's parameters are not confounded with the arm's. Aim for 30-60 clicks.
 
-Everything is saved as you go in `--out-dir`: `observations.json` (the clicks, the measured joint angles, the model
-settings) and `images/` (the color and raw depth of every clicked frame). `--resume` continues an earlier folder.
-Then run `calibration.fit observations.json --out-dir ...`.
+**One calibration.** Every click refits the whole model (`xle_fit.fit`): this session's clicks together with the
+clicks of the sessions given with `--with` (e.g. the other arm's), so the head and camera have one estimate. At the
+end the same joint fit, with held-out validation, writes `calibration.urdf` and its report `calibration.md` to
+`--out-dir`. All sessions must share the head's servo map (its recorded home); see `xle_fit`.
 
-Every click uses the *measured* joint angles reported with the frame, not the commanded ones. The script runs
-inside a client session, so if you press Ctrl+C or the script dies, the robot goes to rest.
+**Safety.** Views keep the pinch point a few centimeters above the floor: `--floor-z` (root frame, meters), else the
+calibration's, else the arm base's height (conservative: the table is usually a little below it). Nothing checks
+for other collisions: the region is small, the arm moves slowly, and you watch it.
+
+Clicks are saved as you go in `--out-dir`: `observations.json` and `images/` (the color and raw depth of every clicked
+frame). `--resume` continues an earlier folder. Every click uses the *measured* joint angles reported with the
+frame. The script runs inside a client session, so if you press Ctrl+C or it dies, the robot goes to rest.
 """
 
 import argparse
-import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
 
-from lerobot.felix_jr.calibration.bootstrap import (
-    TILT_PRIOR_SIGMA,
-    estimate_tilt_zero,
-    estimate_up_vector,
-    seed_pose_for_view,
-    table_height,
-    up_from_pitch,
+from lerobot.felix_jr.calibration.views import MAX_ROLL_DEG, Target, find_view, plan_targets
+from lerobot.felix_jr.calibration.xle_fit import (
+    SESSION_FILE,
+    Click,
+    FitConfig,
+    Session,
+    calibrate,
+    check_compatible,
+    fit,
+    load_session,
+    pixel_errors,
+    report,
+    rms,
+    save_session,
 )
-from lerobot.felix_jr.calibration.design import MAX_ROLL_DEG, best_roll, center_head, plan_poses
-from lerobot.felix_jr.calibration.fit import FitConfig, fit, pixel_errors, rms
-from lerobot.felix_jr.calibration.model import (
-    ARM_JOINTS,
+from lerobot.felix_jr.calibration.xle_robot_model import (
     HEAD_JOINTS,
+    SIDES,
     TICKS_PER_TURN,
-    CalibrationModel,
-    Observation,
-    head_priors,
-    load_observations,
-    save_observations,
+    XleRobotModel,
+    default_parameters,
 )
 from lerobot.felix_jr.depth import with_matrices
 from lerobot.felix_jr.scene import Scene
@@ -70,20 +74,15 @@ from lerobot.felix_jr.server.protocol import DEFAULT_PORT, ServerError
 
 TICKS_PER_DEG = TICKS_PER_TURN / 360.0
 MIN_CLICKS_TO_FIT = 4
-VIEW_MARGIN = 60  # pixels from the image border a planned tip must stay
 NECK_RANGE_TICKS = (
     450  # +/- ticks (about 40 deg) the neck may be turned from where it is, if no limit is recorded
 )
-FACING_MAX_DEG = (
-    50.0  # the gripper's hinge axis must be within this of the line of sight (pinch point visible)
-)
-# The side of the gripper that must face the camera. The wrist camera is mounted on the "negative" side (opposite
-# the SO-101 URDF's jaw hinge axis), where its board hides the pinch point: all 40 left-arm clicks of the first
-# session were seen from the positive side, and right-arm frames from the negative side showed only the board.
-DEFAULT_SIDE = "positive"
-SIDE_MIN_CLICKS = 3  # clicks, all seen from one side of the gripper, after which only that side is planned
 NECK_PRIOR_NO_HOME = np.radians(45.0)  # head pan zero prior sigma when the neck has no recorded home
-TABLE_CLEARANCE = 0.04  # meters the tip must stay above the table (the model is good to a centimeter or two)
+REFIT_EVALUATIONS = (
+    20  # optimizer evaluations per refit after a click (`r` and the final fit run to convergence)
+)
+CALIBRATION_FILE = "calibration.urdf"
+INTRINSICS_KEYS = ("fx", "fy", "ppx", "ppy", "width", "height")
 # cv2.waitKeyEx codes differ by platform (macOS, Linux GTK, Windows, Qt).
 UP_KEYS = {63232, 65362, 2490368, 0, ord("i")}
 DOWN_KEYS = {63233, 65364, 2621440, 1, ord("k")}
@@ -103,10 +102,10 @@ def decode_key(key: int) -> str | None:
 def annotate(
     image: np.ndarray, lines: list[str], predicted: np.ndarray | None, clicks: list[tuple[float, float]]
 ) -> np.ndarray:
-    """Copy of the RGB `image` with the predicted tip (cyan circle), this frame's clicks (green) and text."""
+    """Copy of the RGB `image` with the predicted pinch point (cyan circle), this frame's clicks (green) and text."""
     out = image.copy()
     if predicted is not None and np.isfinite(predicted).all():
-        centre = (int(round(predicted[0])), int(round(predicted[1])))
+        centre = (int(round(float(predicted[0]))), int(round(float(predicted[1]))))
         cv2.circle(out, centre, 14, (0, 0, 0), 3, cv2.LINE_AA)
         cv2.circle(out, centre, 14, (0, 255, 255), 1, cv2.LINE_AA)
     for u, v in clicks:
@@ -127,95 +126,65 @@ class CollectSession:
         arm: str,
         out_dir: Path,
         show: Callable[[np.ndarray], None],
-        poses: list[dict[str, float]] | None,
+        start_from: Path | None = None,
+        other_sessions: Sequence[Path] = (),
+        n_targets: int = 40,
         max_vel: float = 30.0,
         max_accel: float = 60.0,
         head_step_deg: float = 2.0,
         resume: bool = False,
         color_format: str = "png",
-        fit_iterations: int = 10,
-        n_poses: int = 40,
-        delta_scale: float = 1.0,
         seed_pose: dict[str, float] | None = None,
-        head_tilt_deg: float | None = None,
-        bootstrap: bool = True,
+        delta_scale: float = 1.0,
+        side: str | None = None,
+        floor_z: float | None = None,
         max_roll: float = MAX_ROLL_DEG,
-        head_from: Path | None = None,
-        side: str = DEFAULT_SIDE,
-        learn_side: bool = True,
+        refit_evaluations: int | None = REFIT_EVALUATIONS,
     ):
-        """Connect the pieces and take a first frame.
+        """Build the model, read the earlier clicks, plan the targets, and show a first frame.
 
-        `poses` are the planned arm poses (`design.plan_poses`). With `poses=None` they are planned here, after the
-        head tilt has been estimated: around `seed_pose` if given, else around a pose found by
-        `bootstrap.seed_pose_for_view`, which shows the tip near the middle of the picture at the head's current
-        pose. `head_tilt_deg` says how far below horizontal the camera looks now (default: estimated from the table
-        plane in the depth image; `bootstrap=False` skips both). `notes` collects what was decided, for printing.
-
-        `side` is which side of the gripper must face the camera ("positive" by default, "negative" or "either"; see
-        `CalibrationModel.hinge_axis_cosine` and `DEFAULT_SIDE`). With "either" and `learn_side`, once `SIDE_MIN_CLICKS` clicks were
-        all seen from the same side, the rest of the poses are planned for that side only (a wrist camera on the
-        other side hides the pinch point).
-
-        `head_from` is the output folder of an earlier `fit` (usually the other arm's): its head and camera
-        parameters become this session's priors, with its head reference ticks, so the head is known from the first
-        frame and only this arm's parameters are left to learn (see `model.head_priors`).
+        `start_from`: a calibrated URDF whose estimates start the model (its head servo directions must match the
+        robot's). `other_sessions`: session folders whose clicks join every fit. `seed_pose`: LeRobot degrees of the
+        arm pose the targets spread around (`{"shoulder_pan.pos": ...}`; default the center pose). `side` overrides
+        which side of the gripper must face the camera; `floor_z` the floor (see the module docstring).
         """
         self.client, self.arm, self.out_dir, self.show = client, arm, out_dir, show
-        self.notes: list[str] = []
-        self.table_z: float | None = (
-            None  # the table's height in the root frame, if the depth image showed it
-        )
-        self.max_roll = max_roll
-        self.side, self.learn_side = side, learn_side
-        self.delta_scale, self.bootstrap = delta_scale, bootstrap
         self.arm_id = f"{arm}_arm"
-        self.poses, self.pose_index = poses or [], 0
+        self.notes: list[str] = []
         self.max_vel, self.max_accel, self.head_step_deg = max_vel, max_accel, head_step_deg
-        self.color_format, self.fit_iterations = color_format, fit_iterations
-        self.message = "click the tip of the closed gripper; n = next pose"
-        self.theta: dict[str, float] = {}
+        self.color_format, self.max_roll, self.refit_evaluations = color_format, max_roll, refit_evaluations
+        self.message = "click the pinch point of the closed gripper; n = next view"
         self.last_rms: float | None = None
         self.frame_clicks: list[tuple[float, float]] = []
         (out_dir / "images").mkdir(parents=True, exist_ok=True)
-        self.observations_path = out_dir / "observations.json"
 
         self.capture: Capture = client.capture(color_format=color_format)
-        if resume and self.observations_path.is_file():
-            self.model, self.observations = load_observations(self.observations_path)
-            self.message = f"resumed with {len(self.observations)} clicks"
-            self.theta.update({name: mean for name, (mean, _) in self.model.prior_overrides.items()})
-            self._refit()
-        elif head_from is not None:
-            self.observations = []
-            self._load_head(Path(head_from), client.head_state())
-            if bootstrap:
-                self._estimate_table()
+        intrinsics = {k: self.capture.calibration["color_intrinsics"][k] for k in INTRINSICS_KEYS}
+        self.model = self._build_model(start_from, client.head_state(), intrinsics)
+        if side is not None:
+            if side not in SIDES:
+                raise ValueError(f"side must be one of {SIDES}")
+            self.model.visible_side[arm] = side
+        self._set_floor(floor_z)
+
+        if resume and (out_dir / SESSION_FILE).is_file():
+            self.session = load_session(out_dir)
+            if self.session.arm != arm:
+                raise ValueError(f"{out_dir} holds {self.session.arm} arm clicks, not {arm}")
+            self.message = f"resumed with {len(self.session.clicks)} clicks"
         else:
-            head = client.head_state()
-            self.model = CalibrationModel(
-                arm,
-                self.capture.calibration["color_intrinsics"],
-                {n: head[n]["sign"] for n in HEAD_JOINTS},
-                {
-                    n: head[n]["home"] if head[n]["home"] is not None else head[n]["ticks"]
-                    for n in HEAD_JOINTS
-                },
+            self.session = Session(out_dir, arm, [], self.model.head_signs, self.model.head_refs, intrinsics)
+        self.others = [load_session(path) for path in other_sessions]
+        here = Session(out_dir, arm, [], self.model.head_signs, self.model.head_refs, intrinsics)
+        check_compatible([here, self.session, *self.others])
+        if self.others:
+            self._note(
+                f"refitting with {sum(len(s.clicks) for s in self.others)} clicks from the other sessions"
             )
-            self.observations: list[Observation] = []
-            if head["head_neck"]["home"] is None:
-                # its reference is then wherever the neck happens to be, so its zero can be anything
-                self.model.prior_overrides["zero:head_pan_joint"] = (0.0, NECK_PRIOR_NO_HOME)
-                self._note(
-                    "the neck has no recorded home, so the head's pan is unknown at first (record it with "
-                    "setup.head_range --name head_neck); expect the circle to be off sideways until a few clicks"
-                )
-            if bootstrap:
-                self._estimate_head_tilt(head_tilt_deg)
-        if self.observations:
-            self._learn_side(replan=False)
-        if poses is None:
-            self.poses = self._plan(n_poses, delta_scale, seed_pose, bootstrap)
+
+        self.targets: list[Target] = plan_targets(self.model, arm, n_targets, seed_pose, delta_scale)
+        self.target_index = 0
+        self._refit()
         self.render()
 
     # ---- the start of a session ----------------------------------------------------------------------------
@@ -224,168 +193,75 @@ class CollectSession:
         self.notes.append(text)
         self.message = text
 
-    def _load_head(self, folder: Path, head: dict[str, dict[str, Any]]) -> None:
-        """Build the model with the head and camera of an earlier fit (see `__init__`, `head_from`)."""
-        calibration = json.loads((folder / "kinematic_calibration.json").read_text())
-        earlier = calibration["settings"]
-        signs_now = {n: head[n]["sign"] for n in HEAD_JOINTS}
-        if signs_now != earlier["head_signs"]:
-            raise ValueError(
-                f"the head's saved directions changed since that fit ({earlier['head_signs']} then, {signs_now} now): "
-                "its head parameters do not apply; run without --head-from"
-            )
-        priors = head_priors(calibration)
-        self.model = CalibrationModel(
-            self.arm,
-            self.capture.calibration["color_intrinsics"],
-            earlier["head_signs"],
-            earlier["head_refs"],  # the same reference ticks, so its zero offsets mean the same thing here
-            prior_overrides=priors,
-        )
-        self.theta.update({name: mean for name, (mean, _) in priors.items()})
-        tilt_mean, tilt_sigma = priors["zero:head_tilt_joint"]
-        pan_mean, pan_sigma = priors["zero:head_pan_joint"]
-        lateral = priors["pos:fixed_head_camera_link:y"]
-        self._note(
-            f"head and camera from {folder} ({earlier['arm']} arm fit): tilt zero {np.degrees(tilt_mean):+.1f} "
-            f"+/- {np.degrees(tilt_sigma):.1f} deg, pan zero {np.degrees(pan_mean):+.1f} +/- {np.degrees(pan_sigma):.1f} deg, "
-            f"camera lateral offset {1000 * lateral[0]:+.1f} +/- {1000 * lateral[1]:.1f} mm"
-        )
-
-    def _estimate_table(self) -> None:
-        """Find the table's height from the depth image (when the head is already known)."""
-        plane = estimate_up_vector(self.capture.scene())
-        if plane is None:
-            self._note("no table plane in the depth image: poses are not checked against the table")
-            return
-        ticks = {n: int(self.capture.state["head"][n]["ticks"]) for n in HEAD_JOINTS}
-        self.table_z = table_height(self.model, ticks, self.theta, plane)
-        base_z = self.model.head_tree.link_pose(self.model.base_link)[2, 3]
-        self.notes.append(f"the table is {100 * (base_z - self.table_z):.0f} cm below the arm base")
-
-    def _estimate_head_tilt(self, pitch_deg: float | None) -> None:
-        """Set the head tilt zero (as a prior with a 5 degree sigma) from the camera's pitch.
-
-        The pitch is given (`pitch_deg`, degrees below horizontal) or measured from the table plane in the depth
-        image. Leaves the zero at the model's default if neither is available or the estimate does not fit.
-        """
-        ticks = {n: int(self.capture.state["head"][n]["ticks"]) for n in HEAD_JOINTS}
-        plane = None
-        if pitch_deg is not None:
-            up, source = (
-                up_from_pitch(np.radians(pitch_deg)),
-                f"given as {pitch_deg:.1f} deg below horizontal",
-            )
-        else:
-            found = estimate_up_vector(self.capture.scene())
-            if found is None:
-                self._note(
-                    "no table plane in the depth image: the head tilt starts at the model's zero (about 20 deg "
-                    "unsure); give --head-tilt-deg if you can estimate how far down the camera looks"
+    def _build_model(
+        self, start_from: Path | None, head: dict[str, dict[str, Any]], intrinsics: dict[str, float]
+    ) -> XleRobotModel:
+        """The model to start from: an earlier calibration, or the URDF with the head's servo map as it is now."""
+        signs = {n: head[n]["sign"] for n in HEAD_JOINTS}
+        if start_from is not None:
+            model = XleRobotModel.load(start_from)
+            if model.head_signs != signs:
+                raise ValueError(
+                    f"the head's saved directions changed since that calibration ({model.head_signs} then, {signs} "
+                    "now): its estimates do not apply; run without --start-from"
                 )
-                return
-            plane = found
-            up, fraction = plane.normal, plane.fraction
-            source = f"table plane ({100 * fraction:.0f}% of the depth points)"
-        tilt, miss = estimate_tilt_zero(self.model, ticks, up)
-        if miss > 6.0:
+            if model.intrinsics != intrinsics:
+                self._note("the camera's intrinsics differ from the calibration's: using the camera's")
+                model.intrinsics = intrinsics
+            self._note(f"starting from {start_from}")
+            return model
+        refs = {n: head[n]["home"] if head[n]["home"] is not None else head[n]["ticks"] for n in HEAD_JOINTS}
+        overrides = {}
+        if head["head_neck"]["home"] is None:
+            # its reference is then wherever the neck happens to be, so its zero can be anything
+            overrides["zero:head_pan_joint"] = (0.0, NECK_PRIOR_NO_HOME)
             self._note(
-                f"the {source} does not match the model's camera (off by {miss:.1f} deg): head tilt left at zero"
+                "the neck has no recorded home, so the head's pan is unknown at first (record it with "
+                "setup.head_range --name head_neck); expect the circle to be off sideways until a few clicks"
             )
-            return
-        self.model.prior_overrides["zero:head_tilt_joint"] = (tilt, TILT_PRIOR_SIGMA)
-        self.theta["zero:head_tilt_joint"] = tilt
-        if plane is not None:
-            self.table_z = table_height(self.model, ticks, self.theta, plane)
-            base_z = self.model.head_tree.link_pose(self.model.base_link)[2, 3]
-            self.notes.append(f"the table is {100 * (base_z - self.table_z):.0f} cm below the arm base")
-        pitch = float(np.degrees(np.arcsin(np.clip(-up[2], -1.0, 1.0))))
-        self._note(
-            f"camera looks {pitch:.1f} deg below horizontal ({source}); head tilt zero set to {np.degrees(tilt):+.1f} deg"
+        return XleRobotModel.from_urdf(
+            head_signs=signs,
+            head_refs=refs,
+            intrinsics=intrinsics,
+            parameters=default_parameters(overrides=overrides),
         )
 
-    def _plan(
-        self, n: int, delta_scale: float, seed_pose: dict[str, float] | None, bootstrap: bool
-    ) -> list[dict[str, float]]:
-        """The arm poses to visit: around `seed_pose`, or around a pose that shows the tip at the current head pose."""
-        ticks = {name: int(self.capture.state["head"][name]["ticks"]) for name in HEAD_JOINTS}
-        if seed_pose is None and bootstrap:
-            seed_pose = seed_pose_for_view(self.model, self.theta, ticks, table_z=self.table_z)
-            if seed_pose is None:
-                self._note("no arm pose shows the tip at this head pose: starting from the center pose")
-            else:
-                shown = ", ".join(
-                    f"{k.removesuffix('.pos')} {v:+.0f}" for k, v in seed_pose.items() if k != "gripper.pos"
-                )
-                self._note(f"first pose: {shown}")
-        if not bootstrap:
-            return plan_poses(n, seed_pose, delta_scale)
-        limits = head_limits(self.client.head_state())
-        floor = None if self.table_z is None else self.table_z + TABLE_CLEARANCE
-
-        def adjust(
-            pose: dict[str, float], head_ticks: dict[str, int] | None = None
-        ) -> dict[str, float] | None:
-            """The pose with the wrist rolled to show the pinch point, or None if it cannot be shown.
-
-            It must stay above the table, the head must be able to bring the tip into the picture within its
-            limits, and the gripper's hinge axis must then face the camera within `FACING_MAX_DEG`.
-            """
-            if floor is not None and self.model.tip_in_root(pose, self.theta)[2] < floor:
-                return None
-            target = head_ticks or center_head(self.model, self.theta, pose, ticks, limits)
-            if target is None:
-                return None
-            roll, angle = best_roll(self.model, self.theta, pose, target, self.max_roll, side=self.side)
-            if angle > FACING_MAX_DEG:
-                return None
-            pose = {**pose, "wrist_roll.pos": roll}
-            tip = self.model.predict(Observation(arm=pose, head_ticks=target, pixel=(0.0, 0.0)), self.theta)
-            return pose if self.model.in_view(tip.uv, margin=VIEW_MARGIN) else None
-
-        if seed_pose is not None:  # roll the seed too, for the head where it is now
-            full = {**{f"{j}.pos": 0.0 for j in ARM_JOINTS}, **seed_pose, "gripper.pos": 1.0}
-            seed_pose = adjust(full, ticks) or {
-                **full,
-                "wrist_roll.pos": best_roll(
-                    self.model, self.theta, full, ticks, self.max_roll, side=self.side
-                )[0],
-            }
-        poses = plan_poses(n, seed_pose, delta_scale, adjust=adjust)
-        if len(poses) < n:
+    def _set_floor(self, floor_z: float | None) -> None:
+        if floor_z is not None:
+            self.model.floor_z = floor_z
+        elif self.model.floor_z is None:
+            base = self.model.frame_pose(f"{self.arm}_base_link", self.model.joint_vector())
+            self.model.floor_z = float(base[2, 3])
             self._note(
-                f"only {len(poses)} of {n} poses show the pinch point within the head's range and above the table"
+                "no floor height known: keeping the pinch point above the arm base's height (--floor-z)"
             )
-        return poses
 
     # ---- showing --------------------------------------------------------------------------------------------
 
-    def current_observation(self) -> Observation:
-        """The robot's measured joints in the current frame, as an Observation with no click yet."""
+    def current_q(self) -> np.ndarray:
+        """The robot's measured joints in the current frame, as the model's `q`."""
         state = self.capture.state
-        return Observation(
-            arm=dict(state[self.arm_id]),
-            head_ticks={n: int(state["head"][n]["ticks"]) for n in HEAD_JOINTS},
-            pixel=(0.0, 0.0),
-            timestamp=self.capture.timestamp,
+        return self.model.joint_vector(
+            {self.arm: state[self.arm_id]}, {n: int(state["head"][n]["ticks"]) for n in HEAD_JOINTS}
         )
 
     def status_lines(self, predicted: np.ndarray | None) -> list[str]:
         """Text for the image: counts, the model's current accuracy, and the last message."""
         fit_text = f"fit RMS {self.last_rms:.1f} px" if self.last_rms is not None else "no fit yet"
         lines = [
-            f"{self.arm} arm: {len(self.observations)} clicks, pose {self.pose_index}/{len(self.poses)}, {fit_text}",
-            "click the tip | n next pose | arrows head | u undo | r refit | q quit",
+            f"{self.arm} arm: {len(self.session.clicks)} clicks, view {self.target_index}/{len(self.targets)}, "
+            f"{fit_text}",
+            "click the pinch point | n next view | arrows head | u undo | r refit | q quit",
         ]
         if predicted is None or not self.model.in_view(predicted):
-            lines.append("predicted tip is off the picture: nudge the head, or press n")
+            lines.append("predicted pinch point is off the picture: nudge the head, or press n")
         if self.message:
             lines.append(self.message)
         return lines
 
     def render(self) -> None:
-        """Show the current frame with the predicted tip, this frame's clicks and the status text."""
-        pred = self.model.predict(self.current_observation(), self.theta)
+        """Show the current frame with the predicted pinch point, this frame's clicks and the status text."""
+        pred = self.model.predict(self.arm, self.current_q())
         uv = pred.uv if pred.z > 0 else None
         self.show(annotate(self.capture.color, self.status_lines(uv), uv, self.frame_clicks))
 
@@ -408,33 +284,38 @@ class CollectSession:
         return done
 
     def next_pose(self) -> None:
-        """Move the arm to the next planned pose, turn the head towards the predicted tip, and show a new frame."""
-        if self.pose_index >= len(self.poses):
-            self.message = "no more planned poses: click what is left, then q"
+        """Find a view of the next target that shows the pinch point, move the arm and the head there, show it.
+
+        Targets whose best view does not show the pinch point (`View.ok`) are skipped.
+        """
+        head = self.client.head_state()
+        limits = head_limits(head)
+        ticks = {n: int(head[n]["ticks"]) for n in HEAD_JOINTS}
+        skipped = 0
+        while self.target_index < len(self.targets):
+            target = self.targets[self.target_index]
+            self.target_index += 1
+            seed = self.model.joint_vector({self.arm: target.arm_pose}, ticks)
+            view = find_view(self.model, self.arm, seed, target.point, limits, max_roll_deg=self.max_roll)
+            if view.ok:
+                break
+            skipped += 1
+        else:
+            self.message = "no more views: click what is left, then q"
             self.render()
             return
-        pose = self.poses[self.pose_index]
-        self.pose_index += 1
-        status = self.client.move_joints({self.arm_id: pose}, max_vel=self.max_vel, max_accel=self.max_accel)
+        status = self.client.move_joints(
+            {self.arm_id: view.arm_pose}, max_vel=self.max_vel, max_accel=self.max_accel
+        )
         if status["state"] != "done":
             self.message = f"the arm motion ended as {status['state']}: {status['reason']}"
             self.refresh(status["finished_at"])
             return
-        state = self.client.get_state()
-        head = self.client.head_state()
-        targets = center_head(
-            self.model,
-            self.theta,
-            state[self.arm_id],
-            {n: head[n]["ticks"] for n in HEAD_JOINTS},
-            head_limits(head),
+        done = self._move_head_to(view.head_ticks) or status["finished_at"]
+        skip_text = f" ({skipped} targets skipped: no view showed them)" if skipped else ""
+        self.message = (
+            f"view {self.target_index}: gripper facing the camera within {view.facing_deg:.0f} deg{skip_text}"
         )
-        done = status["finished_at"]
-        if targets is not None:
-            done = self._move_head_to(targets) or done
-            self.message = f"pose {self.pose_index}: head turned towards the predicted tip"
-        else:
-            self.message = f"pose {self.pose_index}: the tip is predicted behind the camera; steer the head"
         self.refresh(done)
 
     def jog(self, neck_deg: float = 0.0, eyes_deg: float = 0.0) -> None:
@@ -452,86 +333,89 @@ class CollectSession:
 
     # ---- clicks ---------------------------------------------------------------------------------------------
 
-    def _learn_side(self, replan: bool = True) -> None:
-        """If the clicks so far were all seen from one side of the gripper, plan only that side from now on."""
-        if not self.learn_side or self.side != "either" or len(self.observations) < SIDE_MIN_CLICKS:
-            return
-        cosines = [self.model.hinge_axis_cosine(o.arm, o.head_ticks, self.theta) for o in self.observations]
-        if all(c > 0 for c in cosines):
-            self.side = "positive"
-        elif all(c < 0 for c in cosines):
-            self.side = "negative"
-        else:
-            return
-        self._note(
-            f"all {len(cosines)} clicks saw the pinch point from the {self.side} side of the gripper: "
-            "planning only that side from now on"
-        )
-        remaining = len(self.poses) - self.pose_index
-        if replan and remaining > 0:
-            seed = self.poses[self.pose_index - 1] if self.pose_index > 0 else None
-            fresh = self._plan(remaining + 1, self.delta_scale, seed, self.bootstrap)[1:]
-            self.poses = self.poses[: self.pose_index] + fresh
-
-    def click(self, u: float, v: float) -> Observation:
+    def click(self, u: float, v: float) -> Click:
         """Record a click at pixel (u, v) of the current frame, save it, and refit."""
-        obs = self.current_observation()
-        obs.pixel = (float(u), float(v))
-        obs.index = len(self.observations)
-        obs.image = f"images/{obs.index:03d}.png"
+        state = self.capture.state
+        index = len(self.session.clicks)
         scene = Scene.from_capture(
             self.capture.color, self.capture.raw_depth, with_matrices(self.capture.calibration)
         )
         depth = float(scene.pixel_to_xyz(np.array([[u, v]]), window=7, max_spread_m=0.06)[0, 2])
-        obs.depth_m = depth if np.isfinite(depth) else None
-        cv2.imwrite(str(self.out_dir / obs.image), cv2.cvtColor(self.capture.color, cv2.COLOR_RGB2BGR))
-        cv2.imwrite(str(self.out_dir / f"images/{obs.index:03d}_depth.png"), self.capture.raw_depth)
-        self.observations.append(obs)
-        self.frame_clicks.append(obs.pixel)
-        save_observations(self.observations_path, self.model, self.observations)
-        self.message = f"click {len(self.observations)} saved"
+        image = f"images/{index:03d}.png"
+        click = Click(
+            arm=self.arm,
+            arm_pose={k: float(value) for k, value in state[self.arm_id].items()},
+            head_ticks={n: int(state["head"][n]["ticks"]) for n in HEAD_JOINTS},
+            pixel=(float(u), float(v)),
+            depth_m=depth if np.isfinite(depth) else None,
+            image=image,
+            session=self.out_dir.name,
+            index=index,
+            timestamp=self.capture.timestamp,
+        )
+        cv2.imwrite(str(self.out_dir / image), cv2.cvtColor(self.capture.color, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(str(self.out_dir / f"images/{index:03d}_depth.png"), self.capture.raw_depth)
+        self.session.clicks.append(click)
+        self.frame_clicks.append(click.pixel)
+        save_session(self.session)
+        self.message = f"click {len(self.session.clicks)} saved"
         self._refit()
-        self._learn_side()
         self.render()
-        return obs
+        return click
 
     def undo(self) -> None:
         """Drop the last click (its images stay in the folder) and refit."""
-        if self.observations:
-            self.observations.pop()
+        if self.session.clicks:
+            self.session.clicks.pop()
             if self.frame_clicks:
                 self.frame_clicks.pop()
-            save_observations(self.observations_path, self.model, self.observations)
-            self.message = f"undid the last click ({len(self.observations)} left)"
+            save_session(self.session)
+            self.message = f"undid the last click ({len(self.session.clicks)} left)"
             self._refit()
         self.render()
 
-    def _refit(self) -> None:
-        if len(self.observations) < MIN_CLICKS_TO_FIT:
+    def all_clicks(self) -> list[Click]:
+        """This session's clicks and those of the other sessions: everything the fit uses."""
+        return [*self.session.clicks, *(c for s in self.others for c in s.clicks)]
+
+    def _refit(self, evaluations: int | None = None) -> None:
+        """Fit the model to every click, starting from its current estimates, and keep the result."""
+        clicks = self.all_clicks()
+        if len(clicks) < MIN_CLICKS_TO_FIT:
             self.last_rms = None
             return
-        result = fit(
-            self.model,
-            self.observations,
-            cfg=FitConfig(max_iter=self.fit_iterations),
-            theta0=self.theta,
-        )
-        self.theta = result.theta
-        self.last_rms = rms(result.pixel_errors)
+        result = fit(self.model, clicks, FitConfig(max_nfev=evaluations or self.refit_evaluations))
+        self.model.set_estimates(result.theta)
+        self.model.covariance = result.covariance
+        own = len(self.session.clicks)
+        self.last_rms = rms(result.pixel_errors[:own]) if own else None
 
     def refit(self) -> None:
-        """Refit with more iterations and say how well the model explains the clicks."""
-        self.fit_iterations, previous = 40, self.fit_iterations
+        """Refit to convergence and say how well the model explains this session's clicks."""
+        previous, self.refit_evaluations = self.refit_evaluations, None
         try:
             self._refit()
         finally:
-            self.fit_iterations = previous
+            self.refit_evaluations = previous
         if self.last_rms is not None:
-            before = rms(pixel_errors(self.model, self.observations, {}))
+            before = rms(pixel_errors(self.model, self.session.clicks, np.zeros(len(self.model.parameters))))
             self.message = f"refit: {before:.0f} px uncalibrated -> {self.last_rms:.1f} px"
         else:
             self.message = f"need {MIN_CLICKS_TO_FIT} clicks to fit"
         self.render()
+
+    def finish(self, holdout_every: int = 5) -> Path | None:
+        """Fit every click with held-out validation and write `calibration.urdf` and `calibration.md`; None if
+        there are too few clicks."""
+        clicks = self.all_clicks()
+        if len(clicks) < MIN_CLICKS_TO_FIT:
+            return None
+        cfg = FitConfig()
+        final, holdout = calibrate(self.model, clicks, cfg, holdout_every)
+        path = self.out_dir / CALIBRATION_FILE
+        self.model.save(path)
+        path.with_suffix(".md").write_text(report(self.model, clicks, final, holdout, cfg))
+        return path
 
     # ---- key handling ---------------------------------------------------------------------------------------
 
@@ -571,10 +455,10 @@ def head_limits(head: dict[str, dict[str, Any]]) -> dict[str, tuple[int, int]]:
 
 
 def parse_seed(text: str | None) -> dict[str, float] | None:
-    """`"shoulder_pan=10,elbow_flex=-5"` -> `{"shoulder_pan": 10.0, "elbow_flex": -5.0}` (None for no text)."""
+    """`"shoulder_pan=10,elbow_flex=-5"` -> `{"shoulder_pan.pos": 10.0, "elbow_flex.pos": -5.0}` (None for no text)."""
     if not text:
         return None
-    return {k.strip(): float(v) for k, v in (part.split("=") for part in text.split(","))}
+    return {f"{k.strip()}.pos": float(v) for k, v in (part.split("=") for part in text.split(","))}
 
 
 def main() -> None:
@@ -583,23 +467,30 @@ def main() -> None:
     parser.add_argument("endpoint", nargs="?", default=f"tcp://localhost:{DEFAULT_PORT}")
     parser.add_argument("--arm", choices=["left", "right"], default="left")
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--n", type=int, default=40, help="number of planned arm poses (40)")
+    parser.add_argument("--start-from", type=Path, help="an earlier calibration.urdf to start from")
+    parser.add_argument(
+        "--with",
+        dest="other_sessions",
+        nargs="*",
+        type=Path,
+        default=[],
+        help="other session folders to fit with",
+    )
+    parser.add_argument("--n", type=int, default=40, help="number of target views (40)")
     parser.add_argument("--step", type=float, default=2.0, help="head jog per arrow key, degrees (2)")
     parser.add_argument("--max-vel", type=float, default=30.0, help="arm speed limit, deg/s (30)")
     parser.add_argument(
-        "--delta-scale", type=float, default=1.0, help="scale of the pose region (1 = +/-20 deg)"
+        "--delta-scale", type=float, default=1.0, help="scale of the target region (1 = +/-20 deg per joint)"
     )
     parser.add_argument(
-        "--seed-pose", help='region center, e.g. "shoulder_lift=-10,elbow_flex=10" (default: searched for)'
+        "--seed-pose", help='center of the target region, e.g. "shoulder_lift=-10,elbow_flex=10" (default: 0)'
     )
     parser.add_argument(
-        "--head-tilt-deg",
-        type=float,
-        help="how far below horizontal the camera looks now (default: from the table plane)",
+        "--side",
+        choices=SIDES,
+        help="side of the gripper the camera must see (default: the calibration's, positive)",
     )
-    parser.add_argument(
-        "--no-bootstrap", action="store_true", help="skip the head tilt estimate and the first-pose search"
-    )
+    parser.add_argument("--floor-z", type=float, help="floor height in the robot's root frame, meters")
     parser.add_argument(
         "--max-roll",
         type=float,
@@ -607,21 +498,9 @@ def main() -> None:
         help="largest wrist roll used to show the pinch point, deg (130)",
     )
     parser.add_argument("--resume", action="store_true", help="continue an earlier --out-dir")
-    parser.add_argument(
-        "--side",
-        choices=["either", "positive", "negative"],
-        default=DEFAULT_SIDE,
-        help="side of the gripper that must face the camera: positive (default; the wrist camera is on the "
-        "negative side), negative, or either (then learned from the first clicks)",
-    )
-    parser.add_argument(
-        "--head-from",
-        type=Path,
-        help="fit output folder of the other arm: reuse its head and camera parameters (as priors)",
-    )
     args = parser.parse_args()
 
-    window = "calibration (click the tip; n = next pose; q = quit)"
+    window = "calibration (click the pinch point; n = next view; q = quit)"
     clicks: list[tuple[int, int]] = []
 
     def on_mouse(event: int, x: int, y: int, flags: int, param: Any) -> None:
@@ -638,18 +517,17 @@ def main() -> None:
             args.arm,
             args.out_dir,
             show,
-            None,
+            start_from=args.start_from,
+            other_sessions=args.other_sessions,
+            n_targets=args.n,
             max_vel=args.max_vel,
             head_step_deg=args.step,
             resume=args.resume,
-            n_poses=args.n,
-            delta_scale=args.delta_scale,
             seed_pose=parse_seed(args.seed_pose),
-            head_tilt_deg=args.head_tilt_deg,
-            bootstrap=not args.no_bootstrap,
-            max_roll=args.max_roll,
-            head_from=args.head_from,
+            delta_scale=args.delta_scale,
             side=args.side,
+            floor_z=args.floor_z,
+            max_roll=args.max_roll,
         )
         for note in session.notes:
             print(note)
@@ -664,10 +542,10 @@ def main() -> None:
                     break
         finally:
             cv2.destroyAllWindows()
-    print(f"{len(session.observations)} clicks saved to {session.observations_path}")
-    print(
-        f"Next: uv run python -m lerobot.felix_jr.calibration.fit {session.observations_path} --out-dir {args.out_dir}"
-    )
+    print(f"{len(session.session.clicks)} clicks saved to {args.out_dir / SESSION_FILE}")
+    path = session.finish()
+    if path is not None:
+        print(f"Wrote {path} and {path.with_suffix('.md')}")
 
 
 if __name__ == "__main__":

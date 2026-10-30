@@ -80,6 +80,15 @@ def test_one_fit_learns_the_shared_head_and_both_arms():
     )  # fit does not touch the model
 
 
+def test_the_analytic_jacobian_gives_the_finite_difference_fit():
+    model = make_model()
+    clicks = synthetic_clicks(model, "left", 10, seed=6) + synthetic_clicks(model, "right", 10, seed=7)
+    analytic = fit(model, clicks, FitConfig(sigma_px=0.5))
+    numeric = fit(model, clicks, FitConfig(sigma_px=0.5, jacobian="3-point"))
+    np.testing.assert_allclose(analytic.theta, numeric.theta, atol=1e-6)
+    np.testing.assert_allclose(analytic.covariance, numeric.covariance, rtol=1e-4, atol=1e-12)
+
+
 def test_an_arm_without_clicks_keeps_its_starting_values():
     model = make_model()
     start = np.zeros(len(model.parameters))
@@ -150,9 +159,12 @@ def test_a_version_1_session_folder_is_read_as_clicks(tmp_path):
     ]
     (tmp_path / "cal_right").mkdir()
     save_observations(tmp_path / "cal_right" / "observations.json", v1, observations)
-    session = xle_fit.load_v1_session(tmp_path / "cal_right")
+    session = xle_fit.load_session(tmp_path / "cal_right")
     assert session.arm == "right" and session.head_refs == REFS and session.intrinsics == INTRINSICS
     first, second = session.clicks
     assert first.arm == "right" and first.arm_pose == pose and first.pixel == (10.0, 20.0)
     assert first.image == "images/000.png" and first.session == "cal_right"
     assert second.depth_m == 0.4 and second.index == 1
+    xle_fit.save_session(session)  # and the version 2 format reads back the same
+    again = xle_fit.load_session(tmp_path / "cal_right")
+    assert again.clicks == session.clicks and again.head_refs == REFS and again.intrinsics == INTRINSICS

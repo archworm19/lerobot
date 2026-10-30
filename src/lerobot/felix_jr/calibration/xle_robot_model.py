@@ -164,11 +164,14 @@ def default_parameters(
 
 @dataclass
 class Prediction:
-    """Where the model puts a point in the image: pixel (u, v), depth along the optical axis, camera-frame point."""
+    """What the model says about an arm's pinch point: its pixel (u, v), depth along the optical axis, position in
+    the camera frame and in the root frame, and `visibility` (see `XleRobotModel.visibility`)."""
 
     uv: np.ndarray
     z: float
     p_camera: np.ndarray
+    point: np.ndarray
+    visibility: float
 
 
 @dataclass(frozen=True)
@@ -253,6 +256,11 @@ class XleRobotModel:
                 axis=_floats(axis, "xyz", default=(1.0, 0.0, 0.0)),
             )
         into = {j.child: j for j in self._joints.values()}
+        self._into = into
+        self._ancestor_cache: dict[str, set[str]] = {}
+        self._unit_axes = {
+            name: j.axis / np.linalg.norm(j.axis) for name, j in self._joints.items() if j.moves
+        }
 
         def fixed_path(link: str) -> list[str]:
             """The fixed joints from the nearest moving joint (or the root) down to `link`."""
@@ -341,14 +349,15 @@ class XleRobotModel:
 
     def _corrected_origins(
         self, theta: np.ndarray | Mapping[str, float] | None
-    ) -> tuple[dict[str, "pin.SE3"], np.ndarray]:
-        """The corrected origin of every joint with a `pos:` / `rot:` correction, and the zero offsets as a q vector."""
+    ) -> tuple[dict[str, "pin.SE3"], dict[str, np.ndarray], np.ndarray]:
+        """The corrected origin of every joint with a `pos:` / `rot:` correction, the rotation vector of each `rot:`
+        correction, and the zero offsets as a q vector."""
         shifts: dict[str, np.ndarray] = {}
         rotations: dict[str, np.ndarray] = {}
         zero = np.zeros(self.nominal_model.nq)
         for p, value in zip(self.parameters, self._vector(theta), strict=True):
             if p.kind == "zero":
-                zero[self._idx_q(p.joint)] += value
+                zero[self.q_index(p.joint)] += value
             else:
                 target = shifts if p.kind == "pos" else rotations
                 target.setdefault(p.joint, np.zeros(3))[p.axis] += value
@@ -357,11 +366,12 @@ class XleRobotModel:
             nominal = self._joints[name].origin
             rotation = nominal.rotation @ pin.exp3(rotations.get(name, np.zeros(3)))
             origins[name] = pin.SE3(rotation, nominal.translation + shifts.get(name, np.zeros(3)))
-        return origins, zero
+        return origins, rotations, zero
 
     def _apply(self, theta: np.ndarray | Mapping[str, float] | None) -> None:
         """Rebuild the working model's placements from the nominal origins and `theta` (never from earlier ones)."""
-        origins, self._zero = self._corrected_origins(theta)
+        origins, self._rotation_vectors, self._zero = self._corrected_origins(theta)
+        self._origins = origins
         for is_frame, index, chain in self._placements:
             placement = pin.SE3.Identity()
             for name in chain:
@@ -373,7 +383,12 @@ class XleRobotModel:
 
     def _evaluate(self, q: np.ndarray, theta: np.ndarray | Mapping[str, float] | None) -> None:
         self._apply(theta)
-        pin.framesForwardKinematics(self.pin_model, self._data, np.asarray(q, dtype=float) + self._zero)
+        self._forward(q)
+
+    def _forward(self, q: np.ndarray) -> None:
+        """Forward kinematics at measured `q` with the applied estimates (call `_apply` first)."""
+        self._q_effective = np.asarray(q, dtype=float) + self._zero
+        pin.framesForwardKinematics(self.pin_model, self._data, self._q_effective)
 
     # ---- joints ------------------------------------------------------------------------------------------------
 
@@ -405,22 +420,36 @@ class XleRobotModel:
                 if f"{j}.pos" in pose
             }
         for name, angle in angles.items():
-            q[self._idx_q(name)] = angle
+            q[self.q_index(name)] = angle
         return q
 
     def joint_limits(self, arm: str) -> dict[str, tuple[float, float]]:
         """`{joint: (lower, upper)}` in radians for `arm`'s SO-101 joints, from the URDF."""
-        model = self.nominal_model
-        return {
-            j: (
-                float(model.lowerPositionLimit[self._idx_q(arm_joint(arm, j))]),
-                float(model.upperPositionLimit[self._idx_q(arm_joint(arm, j))]),
-            )
-            for j in SO101_JOINTS
-        }
+        return {j: self.limits(arm_joint(arm, j)) for j in SO101_JOINTS}
 
-    def _idx_q(self, joint: str) -> int:
+    def limits(self, joint: str) -> tuple[float, float]:
+        """(lower, upper) position limits of a URDF joint (radians / meters), from the URDF."""
+        i = self.q_index(joint)
+        return float(self.nominal_model.lowerPositionLimit[i]), float(
+            self.nominal_model.upperPositionLimit[i]
+        )
+
+    def q_index(self, joint: str) -> int:
+        """Where a one-dimensional URDF joint's position sits in `q`."""
         return int(self.nominal_model.joints[self.nominal_model.getJointId(joint)].idx_q)
+
+    def head_ticks(self, angles: Mapping[str, float]) -> dict[str, int]:
+        """Raw servo ticks for URDF head angles (radians, measured, before the zero corrections): `head_angles`'s
+        inverse, rounded to whole ticks."""
+        return {
+            servo: int(
+                round(
+                    self.head_refs[servo]
+                    + angles[joint] * TICKS_PER_TURN / (2 * np.pi) / self.head_signs[servo]
+                )
+            )
+            for servo, joint in HEAD_JOINTS.items()
+        }
 
     # ---- geometry and measurement ----------------------------------------------------------------------------
 
@@ -452,12 +481,13 @@ class XleRobotModel:
     def predict(
         self, arm: str, q: np.ndarray, theta: np.ndarray | Mapping[str, float] | None = None
     ) -> Prediction:
-        """Where `arm`'s pinch point lands in the image."""
+        """Where `arm`'s pinch point lands in the image, where it is, and whether the camera can see it."""
         self._evaluate(q, theta)
         tip = self._pose(pinch_frame(arm))[:3, 3]
         uv, z = self._project(tip[None])
         x_root_camera = self._pose(OPTICAL_FRAME)
-        return Prediction(uv[0], float(z[0]), x_root_camera[:3, :3].T @ (tip - x_root_camera[:3, 3]))
+        p_camera = x_root_camera[:3, :3].T @ (tip - x_root_camera[:3, 3])
+        return Prediction(uv[0], float(z[0]), p_camera, tip, self._visibility(arm))
 
     def predict_many(
         self, arm: str, qs: Sequence[np.ndarray], theta: np.ndarray | Mapping[str, float] | None = None
@@ -466,10 +496,121 @@ class XleRobotModel:
         self._apply(theta)
         uv, z = np.full((len(qs), 2), np.nan), np.full(len(qs), np.nan)
         for i, q in enumerate(qs):
-            pin.framesForwardKinematics(self.pin_model, self._data, np.asarray(q, dtype=float) + self._zero)
+            self._forward(q)
             uv_i, z_i = self._project(self._pose(pinch_frame(arm))[:3, 3][None])
             uv[i], z[i] = uv_i[0], z_i[0]
         return uv, z
+
+    # ---- derivatives -------------------------------------------------------------------------------------------
+
+    def pixel_jacobian(
+        self,
+        arm: str,
+        q: np.ndarray,
+        theta: np.ndarray | Mapping[str, float] | None = None,
+        joints: Sequence[str] = (),
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """d(pixel of `arm`'s pinch point): (2, P) w.r.t. the estimates and (2, len(joints)) w.r.t. the measured
+        angles of `joints` (URDF names, e.g. `head_pan_joint`, `left_elbow_flex`). Zeros if the pinch point is at or
+        behind the camera.
+
+        Analytic: every parameter and joint moves everything below its URDF joint by a twist (a translation for
+        `pos:` and prismatic joints, a rotation about an axis through the joint's origin for `rot:`, `zero:` and
+        revolute joints); the pixel changes with the pinch point's motion relative to the camera's.
+        """
+        self._evaluate(q, theta)
+        return self._jacobians(arm, joints)
+
+    def pixel_jacobian_many(
+        self, arm: str, qs: Sequence[np.ndarray], theta: np.ndarray | Mapping[str, float] | None = None
+    ) -> np.ndarray:
+        """(N, 2, P): `pixel_jacobian` w.r.t. the estimates at each of `qs`, applying `theta` once (for fits)."""
+        self._apply(theta)
+        out = np.zeros((len(qs), 2, len(self.parameters)))
+        for i, q in enumerate(qs):
+            self._forward(q)
+            out[i] = self._jacobians(arm, ())[0]
+        return out
+
+    def _jacobians(self, arm: str, joints: Sequence[str]) -> tuple[np.ndarray, np.ndarray]:
+        """`pixel_jacobian` at the evaluated configuration."""
+        x_root_camera = self._pose(OPTICAL_FRAME)
+        rotation, center = x_root_camera[:3, :3], x_root_camera[:3, 3]
+        tip = self._pose(pinch_frame(arm))[:3, 3]
+        x, y, z = rotation.T @ (tip - center)
+        d_parameters, d_joints = np.zeros((2, len(self.parameters))), np.zeros((2, len(joints)))
+        if z <= 1e-6:
+            return d_parameters, d_joints
+        c = self.intrinsics
+        projection = np.array(
+            [[c["fx"] / z, 0.0, -c["fx"] * x / z**2], [0.0, c["fy"] / z, -c["fy"] * y / z**2]]
+        )
+        coordinates = [(p.kind, p.joint, p.axis) for p in self.parameters] + [
+            ("zero", j, None) for j in joints
+        ]
+        linear, angular = self._twists(coordinates)
+        tip_chain, camera_chain = self._ancestors(pinch_frame(arm)), self._ancestors(OPTICAL_FRAME)
+        moves_tip = np.array([[joint in tip_chain] for _, joint, _ in coordinates], dtype=float)
+        moves_camera = np.array([[joint in camera_chain] for _, joint, _ in coordinates], dtype=float)
+        d_tip = (linear + np.cross(angular, tip)) * moves_tip
+        d_center = (linear + np.cross(angular, center)) * moves_camera
+        d_camera_frame = (
+            d_tip - d_center - np.cross(angular * moves_camera, tip - center)
+        )  # rows: coordinates
+        columns = projection @ rotation.T @ d_camera_frame.T
+        return columns[:, : len(self.parameters)], columns[:, len(self.parameters) :]
+
+    def _twists(self, coordinates: Sequence[tuple[str, str, int | None]]) -> tuple[np.ndarray, np.ndarray]:
+        """Per coordinate (kind, joint, axis), the twist of `joint`'s subtree per unit change, in the root frame: rows of
+        (linear velocity at the root's origin, angular velocity). Kinds: `zero` (the joint's angle), or axis `axis`
+        of `pos` / `rot`."""
+        linear, angular = np.zeros((len(coordinates), 3)), np.zeros((len(coordinates), 3))
+        points = np.zeros((len(coordinates), 3))  # a point on each rotation's axis
+        origin_poses: dict[str, np.ndarray] = {}
+        for i, (kind, joint, axis) in enumerate(coordinates):
+            if joint not in origin_poses:  # the joint's frame after its origin, before its own motion
+                origin_poses[joint] = self._origin_pose(joint)
+            rotation, points[i] = origin_poses[joint][:3, :3], origin_poses[joint][:3, 3]
+            urdf_joint = self._joints[joint]
+            if kind == "zero":
+                direction = rotation @ self._unit_axes[joint]
+                if urdf_joint.type == "prismatic":
+                    linear[i] = direction
+                else:
+                    angular[i] = direction
+            elif kind == "pos":  # along the parent frame's axis
+                origin = self._origins.get(joint, urdf_joint.origin)
+                linear[i] = rotation @ origin.rotation.T[:, axis]
+            else:  # R_origin = R_urdf exp(w): the right Jacobian of exp
+                w = self._rotation_vectors.get(joint, np.zeros(3))
+                angular[i] = rotation @ pin.Jexp3(w)[:, axis]
+        return linear - np.cross(angular, points), angular  # a rotation about an axis through `points`
+
+    def _origin_pose(self, joint: str) -> np.ndarray:
+        """X_root of `joint`'s frame after its (corrected) origin and before its own motion."""
+        urdf_joint = self._joints[joint]
+        if not urdf_joint.moves:
+            return self._pose(urdf_joint.child)
+        joint_id = self.pin_model.getJointId(joint)
+        angle = self._q_effective[self.q_index(joint)]
+        axis = self._unit_axes[joint]
+        undo = (
+            pin.SE3(np.eye(3), -axis * angle)
+            if urdf_joint.type == "prismatic"
+            else pin.SE3(pin.exp3(-axis * angle), np.zeros(3))
+        )
+        return (self._data.oMi[joint_id] * undo).homogeneous
+
+    def _ancestors(self, link: str) -> set[str]:
+        """Names of the URDF joints between the root and `link`."""
+        if link not in self._ancestor_cache:
+            out = set()
+            name = link
+            while name in self._into:
+                out.add(self._into[name].name)
+                name = self._into[name].parent
+            self._ancestor_cache[link] = out
+        return self._ancestor_cache[link]
 
     def visibility(
         self, arm: str, q: np.ndarray, theta: np.ndarray | Mapping[str, float] | None = None
@@ -480,6 +621,9 @@ class XleRobotModel:
         plane the jaws open in, and the pinch point hides.
         """
         self._evaluate(q, theta)
+        return self._visibility(arm)
+
+    def _visibility(self, arm: str) -> float:
         hinge = self._joints[arm_joint(arm, "gripper")]
         axis = self._pose(hinge.child)[:3, :3] @ (hinge.axis / np.linalg.norm(hinge.axis))
         sight = self._pose(OPTICAL_FRAME)[:3, 3] - self._pose(pinch_frame(arm))[:3, 3]
@@ -517,7 +661,7 @@ class XleRobotModel:
         result with no corrections gives the same poses for the same measured `q`. Joint limits are untouched:
         they bound the measured position, which does not change.
         """
-        origins, _ = self._corrected_origins(theta)
+        origins, _, _ = self._corrected_origins(theta)
         zeros = {
             p.joint: v for p, v in zip(self.parameters, self._vector(theta), strict=True) if p.kind == "zero"
         }

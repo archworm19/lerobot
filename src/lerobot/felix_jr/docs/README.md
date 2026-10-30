@@ -169,64 +169,53 @@ it ends; `stop` aborts and holds in place; only one motion runs at a time; while
 themselves in `client.session()`, which sends it to rest on any exit; scripts that only read open no session and
 are never moved. Details are in `server/motion.py` and the module docstring of `server/client.py`.
 
-### 6. Calibrate the camera to the arm (clicks, needs the server)
+### 6. Calibrate the camera to the arms (clicks, needs the server)
 
-Finds the corrections to the URDFs (head and camera offsets, arm joint zeros, the tip offset) so a trajectory can be
-projected into the camera image. You click the tip of the closed gripper in about 30 to 60 frames. Background and
-how to judge the result are in [camera_calibration.md](camera_calibration.md), "Click calibration".
+Finds the corrections to the robot's URDF (head and camera offsets, arm mounts, arm joint zeros, the pinch point
+offset) so a trajectory can be projected into the camera image. You click the pinch point of the closed gripper in
+about 30 to 60 frames per arm. The result is one file, `calibration.urdf`: a URDF any tool can load (placo,
+`RobotKinematics`, a viewer), which also carries what a refit needs. Background and how to judge the result are in
+[camera_calibration2.md](camera_calibration2.md).
 
 1. Server on the Pi with the arm (the left arm also carries the head): `server.server --left-port <PORT> ...`.
    Record the head's home first, for the eyes **and the neck** (`setup.head_range`, then
    `setup.head_range --name head_neck` with the head looking straight ahead). The servos report their position in
-   raw ticks; the home is what says which tick count means "straight ahead". Without a neck home the script has
-   to take wherever the neck happens to be as its reference, and the circle starts off sideways.
+   raw ticks; the home is what says which tick count means "straight ahead", and every session that is fitted
+   together must use the same one. Without a neck home the script takes wherever the neck happens to be as its
+   reference, and the circle starts off sideways.
 2. On your computer, with the workspace in front of the robot clear and the arm free to move:
-   `uv run python -m lerobot.felix_jr.calibration.collect tcp://<pi>:5555 --arm left --out-dir ~/cal_left`
-   A window shows the camera with a cyan circle where the model predicts the tip. `n` moves the arm (slowly) to the
-   next planned pose and turns the head towards the circle; click the very end of the closed gripper; arrow keys
-   nudge the head (do this now and then, so the head's parameters are not confounded with the arm's); `u` undoes
-   a click; `q` finishes and the robot goes to rest. The first few clicks are hard: the circle is far off until the
-   head's zero offsets are learned. At the start it prints what it worked out: the camera's pitch (read from the
-   table in the depth image; give `--head-tilt-deg` if there is no table in view), the table's height below the
-   arm base, and the first pose. Poses stay above the table and within the head's range, but nothing checks for
-   collisions with other objects: clear the space and watch the arm. Ctrl+C is safe (the robot stops and goes to
+   `uv run python -m lerobot.felix_jr.calibration.collect tcp://<pi>:5555 --arm left --out-dir ~/cal_left
+   [--start-from <an earlier calibration.urdf>]`
+   A window shows the camera with a cyan circle where the model predicts the pinch point. `n` moves the arm
+   (slowly) and the head to the next view: the pinch point in the middle of the picture, seen from the side the
+   wrist camera does not block. Click where the closed fingertips meet; arrow keys nudge the head (do this now and
+   then, so the head's parameters are not confounded with the arm's); `u` undoes a click; `r` refits and prints the
+   error; `q` finishes. Each click refits the model, so the circle closes in on the pinch point. Without
+   `--start-from` the first views may miss (the head's zero angles are unknown): nudge the head until the gripper
+   shows, and click. Views keep the pinch point above `--floor-z` (default: the arm base's height), but nothing
+   checks for other collisions: clear the space and watch the arm. Ctrl+C is safe (the robot stops and goes to
    rest).
-3. Fit: `uv run python -m lerobot.felix_jr.calibration.fit ~/cal_left/observations.json --out-dir ~/cal_left`
-   Read `fit_report.md`: the held-out pixel error before and after, which parameters were learned, and the
-   largest remaining errors (re-click or undo those). It also writes the calibrated URDFs.
-4. Do the right arm, starting from what the left arm taught about the head and camera:
-   `uv run python -m lerobot.felix_jr.calibration.collect tcp://<pi>:5555 --arm right --out-dir ~/cal_right --head-from ~/cal_left`
-   then `calibration.fit ~/cal_right/observations.json --out-dir ~/cal_right` as before. See below.
+3. On `q` it fits everything and writes `~/cal_left/calibration.urdf` and `calibration.md`: the held-out pixel
+   error before and after, which parameters were learned, and the largest remaining errors (re-click or undo
+   those).
+4. The right arm, in the same fit as the left one, so the head and camera get one estimate:
+   `uv run python -m lerobot.felix_jr.calibration.collect tcp://<pi>:5555 --arm right --out-dir ~/cal_right
+   --start-from ~/cal_left/calibration.urdf --with ~/cal_left`
+   Its `calibration.urdf` covers both arms. To refit any set of sessions later (e.g. after more clicks):
+   `uv run python -m lerobot.felix_jr.calibration.xle_fit ~/cal_left ~/cal_right --out calibration.urdf`.
 
-**Reusing the left arm's head and camera for the right arm (`--head-from`).** The head, its servos and the camera
-are the same whichever arm is being clicked, so the left fit already knows most of what matters for the right
-arm's first frames (the head's zero offsets, the camera's offsets on the head). `--head-from <left fit folder>`
-reads `kinematic_calibration.json` from that folder and:
-
-- uses its head and camera parameters as *priors* for the right arm: mean = the left fit's value, sigma = the left
-  fit's posterior sigma (at least 0.3 deg / 0.5 mm). The right arm's clicks can still correct them, but not
-  without evidence. The arm mount, arm joints and tip are not carried over: they belong to each arm.
-- uses the left session's head reference ticks, so its zero offsets mean the same thing now. The servos'
-  encoders are absolute, so this holds across sessions and power cycles; it is why a missing neck home does not
-  matter here.
-- skips the tilt estimate from the table (the left fit knows the tilt better); the table is still measured, to
-  keep poses above it.
-
-Only do this if nothing on the head changed in between: the camera was not remounted, the head not taken apart,
-the head servos not re-set-up (the script refuses if the saved head directions changed). Check the right fit's
-report: the head parameters should land within about two of their (left) sigmas of the left values, and the
-held-out error should be as good as the left arm's. If either is off, calibrate the right arm without
-`--head-from`. Fitting both arms' clicks together in one fit, with one shared head, would be slightly better
-still; it is not implemented.
+An earlier calibration (`--start-from`) is only a starting point, so the first view already shows the gripper; the
+fit itself uses every session's clicks with the wide default priors, so no click counts twice. The sessions must
+share the head's servo map (the script refuses otherwise), so do not re-record the head's home between them, and
+recalibrate from scratch if the camera was remounted or the head taken apart.
 
 **The pinch point and the wrist camera.** The pinch point is only visible when the camera looks at the gripper
-from the side, and from the side *without* the wrist camera, whose board otherwise covers it. `collect` rolls the
-wrist of every pose to show that side (`--side positive`, the default, see `camera_calibration.md`). For the right
-arm this means rolls near the joint's limit (+120 to +130 degrees): keep an eye on the wrist camera's cable. If
-your wrist camera is mounted on the other side, use `--side negative`; `--side either` learns it from the first
-three clicks.
+from the side, and from the side *without* the wrist camera, whose board otherwise covers it. Views roll the wrist
+to show that side (`--side positive`, the default; `--side negative` if your wrist camera is on the other side).
+Rolls stay within `--max-roll` (130 degrees): keep an eye on the wrist camera's cable.
 
-`calibration.design` only plans poses; `collect --resume` continues an earlier folder.
+`collect --resume` continues an earlier folder. Folders from the first version of `collect` (with
+`kinematic_calibration.json`) are read by `xle_fit` and `--with` as they are.
 
 ## Checks and teleop (after either setup)
 

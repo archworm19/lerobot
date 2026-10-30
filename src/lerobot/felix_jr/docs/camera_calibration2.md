@@ -1,8 +1,10 @@
 # Camera calibration, version 2: `XleRobotModel`
 
-**Status:** migration steps 1 to 3 are done (`calibration/merge_urdf.py`, `xlerobot_so101.urdf`,
-`calibration/xle_robot_model.py`, `calibration/xle_fit.py`, tests in `tests/felix_jr/test_xle_robot_model.py` and
-`test_xle_fit.py`); the rest is the plan.
+**Status:** migration steps 1 to 5 are done (`calibration/merge_urdf.py`, `xlerobot_so101.urdf`,
+`calibration/xle_robot_model.py`, `calibration/xle_fit.py`, `calibration/views.py`, and `calibration/collect.py`
+rewritten on them; tests in `tests/felix_jr/test_xle_robot_model.py`, `test_xle_fit.py`, `test_views.py`,
+`test_calibration_collect.py` and the smoke test of a whole session). Step 6, deleting version 1, is left. How to
+run a calibration: [README.md](README.md), section 6.
 
 **Calibrate** (both arms, one head):
 `uv run python -m lerobot.felix_jr.calibration.xle_fit ~/cal_left ~/cal_right --out calibration.urdf`
@@ -74,7 +76,7 @@ that will change more often than the robot.
 | Joints | `joint_vector(arms, head_ticks)`, `head_angles(ticks)`, `joint_limits(arm)` | pinocchio `q` of measured angles; bounds |
 | Geometry | `frame_pose(frame, q)`, `camera_pose(q)`, `pinch_point(arm, q)` | poses / position in the root frame |
 | Measurement | `project(points, q)`, `predict(arm, q)`, `predict_many(arm, qs)`, `visibility(arm, q)` | pixels and depth; signed hinge cosine |
-| Derivatives | `pixel_jacobian(arm, q)` (step 4, not yet) | (2 x P) w.r.t. the estimates, (2 x nq) w.r.t. the joints |
+| Derivatives | `pixel_jacobian(arm, q, joints=...)`, `pixel_jacobian_many(arm, qs)` | (2 x P) w.r.t. the estimates, (2 x J) w.r.t. named joints |
 | Export | `to_urdf()`, `robot_kinematics(arm)` (not yet), `save(path)` | |
 
 **`q` is measured angles only.** `joint_vector` turns servo readings into pinocchio's configuration vector (head
@@ -246,29 +248,38 @@ overconfident where the clicks cannot separate parameters, like the pan zero and
 
 ## Choosing poses: `find_view`
 
-`views.find_view(model, arm, target, seed)` returns head and arm joints that put the pinch point near the middle of the picture,
-seen from the visible side, above the floor. It is the same machinery as the fit, over joints instead of
-parameters:
+`views.find_view(model, arm, seed, target, head_limits)` returns head and arm joints that put the pinch point near
+the middle of the picture, seen from the visible side, above the floor, as a `View` (what to command, what the model
+expects, and whether it is good enough). It is the same machinery as the fit, over joints instead of parameters:
 
-- **Variables:** head pan and tilt, the arm's five joints, with bounds at the joint limits (with a margin).
-- **Residuals:** the pinch point's pixel minus the image center (pixels / 20), the target position minus the pinch
-  point (meters / 0.02), `1 - visibility` on the visible side, a soft floor clearance, and a weak pull towards the
-  seed pose.
-- **Solver:** `least_squares` with the analytic Jacobian (all columns are joint columns), from the seed and from
-  a few random starts; keep the best that meets the thresholds (pixel error, visibility angle within 50 deg).
+- **Variables:** head pan and tilt, the arm's five joints. Bounds: the head's recorded limits (or +/-40 deg around
+  where it is), the arm's URDF limits with a 0.8 margin, the wrist roll within `--max-roll`.
+- **Residuals:** the pinch point's *angle* off the optical axis times the focal length (about its pixel offset from
+  the middle, / 20 px; an angle stays smooth when a trial pose puts the point behind the camera, where a pixel
+  would jump), `1 - visibility` on the visible side (/ 0.2), the target position minus the pinch point (/ 2 cm), a
+  one-sided floor clearance (/ 5 mm), and a weak pull towards the seed pose (/ 1 rad).
+- **Solver:** `least_squares` with scipy's finite differences (7 variables: a few milliseconds per Jacobian), from
+  the seed and three random starts; the best is kept. `View.ok` says whether it is usable: in the picture with a
+  60 px margin, hinge axis within 50 deg of the line of sight, above the floor.
+- **Priorities:** showing the pinch point beats reaching the target. A target the head cannot center (the neck at
+  its limit) gets a view with the arm moved towards what the head can see.
 
-**Spreading the clicks:** choose target pinch point positions spread over the workspace where trajectories will
-be (farthest-point selection in Cartesian space, as today's planner does in joint space), then `find_view` each.
-This replaces today's 6000-sample search for the first pose, the 600 candidates and the wrist-roll scan, which
-are why a session takes 8 to 26 s to start.
+**Spreading the clicks:** `views.plan_targets` samples arm poses around a seed pose (the center pose by default,
++/-20 to 30 deg per joint), keeps those whose pinch point is above the floor, and picks the most spread-out pinch
+points (farthest-point selection in Cartesian space); each target keeps the pose that reaches it as `find_view`'s
+seed. Planning takes 0.08 s; each view is solved when `n` is pressed, with the latest estimates. This replaces
+version 1's 6000-sample search for the first pose, its 600 candidates and the wrist-roll scan, which made a session
+take 8 to 26 s to start.
 
 **Starting a session.** The head's tilt zero is unknown to about 20 deg on a fresh robot.
 
 - After the first calibration, the saved head and camera estimates (with their covariance) are the starting
   point, so the first pose already shows the pinch point.
-- On a fresh robot: the first pose is chosen with the prior, the person nudges the head with the arrow keys until
-  the gripper is in view and clicks; the first refit pins the tilt zero. The depth-based table plane estimate is
-  dropped.
+- On a fresh robot: the first view is chosen with the priors, the person nudges the head with the arrow keys until
+  the gripper is in view and clicks; the first refits (from 4 clicks) pin the tilt zero. The depth-based table
+  plane estimate is dropped.
+- The floor: `--floor-z`, else the calibration's `floor_z`, else the arm base's height (conservative: on this robot
+  the table is about 3 cm below it). The depth at each click is still recorded, for an optional depth residual.
 
 ## Saving and interfacing
 
@@ -306,8 +317,17 @@ are why a session takes 8 to 26 s to start.
 3. **The fit** with `least_squares` and finite differences, over all sessions and both arms at once
    (`xle_fit.py`). *Done:* the left session alone reproduces version 1 (1.99 px held out, 2.70 px overall); the
    joint fit is above. Version 1 session folders are read directly (`load_v1_session`).
-4. **`pixel_jacobian`** (analytic), tested against finite differences.
+4. **`pixel_jacobian`** (analytic), tested against finite differences. *Done:* it agrees with central
+   differences to about 1e-10 (relative), large rotation corrections included. With it the fit's Jacobian for 40
+   clicks and 72 parameters takes 18 ms (finite differences: 45 to 90 ms), and the joint fit of both sessions,
+   held-out validation included, runs in 2 s.
 5. **`views.find_view`** and the target spreading (through `pinch_point`); switch `collect` over to `XleRobotModel`.
+   *Done:* on the joint calibration, 40 of 40 planned targets per arm get a view that shows the pinch point (median
+   hinge angle 35 deg; wrist rolls 49 to 66 deg left, 86 to 106 deg right, lower than version 1's +120 to +130 for
+   the right arm), in about 0.15 to 0.2 s each, solved when `n` is pressed so each uses the latest estimates.
+   `find_view` uses scipy's finite differences: 7 variables, cheap enough. `collect` starts from a calibration
+   (`--start-from`), fits jointly with other sessions (`--with`) after every click, and writes `calibration.urdf`
+   at the end.
 6. **Delete:** `urdf_kinematics.py` (once the placo tests use pinocchio), `sensitivity.py` and its report,
    `design.py`'s sampling, `bootstrap.py`, the fitting loop in `fit.py`, and `CalibrationModel`. Fold what is still
    true from [camera_calibration.md](camera_calibration.md) into this document and retire it.

@@ -199,3 +199,33 @@ def test_head_angles_and_pinch_frames():
     assert angles == pytest.approx({"head_pan_joint": -100 * step, "head_tilt_joint": 100 * step})
     assert pinch_frame("right") == "right_gripper_frame_link"
     assert m.nominal("pos:left_gripper_frame_joint:z") == pytest.approx(-0.0981274)
+
+
+@pytest.mark.parametrize("arm", ["left", "right"])
+def test_the_pixel_jacobian_matches_finite_differences(model, arm):
+    rng = np.random.default_rng(5)
+    theta = np.array([rng.normal(0, p.sigma) for p in model.parameters])
+    theta[[p.kind == "rot" for p in model.parameters]] *= (
+        10  # large rotations: the exp map's Jacobian matters
+    )
+    theta[[p.name == "zero:head_tilt_joint" for p in model.parameters]] = 0.58  # look down at the arms
+    joints = ["head_pan_joint", "head_tilt_joint", *(f"{arm}_{j}" for j in ARM_JOINTS)]
+    while True:
+        arm_pose, ticks = random_readings(rng)
+        q = model.joint_vector({arm: arm_pose}, ticks)
+        if model.predict(arm, q, theta).z > 0.1:
+            break
+    d_parameters, d_joints = model.pixel_jacobian(arm, q, theta, joints)
+    step = 1e-6
+    for i in range(len(theta)):
+        e = np.zeros_like(theta)
+        e[i] = step
+        numeric = (model.predict(arm, q, theta + e).uv - model.predict(arm, q, theta - e).uv) / (2 * step)
+        np.testing.assert_allclose(d_parameters[:, i], numeric, atol=1e-4, err_msg=model.parameters[i].name)
+    for i, joint in enumerate(joints):
+        e = np.zeros_like(q)
+        e[model.nominal_model.joints[model.nominal_model.getJointId(joint)].idx_q] = step
+        numeric = (model.predict(arm, q + e, theta).uv - model.predict(arm, q - e, theta).uv) / (2 * step)
+        np.testing.assert_allclose(d_joints[:, i], numeric, atol=1e-4, err_msg=joint)
+    many = model.pixel_jacobian_many(arm, [q, q], theta)
+    np.testing.assert_array_equal(many[1], d_parameters)

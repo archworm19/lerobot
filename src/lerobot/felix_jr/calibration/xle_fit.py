@@ -7,7 +7,8 @@ at that moment. The fit finds the estimates that make the model's predicted pixe
 
 with Gaussian priors from the model's parameter table and a Huber `rho`, so a mis-click does not drag the fit.
 It is a plain nonlinear least squares problem once each prior is a residual row, solved by
-`scipy.optimize.least_squares` (trust region, finite-difference Jacobian on top of `XleRobotModel.predict_many`).
+`scipy.optimize.least_squares` (trust region), with the model's analytic Jacobian (`pixel_jacobian_many`; finite
+differences on top of `predict_many` with `FitConfig(jacobian="2-point")`).
 scipy applies the Huber loss to each residual (u, v and every prior row) rather than to a click's pixel
 distance; prior rows within 2 sigma are in the quadratic part, so this rarely matters.
 
@@ -17,8 +18,8 @@ parameters of an arm without clicks are left as they are. An earlier calibration
 never a prior: the priors stay the wide ones of the parameter table, so no click is counted twice.
 
 **Sessions** are folders of clicks. All sessions in a fit must share the head's servo map (signs and reference
-ticks) and the camera intrinsics, since the clicks store raw head ticks. `load_v1_session` reads a version 1
-folder (`calibration.collect`'s `observations.json`).
+ticks) and the camera intrinsics, since the clicks store raw head ticks. `calibration.collect` writes them
+(`save_session`); `load_session` also reads version 1 folders.
 
 Usage: uv run python -m lerobot.felix_jr.calibration.xle_fit SESSION [SESSION ...] --out calibration.urdf
        [--sigma-px 3] [--huber 2] [--holdout-every 5] [--start-from calibration.urdf]
@@ -56,6 +57,7 @@ class Click:
     image: str | None = None  # relative to the session folder
     session: str = ""
     index: int = 0
+    timestamp: float = 0.0
 
 
 @dataclass
@@ -70,10 +72,13 @@ class Session:
     intrinsics: dict[str, float]
 
 
-def load_v1_session(directory: str | Path) -> Session:
-    """Read a version 1 session folder (`observations.json` written by `calibration.collect`)."""
+SESSION_FILE = "observations.json"
+
+
+def load_session(directory: str | Path) -> Session:
+    """Read a session folder's `observations.json` (written by `save_session`, or by version 1's `collect`)."""
     directory = Path(directory).expanduser()
-    data = json.loads((directory / "observations.json").read_text())
+    data = json.loads((directory / SESSION_FILE).read_text())
     settings = data["settings"]
     arm = settings["arm"]
     clicks = [
@@ -86,6 +91,7 @@ def load_v1_session(directory: str | Path) -> Session:
             image=o.get("image"),
             session=directory.name,
             index=int(o.get("index", i)),
+            timestamp=float(o.get("timestamp", 0.0)),
         )
         for i, o in enumerate(data["observations"])
     ]
@@ -99,8 +105,35 @@ def load_v1_session(directory: str | Path) -> Session:
     )
 
 
-def model_for_sessions(sessions: Sequence[Session], **kwargs: Any) -> XleRobotModel:
-    """An uncalibrated `XleRobotModel` with the sessions' servo map and intrinsics (which must all agree)."""
+def save_session(session: Session) -> None:
+    """Write `session` to `observations.json` in its folder (`load_session` reads it back)."""
+    data = {
+        "version": 2,
+        "settings": {
+            "arm": session.arm,
+            "intrinsics": session.intrinsics,
+            "head_signs": session.head_signs,
+            "head_refs": session.head_refs,
+        },
+        "observations": [
+            {
+                "index": c.index,
+                "image": c.image,
+                "timestamp": c.timestamp,
+                "pixel": list(c.pixel),
+                "depth_m": c.depth_m,
+                "arm": c.arm_pose,
+                "head_ticks": c.head_ticks,
+            }
+            for c in session.clicks
+        ],
+    }
+    session.path.mkdir(parents=True, exist_ok=True)
+    (session.path / SESSION_FILE).write_text(json.dumps(data, indent=2) + "\n")
+
+
+def check_compatible(sessions: Sequence[Session]) -> None:
+    """Raise unless all sessions share the head's servo map and the intrinsics (their clicks store raw ticks)."""
     first = sessions[0]
     for s in sessions[1:]:
         for name in ("head_signs", "head_refs", "intrinsics"):
@@ -109,6 +142,12 @@ def model_for_sessions(sessions: Sequence[Session], **kwargs: Any) -> XleRobotMo
                     f"{s.path} and {first.path} have different {name} ({getattr(s, name)} vs {getattr(first, name)}): "
                     "their clicks cannot be fitted together"
                 )
+
+
+def model_for_sessions(sessions: Sequence[Session], **kwargs: Any) -> XleRobotModel:
+    """An uncalibrated `XleRobotModel` with the sessions' servo map and intrinsics (which must all agree)."""
+    check_compatible(sessions)
+    first = sessions[0]
     return XleRobotModel.from_urdf(
         head_signs=first.head_signs, head_refs=first.head_refs, intrinsics=first.intrinsics, **kwargs
     )
@@ -116,11 +155,13 @@ def model_for_sessions(sessions: Sequence[Session], **kwargs: Any) -> XleRobotMo
 
 @dataclass
 class FitConfig:
-    """`sigma_px`: the click noise (pixels); `huber`: residual size, in sigmas, beyond which it is down-weighted."""
+    """`sigma_px`: the click noise (pixels); `huber`: residual size, in sigmas, beyond which it is down-weighted;
+    `jacobian`: "analytic" (the model's) or a scipy finite-difference scheme ("2-point", "3-point")."""
 
     sigma_px: float = 3.0
     huber: float = 2.0
     max_nfev: int | None = None
+    jacobian: str = "analytic"
 
 
 @dataclass
@@ -203,10 +244,21 @@ def fit(
         rows.append((x - mean[free]) / sigma[free])
         return np.concatenate(rows)
 
+    def jacobian(x: np.ndarray) -> np.ndarray:
+        theta = full(x)
+        rows = []
+        for arm, (_, qs, _) in groups.items():
+            d_pixels = (
+                model.pixel_jacobian_many(arm, qs, theta)[:, :, free] / cfg.sigma_px
+            )  # zero behind the camera
+            rows.append(d_pixels.reshape(-1, int(free.sum())))
+        rows.append(np.diag(1.0 / sigma[free]))
+        return np.vstack(rows)
+
     result = least_squares(
         residuals,
         start[free],
-        jac="2-point",
+        jac=jacobian if cfg.jacobian == "analytic" else cfg.jacobian,
         loss="huber",
         f_scale=cfg.huber,
         x_scale=sigma[free],
@@ -380,7 +432,7 @@ def main() -> None:
     parser.add_argument("--start-from", type=Path, help="a calibrated URDF whose estimates start the fit")
     args = parser.parse_args()
 
-    sessions = [load_v1_session(path) for path in args.sessions]
+    sessions = [load_session(path) for path in args.sessions]
     model = model_for_sessions(sessions)
     theta0 = None
     if args.start_from:
