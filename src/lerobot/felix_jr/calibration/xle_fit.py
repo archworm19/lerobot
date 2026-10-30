@@ -155,8 +155,12 @@ def model_for_sessions(sessions: Sequence[Session], **kwargs: Any) -> XleRobotMo
 
 @dataclass
 class FitConfig:
-    """`sigma_px`: the click noise (pixels); `huber`: residual size, in sigmas, beyond which it is down-weighted;
-    `jacobian`: "analytic" (the model's) or a scipy finite-difference scheme ("2-point", "3-point")."""
+    """Settings of the fit.
+
+    `sigma_px`: the click noise (pixels); `huber`: residual size, in sigmas, beyond which it is down-weighted;
+    `max_nfev`: a cap on the optimizer's evaluations; `jacobian`: "analytic" (the model's) or a scipy
+    finite-difference scheme ("2-point", "3-point").
+    """
 
     sigma_px: float = 3.0
     huber: float = 2.0

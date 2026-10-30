@@ -405,8 +405,10 @@ class CollectSession:
         self.render()
 
     def finish(self, holdout_every: int = 5) -> Path | None:
-        """Fit every click with held-out validation and write `calibration.urdf` and `calibration.md`; None if
-        there are too few clicks."""
+        """Fit every click with held-out validation and write `calibration.urdf` and `calibration.md`.
+
+        Returns the calibration's path, or None if there are too few clicks to fit.
+        """
         clicks = self.all_clicks()
         if len(clicks) < MIN_CLICKS_TO_FIT:
             return None

@@ -91,8 +91,10 @@ def arm_pose_degrees(model: XleRobotModel, arm: str, q: np.ndarray) -> dict[str,
 def head_bounds(
     model: XleRobotModel, head_limits: Mapping[str, tuple[int, int]] | None
 ) -> dict[str, tuple[float, float]]:
-    """(lower, upper) measured angles of the head's URDF joints: from raw tick limits per servo if given (see
-    `collect.head_limits`), else the URDF's."""
+    """(lower, upper) measured angles of the head's URDF joints.
+
+    From raw tick limits per servo if given (see `collect.head_limits`), else the URDF's.
+    """
     bounds = {}
     for servo, joint in HEAD_JOINTS.items():
         if head_limits is None or servo not in head_limits:
@@ -196,10 +198,9 @@ def plan_targets(
     candidates: int = 400,
     rng_seed: int = 0,
 ) -> list[Target]:
-    """`n` spread-out pinch point positions around the one `seed_pose` reaches (LeRobot degrees; default: the
-    wiggle's center pose, all joints at 0), the seed's first.
+    """`n` spread-out pinch point positions around the one `seed_pose` reaches, the seed's first.
 
-    Candidates are arm poses within `DEFAULT_DELTA * delta_scale` degrees of the seed (and the joint limits with
+    `seed_pose` is in LeRobot degrees (default: the wiggle's center pose, all joints at 0). Candidates are arm poses within `DEFAULT_DELTA * delta_scale` degrees of the seed (and the joint limits with
     their margin), kept if their pinch point is above the floor; then farthest-point selection on the pinch points.
     """
     seed = {j: float((seed_pose or {}).get(f"{j}.pos", 0.0)) for j in SO101_JOINTS}

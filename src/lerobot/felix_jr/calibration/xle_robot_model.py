@@ -1,6 +1,6 @@
 """`XleRobotModel`: the XLeRobot with two SO-101 arms, its head camera and its calibration, in one object.
 
-The design is in `docs/camera_calibration2.md`. In short:
+The design is in `docs/camera_calibration.md`. In short:
 
 - **Kinematics** come from pinocchio, loaded from the merged URDF (`merge_urdf.py`). The model built from the URDF
   is kept as `nominal` and never changed; `pin_model` is a copy with the current estimates applied.
@@ -133,10 +133,11 @@ def default_parameters(
 ) -> list[Param]:
     """The parameters we calibrate, with their priors (`SIGMAS`): the head and camera, then each arm's.
 
-    Per arm, 14 head and camera parameters plus 29 of the arm (mount, joint zeros and origins, tip offset), as in
-    `model.parameter_set`. The head tower is not included: moving it and moving the arm mount shift every pixel
-    identically, so only one of them can be found, and the mount is it. `overrides` replaces some priors,
-    `{name: (mean, sigma)}`.
+    Per arm, 14 head and camera parameters plus 29 of the arm (mount, joint zeros and origins, tip offset). Joint
+    origins and most of the rest stay at their priors in practice (the fit's report says which were learned), but
+    keeping them in costs little and lets the uncertainty show. The head tower is not included: moving it and moving
+    the arm mount shift every pixel identically, so only one of them can be found, and the mount is it.
+    `overrides` replaces some priors, `{name: (mean, sigma)}`.
     """
     params = [Param(f"zero:{j}", SIGMAS["head zero"], "head") for j in HEAD_JOINTS.values()]
     for joint in HEAD_JOINTS.values():
@@ -164,8 +165,11 @@ def default_parameters(
 
 @dataclass
 class Prediction:
-    """What the model says about an arm's pinch point: its pixel (u, v), depth along the optical axis, position in
-    the camera frame and in the root frame, and `visibility` (see `XleRobotModel.visibility`)."""
+    """What the model says about an arm's pinch point.
+
+    Its pixel (u, v), depth along the optical axis, position in the camera frame and in the root frame, and
+    `visibility` (see `XleRobotModel.visibility`).
+    """
 
     uv: np.ndarray
     z: float
@@ -219,7 +223,7 @@ class XleRobotModel:
         self.intrinsics = dict(intrinsics or DEFAULT_INTRINSICS)
         self.parameters = list(parameters if parameters is not None else default_parameters())
         self.floor_z = floor_z
-        self.visible_side = {arm: "positive" for arm in ARMS} | dict(visible_side or {})
+        self.visible_side = dict.fromkeys(ARMS, "positive") | dict(visible_side or {})
         if not set(self.visible_side.values()) <= set(SIDES):
             raise ValueError(f"visible_side must be one of {SIDES}: {self.visible_side}")
         self.covariance: np.ndarray | None = None  # of the estimates, from the last fit
@@ -350,8 +354,11 @@ class XleRobotModel:
     def _corrected_origins(
         self, theta: np.ndarray | Mapping[str, float] | None
     ) -> tuple[dict[str, "pin.SE3"], dict[str, np.ndarray], np.ndarray]:
-        """The corrected origin of every joint with a `pos:` / `rot:` correction, the rotation vector of each `rot:`
-        correction, and the zero offsets as a q vector."""
+        """The corrections of `theta` as the kinematics use them.
+
+        Returns the corrected origin of every joint with a `pos:` / `rot:` correction, the rotation vector of each
+        `rot:` correction, and the zero offsets as a q vector.
+        """
         shifts: dict[str, np.ndarray] = {}
         rotations: dict[str, np.ndarray] = {}
         zero = np.zeros(self.nominal_model.nq)
@@ -408,9 +415,12 @@ class XleRobotModel:
         arms: Mapping[str, Mapping[str, float]] | None = None,
         head_ticks: Mapping[str, int] | None = None,
     ) -> np.ndarray:
-        """Pinocchio `q` from servo readings: `arms` maps "left" / "right" to LeRobot's `{"shoulder_pan.pos": deg, ...}`
-        (the SO-101 URDF's angles one to one), `head_ticks` the head servos' raw ticks. Joints not given are at 0
-        (the head at its recorded home); the gripper stays at 0, which does not move the pinch point."""
+        """Pinocchio `q` (measured angles) from servo readings.
+
+        `arms` maps "left" / "right" to LeRobot's `{"shoulder_pan.pos": deg, ...}` (the SO-101 URDF's angles one to
+        one), `head_ticks` the head servos' raw ticks. Joints not given are at 0 (the head at its recorded home); the
+        gripper stays at 0, which does not move the pinch point.
+        """
         q = pin.neutral(self.nominal_model)
         angles = self.head_angles(head_ticks) if head_ticks is not None else {}
         for arm, pose in (arms or {}).items():
@@ -439,8 +449,10 @@ class XleRobotModel:
         return int(self.nominal_model.joints[self.nominal_model.getJointId(joint)].idx_q)
 
     def head_ticks(self, angles: Mapping[str, float]) -> dict[str, int]:
-        """Raw servo ticks for URDF head angles (radians, measured, before the zero corrections): `head_angles`'s
-        inverse, rounded to whole ticks."""
+        """Raw servo ticks for URDF head angles: `head_angles`'s inverse, rounded to whole ticks.
+
+        The angles are measured ones (radians, before the zero corrections).
+        """
         return {
             servo: int(
                 round(
@@ -510,9 +522,10 @@ class XleRobotModel:
         theta: np.ndarray | Mapping[str, float] | None = None,
         joints: Sequence[str] = (),
     ) -> tuple[np.ndarray, np.ndarray]:
-        """d(pixel of `arm`'s pinch point): (2, P) w.r.t. the estimates and (2, len(joints)) w.r.t. the measured
-        angles of `joints` (URDF names, e.g. `head_pan_joint`, `left_elbow_flex`). Zeros if the pinch point is at or
-        behind the camera.
+        """Derivatives of the pixel of `arm`'s pinch point.
+
+        (2, P) w.r.t. the estimates and (2, len(joints)) w.r.t. the measured angles of `joints` (URDF names, e.g.
+        `head_pan_joint`, `left_elbow_flex`). Zeros if the pinch point is at or behind the camera.
 
         Analytic: every parameter and joint moves everything below its URDF joint by a twist (a translation for
         `pos:` and prismatic joints, a rotation about an axis through the joint's origin for `rot:`, `zero:` and
@@ -561,9 +574,11 @@ class XleRobotModel:
         return columns[:, : len(self.parameters)], columns[:, len(self.parameters) :]
 
     def _twists(self, coordinates: Sequence[tuple[str, str, int | None]]) -> tuple[np.ndarray, np.ndarray]:
-        """Per coordinate (kind, joint, axis), the twist of `joint`'s subtree per unit change, in the root frame: rows of
-        (linear velocity at the root's origin, angular velocity). Kinds: `zero` (the joint's angle), or axis `axis`
-        of `pos` / `rot`."""
+        """The twist of each coordinate's subtree per unit change, in the root frame.
+
+        `coordinates` are (kind, joint, axis); kinds: `zero` (the joint's angle), or axis `axis` of `pos` / `rot`.
+        Returns rows of linear velocity at the root's origin and rows of angular velocity.
+        """
         linear, angular = np.zeros((len(coordinates), 3)), np.zeros((len(coordinates), 3))
         points = np.zeros((len(coordinates), 3))  # a point on each rotation's axis
         origin_poses: dict[str, np.ndarray] = {}
@@ -753,31 +768,6 @@ class XleRobotModel:
             model.covariance = np.array(data["covariance"], dtype=float)
         model.fit_info = data["fit_info"]
         return model
-
-
-def estimates_from_v1(theta: Mapping[str, float], arm: str) -> dict[str, float]:
-    """Translate a `CalibrationModel` (version 1) parameter dict for `arm` into `XleRobotModel` names.
-
-    Version 1 prefixes the arm's parameters with `so101:` and uses roll-pitch-yaw for rotations; here the arm's
-    joints carry the arm's prefix and rotations are rotation vectors. The translation is exact.
-    """
-    out: dict[str, float] = {}
-    rpy: dict[str, np.ndarray] = {}
-    for key, value in theta.items():
-        on_arm = key.startswith("so101:")
-        kind, joint, *rest = key.removeprefix("so101:").split(":")
-        if on_arm:
-            joint = arm_joint(arm, joint)
-        if kind == "rot":
-            rpy.setdefault(joint, np.zeros(3))[("roll", "pitch", "yaw").index(rest[0])] = value
-        elif kind == "pos":
-            out[f"pos:{joint}:{rest[0]}"] = float(value)
-        else:
-            out[f"zero:{joint}"] = float(value)
-    for joint, angles in rpy.items():
-        w = pin.log3(pin.rpy.rpyToMatrix(*angles))
-        out |= {f"rot:{joint}:{a}": float(v) for a, v in zip(AXES, w, strict=True)}
-    return out
 
 
 def _floats(

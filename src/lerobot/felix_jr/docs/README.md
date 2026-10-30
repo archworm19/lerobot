@@ -18,15 +18,15 @@ Serial ports for each arm are in [current_ports.md](current_ports.md). Findings 
 | `depth.py` | Shared: align RealSense depth to the color image, depth-edge overlays and checks. |
 | `scene.py`, `overlay.py` | Shared: ask a color + depth capture for 3D points, projections and path checks; draw paths on it. |
 | `ports.py` | Shared: the saved arm-to-port cache (`setup.find_ports` writes it, `resolve(robot_id)` reads it). |
-| `so101_new_calib.urdf` | The official SO-101 URDF (Apache 2.0), used by the calibration for the arm. |
+| `xlerobot.urdf`, `so101_new_calib.urdf` | The XLeRobot URDF and the official SO-101 URDF (Apache 2.0), merged by `calibration/merge_urdf.py` into `xlerobot_so101.urdf` (the head and base with two SO-101 arms), which the calibration uses. |
 | `base_follower.py` | Shared: `SO101FollowerWithBase` (per-joint P gains, optional wheel servos). |
 | `setup/` | One-time, per-robot: `find_ports`, `record_home`, `wheels`, `head`. |
 | `checks/` | Hardware sign-of-life tests: `wiggle_test`, `wheel_test`. |
 | `diagnostics/` | Tuning and debugging: `lift_test`, `dump_servo_config`, `set_servo_id`, `realsense_check`, `alignment_from_saved`. |
 | `server/` | Robot server for the Raspberry Pi and its client (`FelixClient`); plan in `server_plan.md`. |
 | `teleop/` | `spacemouse_teleop`. |
-| `calibration/` | Camera-to-robot calibration: numpy URDF kinematics (`urdf_kinematics`), the sensitivity analysis (`sensitivity`), and the click calibration (`model`, `design`, `collect`, `fit`, `urdf_patch`); plan in `camera_calibration.md`. |
-| `docs/` | This file, `tuning_notes.md`, `realsense_m1.md`, `scene_tools.md`, `head.md`, `camera_calibration.md`, `sensitivity_default_urdf.md`, `server_plan.md`, `current_ports.md`. |
+| `calibration/` | Camera-to-robot click calibration: the robot model (`xle_robot_model`, on pinocchio), the fit (`xle_fit`), choosing views (`views`), the interactive session (`collect`), the merged URDF (`merge_urdf`); design in `camera_calibration.md`. |
+| `docs/` | This file, `tuning_notes.md`, `realsense_m1.md`, `scene_tools.md`, `head.md`, `camera_calibration.md`, `server_plan.md`, `current_ports.md`. |
 
 ## First-time order
 
@@ -62,8 +62,9 @@ The servos keep their calibration and IDs, so nothing needs recalibrating. This 
 port names, and a copy of the arm files.
 
 a. **Install.** `uv sync --locked --extra feetech` (arms, wheels and head). On the Pi add `--extra pyzmq-dep`
-   for the server (see [server_plan.md](server_plan.md)). A plain `uv sync` lacks `pyserial`, so the scripts
-   would fail with `No module named 'serial'`.
+   for the server (see [server_plan.md](server_plan.md)); on the computer that runs the camera calibration
+   (section 6) add `--extra felix_jr` (pinocchio, placo and scipy). A plain `uv sync` lacks `pyserial`, so the
+   scripts would fail with `No module named 'serial'`.
 b. **Find each arm's port.** Plug in both arms' USB cables, then:
    `uv run python -m lerobot.felix_jr.setup.find_ports`
    It asks you to unplug one arm's USB cable at a time (the servo power can stay on), sees which port vanished,
@@ -175,7 +176,7 @@ Finds the corrections to the robot's URDF (head and camera offsets, arm mounts, 
 offset) so a trajectory can be projected into the camera image. You click the pinch point of the closed gripper in
 about 30 to 60 frames per arm. The result is one file, `calibration.urdf`: a URDF any tool can load (placo,
 `RobotKinematics`, a viewer), which also carries what a refit needs. Background and how to judge the result are in
-[camera_calibration2.md](camera_calibration2.md).
+[camera_calibration.md](camera_calibration.md).
 
 1. Server on the Pi with the arm (the left arm also carries the head): `server.server --left-port <PORT> ...`.
    Record the head's home first, for the eyes **and the neck** (`setup.head_range`, then
@@ -257,5 +258,7 @@ Rolls stay within `--max-roll` (130 degrees): keep an eye on the wrist camera's 
 
 ## Tests
 
-`uv run pytest tests/felix_jr -q` runs the tests for the geometry helpers (`depth.py`, `scene.py`, `overlay.py`). They
-need no hardware.
+`uv run pytest tests/felix_jr -q` runs everything; none of it needs hardware (the server and calibration tests
+use a fake robot behind a real socket). The calibration tests need `--extra felix_jr` and are skipped without it.
+For a quick run, `-m "not smoke and not slow"` skips the end-to-end tests in `tests/felix_jr/smoke_tests/` and the
+tests that wait on real timeouts (watchdogs, heartbeats).

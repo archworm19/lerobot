@@ -1,7 +1,9 @@
 """Build `xlerobot_so101.urdf`: the XLeRobot's head and base with two SO-101 arms, as one kinematic tree.
 
-`XleRobotModel` (`xle_robot_model.py`) loads this one URDF. It replaces the runtime join of two URDFs that
-`CalibrationModel` does (see the module docstring of `model.py` for why the arm comes from the SO-101 URDF):
+`XleRobotModel` (`xle_robot_model.py`) loads this one URDF. The arms come from the official SO-101 URDF rather than
+from `xlerobot.urdf`, whose arm is an older gripper (its wrist roll joint lacks the SO-101's 18 mm lateral offset,
+and its shoulder offsets differ by about 13 mm), while the hardware is an SO-101; and the SO-101 URDF's joint angles
+are LeRobot's calibrated degrees one to one (the teleop relies on this), so no sign or offset is guessed for the arm:
 
 - From `xlerobot.urdf`: everything except its arms. The root `joint_0` becomes fixed (pinocchio and placo would
   add a free base otherwise), and the mesh-only `*_geom_*` links and the `head_camera_rgb_frame` /
@@ -9,7 +11,7 @@
 - Two copies of `so101_new_calib.urdf`, every link and joint prefixed `left_` / `right_`, each attached to its
   arm base (`Base` / `Base_2`) by a fixed `<arm>_arm_mount` joint. Its origin is the rigid transform that best
   matches the SO-101's shoulder, elbow and wrist pivots with those of the arm inside `xlerobot.urdf`, over random
-  poses (the same fit, with the same random poses, as `CalibrationModel._align_arm_to_base`).
+  poses (the alignment the first calibrations were made with, kept so they still apply).
 - A fixed `head_camera_optical` frame under `head_camera_link`: x right, y down, z forward.
 - No visuals, collisions, transmissions or materials: we do not have the meshes, and only the tree is needed.
 
@@ -42,8 +44,12 @@ CAMERA_LINK, OPTICAL_FRAME = "head_camera_link", "head_camera_optical"
 LINK_TO_OPTICAL = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
 DROPPED_LINKS = ("head_camera_rgb_frame", "head_camera_depth_frame")
 
-# How the SO-101's joints relate to the arm joints inside xlerobot.urdf: q_xle = sign * q_so101 + offset (see the
-# comment on ALIGN_SIGNS in model.py; the pan offset is the heading, 90 degrees off for each arm).
+# How the SO-101's joints relate to the arm joints inside xlerobot.urdf: q_xle = sign * q_so101 + offset. Signs and
+# the lift / elbow / wrist-flex offsets were found by matching the pivots' positions over random poses (the residual
+# that remains, about 8 to 14 mm, is the shoulder geometry difference). The pan offset is the heading: LeRobot's
+# pan = 0 points the arm forward, while the XLeRobot URDF's pan = 0 points it sideways (left arm 90 degrees off,
+# right arm -90). Checked against the wiggle test's camera frames: a +10 degree pan moves the arms to the right in
+# the image, and at the center pose the tip is about 35 cm forward and 23 cm up from the arm base.
 SO101_JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")
 XLE_ARM_JOINTS = {
     "left": ("Rotation_L", "Pitch_L", "Elbow_L", "Wrist_Pitch_L"),
@@ -108,8 +114,8 @@ def arm_mount(xle: ET.Element, arm: str) -> "pin.SE3":
     """X_Base_so101: where the SO-101's `base_link` sits in the XLeRobot arm's base frame (`Base` / `Base_2`).
 
     Kabsch fit of the SO-101's shoulder, elbow and wrist pivots onto the same pivots of the arm in
-    `xlerobot.urdf`, over 16 random poses. The poses and the fit are the ones `CalibrationModel` uses, so the
-    merged URDF gives the same poses as the two URDFs it replaces.
+    `xlerobot.urdf`, over 16 random poses. Changing the poses or the fit changes the arm's mount, and with it the
+    meaning of saved calibrations: a test checks the URDF still reproduces the first calibrations' model.
     """
     xle_model = _model(ET.tostring(xle, encoding="unicode"))
     so_model = _model(SO101_URDF.read_text())
@@ -224,6 +230,7 @@ def _format(values: np.ndarray) -> str:
 
 
 def main() -> None:
+    """Command line entry point: write the merged URDF (see the module docstring)."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--out", type=Path, default=MERGED_URDF)
     args = parser.parse_args()

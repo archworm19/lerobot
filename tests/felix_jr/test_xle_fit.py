@@ -1,5 +1,7 @@
 """The `XleRobotModel` fit: synthetic clicks of both arms with known parameters, sessions, holdout, saving."""
 
+import json
+
 import numpy as np
 import pytest
 
@@ -7,7 +9,7 @@ pytest.importorskip("pinocchio")
 pytest.importorskip("scipy")
 
 from lerobot.felix_jr.calibration import xle_fit  # noqa: E402
-from lerobot.felix_jr.calibration.model import ARM_JOINTS, CalibrationModel, Observation, save_observations  # noqa: E402
+from lerobot.felix_jr.calibration.merge_urdf import SO101_JOINTS as ARM_JOINTS  # noqa: E402
 from lerobot.felix_jr.calibration.xle_fit import Click, FitConfig, Session, calibrate, fit, rms  # noqa: E402
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, default_parameters  # noqa: E402
 
@@ -146,19 +148,40 @@ def test_sessions_with_different_head_references_are_refused(tmp_path):
 
 
 def test_a_version_1_session_folder_is_read_as_clicks(tmp_path):
-    v1 = CalibrationModel("right", INTRINSICS, SIGNS, REFS)
+    """The first sessions (~/cal_left, ~/cal_right) were written by version 1's `collect`, in this format."""
     pose = {f"{j}.pos": 5.0 for j in ARM_JOINTS}
-    observations = [
-        Observation(
-            arm=pose,
-            head_ticks={"head_neck": 1500, "head_eyes": 1400},
-            pixel=(10.0, 20.0),
-            image="images/000.png",
-        ),
-        Observation(arm=pose, head_ticks=REFS, pixel=(30.0, 40.0), depth_m=0.4, index=1),
-    ]
+    version_1 = {
+        "version": 1,
+        "settings": {
+            "arm": "right",
+            "intrinsics": INTRINSICS,
+            "head_signs": SIGNS,
+            "head_refs": REFS,
+            "prior_overrides": {"zero:head_tilt_joint": [0.28, 0.087]},
+        },
+        "observations": [
+            {
+                "index": 0,
+                "image": "images/000.png",
+                "timestamp": 12.5,
+                "pixel": [10.0, 20.0],
+                "depth_m": None,
+                "arm": pose,
+                "head_ticks": {"head_neck": 1500, "head_eyes": 1400},
+            },
+            {
+                "index": 1,
+                "image": None,
+                "timestamp": 13.0,
+                "pixel": [30.0, 40.0],
+                "depth_m": 0.4,
+                "arm": pose,
+                "head_ticks": REFS,
+            },
+        ],
+    }
     (tmp_path / "cal_right").mkdir()
-    save_observations(tmp_path / "cal_right" / "observations.json", v1, observations)
+    (tmp_path / "cal_right" / "observations.json").write_text(json.dumps(version_1))
     session = xle_fit.load_session(tmp_path / "cal_right")
     assert session.arm == "right" and session.head_refs == REFS and session.intrinsics == INTRINSICS
     first, second = session.clicks

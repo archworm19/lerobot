@@ -1,321 +1,296 @@
-# Camera calibration plan
+# Camera calibration
 
 **Goal:** draw proposed arm trajectories into the head camera's RGB image accurately enough for a VLM to judge
-them. The XLeRobot has loose tolerances (3D-printed parts, servo backlash, a hand-measured RealSense mount), so
-a point computed from the URDF and the joint angles can land some distance from where the camera actually sees
-it.
+them, which means a few pixels at the gripper's pinch point. The XLeRobot has loose tolerances (3D-printed parts,
+servo backlash, a hand-measured RealSense mount), so a point computed from the URDF and the joint angles can land
+hundreds of pixels from where the camera actually sees it.
 
-**Plan:** measure before calibrating. Three steps decide what to calibrate and how; the calibration itself comes
-after.
+**Approach:** a person clicks the pinch point of the closed gripper in the camera image, view after view, and a
+least-squares fit finds the corrections to the URDF (joint zero offsets, joint and mount origins, the camera mount,
+the pinch point's offset) that make the model's predicted pixel agree with the clicks. One model,
+`XleRobotModel`, is the single source of truth for the kinematics, the corrections and their uncertainty, the camera
+and the pinch points; the fit and the choice of views are built on it. Kinematics come from pinocchio, the
+optimization from `scipy.optimize.least_squares`.
 
-1. **Sensitivity analysis (URDF only):** how many pixels each length or angle error costs.
-2. **Repeatability test (hardware):** the error floor that no calibration can remove.
-3. **Choose the main path:** see the camera's pose from tags on the robot each frame, or calibrate the head
-   chain, or both.
+**Run it:** [README.md](README.md), section 6. In short, `calibration.collect` per arm (each refits with the other
+arm's clicks), or `calibration.xle_fit SESSION ... --out calibration.urdf` to refit any set of sessions. The result
+is one file, `calibration.urdf`: a URDF any tool can load, which also carries what a refit needs.
 
-Rough scale to keep in mind (estimates, not measurements): at 0.5 m from the camera, 1 cm is about 12 px
-(color fx = 611 px), and a 1 deg error in the head tilt shifts the whole image by about 10 px. A VLM's own
-pointing is probably tens of pixels, so the target may be around 5 mm, not sub-millimeter.
+**Results so far:** the first two sessions (40 clicks per arm, collected with version 1, see "History"), fitted
+together with one head: held-out pixel error 2.07 px (left) and 2.05 px (right), from about 500 px uncalibrated,
+with click noise of about 2 to 3 px. Head tilt zero +33.5 deg (+/-2.1), pan zero -9.3 deg (+/-3.5), the camera's
+lateral offset +23.7 mm (+/-5.5) (as suspected from the RealSense adapter), camera roll +0.6 and yaw +3.0 deg, both
+arm mounts by millimeters to centimeters, the elbow zeros by -2 to -3.5 deg, and the pinch point offsets.
 
-## Notation
+## Code map
 
-Drake / Tedrake monogram notation, used in code too (`X_BC`, `p_BT_B`), because sign and ordering mistakes are
-the usual calibration bugs:
-
-- `p_AB_C`: position of point B relative to point A, expressed in frame C. `p_AB` means `p_AB_A`.
-- `R_AB`: rotation of frame B in frame A; it takes vectors in B's coordinates to A's: `v_A = R_AB v_B`.
-- `X_AB`: pose (rotation + translation) of frame B in frame A. Adjacent subscripts cancel:
-  `X_AC = X_AB X_BC`, `p_AT = X_AB p_BT`.
-
-Frames: `B` robot base (`top_base_link` in the URDF), `N` neck (`head_pan_link`), `E` eyes (`head_tilt_link`),
-`C` color camera (optical frame: x right, y down, z forward), `T` a target point on the arm (a tag corner or the
-tool point), `A` the arm's end link.
-
-The camera sees `T` at `p_CT = X_CB p_BT`, and its pixel is `K p_CT` (intrinsics `K`, then divide by depth).
-Two routes give `X_BC` and `p_BT`:
-
-- head chain: `X_BC = X_BN(q_neck) X_NE(q_eyes) X_EC`
-- arm chain: `p_BT = X_BA(q_arm) p_AT`
-
-## What we already have
-
-- **`xlerobot.urdf`:** the whole tree (base, both arms, head pan and tilt), so `X_BC` and `p_BT` can be
-  computed in one frame. Findings so far:
-  - It does not mention the RealSense. The head camera is a generic massless `head_camera_link`, 2.5 cm forward
-    and 3 cm up from `head_tilt_link`. **The measured RealSense mount offset is exactly what is missing.**
-  - Use `head_camera_link`'s x axis as the view direction. The URDF's `head_camera_rgb_frame` /
-    `head_camera_depth_frame` rotation (rpy 0, -pi/2, -pi/2) puts their optical axis sideways at rest, so it
-    looks wrong.
-  - Joint conventions: a positive pan turns left (counter-clockwise from above), a positive tilt looks down.
-    `setup/head.py` records the servo signs to match.
-- **RealSense factory calibration** (read by `diagnostics/realsense_check.py`, at 640x480): color intrinsics
-  fx 611.0, fy 610.0, principal point (315.9, 247.0), zero distortion; depth intrinsics; the depth-to-color
-  transform (15.1 mm sideways). These describe the camera itself, not where it sits on the robot. Verify the
-  color intrinsics once with a checkerboard (reprojection error should be well under 1 px), then freeze them.
-- **Joint readings:** measured servo positions (4096 ticks per turn, about 0.09 deg). Use measured angles, not
-  commanded ones: under gravity the commanded and real angles differ by a few degrees (see `tuning_notes.md`),
-  but the encoder reports where the joint actually is.
-
-## Step 1: Sensitivity analysis (URDF only)
-
-**Question:** which parameters move the projected arm the most, and how wrong is the projection with no
-calibration at all?
-
-**Method:**
-
-- Forward kinematics in plain numpy from the URDF's joint origins and axes (no meshes needed).
-- A set of representative configurations: head poses that look at the workspace, and arm poses across the
-  reach where trajectories will be (a table-height workspace in front of the robot, to start; easy to change).
-- Target points on the arm: a point near the arm base, the wrist, and the tool tip.
-- For each parameter, perturb it, re-project every target point and record the pixel shift. Parameters: each
-  joint's zero offset (neck, eyes, the arm joints), each link length, and the 6-DoF camera mount offset
-  relative to `head_tilt_link`.
-
-**Assumed tolerances** (guesses; the per-unit results below do not depend on them):
-
-| Parameter | Assumed 1-sigma |
+| File | What |
 |---|---|
-| Joint zero offset | 2 deg |
-| Link length | 3 mm |
-| Camera mount position | 5 mm |
-| Camera mount rotation | 2 deg |
+| `calibration/merge_urdf.py` | builds `xlerobot_so101.urdf` (committed): the XLeRobot's head and base with two SO-101 arms |
+| `calibration/xle_robot_model.py` | `XleRobotModel`: kinematics, parameter table, estimates, pinch points, derivatives, saving |
+| `calibration/xle_fit.py` | sessions of clicks, the fit, held-out validation, the report; CLI to refit sessions |
+| `calibration/views.py` | `find_view` (head and arm joints that show a pinch point), `plan_targets` |
+| `calibration/collect.py` | the interactive session: views, clicks, refits, `calibration.urdf` at the end |
 
-**Outputs:**
+Tests: `tests/felix_jr/test_xle_robot_model.py` (including agreement with version 1's frozen predictions,
+`reference/v1_reference.json`), `test_xle_robot_model_vs_placo.py`, `test_xle_fit.py`, `test_views.py`,
+`test_calibration_collect.py`, and `smoke_tests/test_calibration_collect_smoke.py` (a whole session against the
+fake robot, clicking where a "true" model sees the pinch point; the calibration recovers it).
 
-1. Pixels per degree / per millimeter for each parameter, averaged over the configurations, with the worst
-   case. This ranks the parameters.
-2. A Monte Carlo run: perturb everything at once by the assumed tolerances and report the distribution of total
-   pixel error at each target point. This is "how bad is it uncalibrated".
-3. Split by target point, to see whether head errors (which move everything in the image) or arm errors (which
-   move only the arm) dominate.
+## Notation and frames
 
-**Cannot tell us:** whether the assumed tolerances are realistic, or anything about backlash and play. That is
-Step 2.
+Drake / Tedrake monogram notation, in code too (`X_AB`, `p_AB_C`), because sign and ordering mistakes are the usual
+calibration bugs: `p_AB_C` is the position of point B relative to A, expressed in frame C (`p_AB` means `p_AB_A`);
+`R_AB` the rotation of frame B in A (`v_A = R_AB v_B`); `X_AB` the pose of B in A, and `X_AC = X_AB X_BC`.
 
-### Step 1 results on the default URDF
+Frames: `W` the robot's root (the URDF's `world` link; the chassis is 0.38 m above it, robot forward is -x, +y the
+robot's right), `C` the color camera's optical frame (`head_camera_optical`: x right, y down, z forward), `T` a pinch
+point (`<arm>_gripper_frame_link`). The camera sees `T` at `p_CT = X_CW p_WT`, at pixel `K p_CT / z`.
 
-Run: `uv run python -m lerobot.felix_jr.calibration.sensitivity --out <report.md>` (code in `calibration/`,
-full report in [sensitivity_default_urdf.md](sensitivity_default_urdf.md)). Default `xlerobot.urdf`, so the
-camera sits on the generic `head_camera_link`, not the measured RealSense mount; rerun with `--urdf` once the
-new URDF exists. Left arm, 54 configurations (head tilted 40 to 69 deg down, pan -14 to +14 deg, random arm
-poses with the gripper in view).
+## The robot model
 
-- **Geometry:** the head camera can only see the arm close up. The jaw pivot was 0.16 to 0.51 m from the
-  camera (median 0.35 m), and the arm only appears in a band about 25 to 45 cm in front of the robot. The
-  shoulder is never in view (it is beside and below the camera), and the elbow only in 15 % of the poses.
-- **Uncalibrated error, all tolerances at once** (jaw pivot): mean 55 px, 95th percentile 113 px. Head-chain
-  parameters alone: mean 45 px; arm-chain parameters alone: mean 26 px. At 0.35 m, 55 px is about 3 cm.
-  These totals depend on the guessed tolerances; the per-unit numbers below do not.
-- **Biggest single parameters** (px at the assumed tolerance): head tilt zero 24 (12 px/deg), camera mount yaw
-  24 and pitch 22 (about 11 px/deg), head pan zero 16, the arm's shoulder rotation zero 16 (8 px/deg) and
-  shoulder pitch zero 12. Every position error costs about 1.6 to 1.9 px/mm (fx / 0.35 m).
-- **So:** the head joint zeros and the camera mount rotation matter most, which fits option A or a head-first
-  calibration stage. Arm joint zeros come next; link lengths matter least (about 3 px at 2 mm).
-- **Identifiability check:** moving the head tower and moving the arm mount by the same amount give exactly
-  the same pixel shifts (a unit test asserts this). A calibration can only find their difference, so fit one
-  of them, not both.
-- **Checks on the numbers:** a head-tilt error costs about 12 px/deg, close to the 10.7 px/deg (fx times 1 deg
-  in radians) a pure camera rotation should cost; a translation costs about fx / depth per meter.
+### The merged URDF
 
-**Tooling note.** LeRobot has a generic `RobotKinematics` (`lerobot/model/kinematics.py`, built on placo) that
-the SpaceMouse teleop uses for the SO-101 arm, but nothing specific to the XLeRobot. For this analysis we use
-our own small numpy forward kinematics (`calibration/urdf_kinematics.py`): placo loads the meshes, which this
-URDF references but we do not have, and the calibration needs to perturb joint origins and mount rotations,
-which `RobotKinematics` does not expose (only joint angles). For runtime FK and IK on the real robot,
-placo / `RobotKinematics` remain the natural choice once meshes are available.
+`merge_urdf.py` builds `xlerobot_so101.urdf` once, offline:
 
-**Cross-checked against placo.** `tests/felix_jr/test_urdf_kinematics_vs_placo.py` compares our numpy forward
-kinematics with placo (and with LeRobot's `RobotKinematics`) on a mesh-stripped copy of `xlerobot.urdf`: random
-positions of every joint, five frames, agreement to about 1e-15 m. It also applies each kind of parameter error
-(joint zero offset, origin position, mount rotation) both our way and by patching the URDF text and loading the
-patched copy in placo, and checks the projected pixels end to end. Two things the tests turned up:
+- from `xlerobot.urdf`: the head, camera, base and wheels; its root `joint_0` made `fixed` (pinocchio and placo add
+  their own free base, and a second floating joint scrambles placo's joint indexing: `set_joint` then moves
+  nothing); the mesh-only `*_geom_*` links and the `head_camera_rgb_frame` / `head_camera_depth_frame` links (their
+  rpy puts the optical axis sideways) dropped; meshes, transmissions and materials removed (we do not have the
+  meshes; only the tree is needed);
+- two copies of the official SO-101 URDF (`so101_new_calib.urdf`), every link and joint prefixed `left_` / `right_`,
+  attached to the arm bases `Base` / `Base_2` by fixed `<arm>_arm_mount` joints;
+- a fixed `head_camera_optical` frame under `head_camera_link`, whose x axis is the view direction.
 
-- **placo cannot use `xlerobot.urdf` as it is.** The URDF's root `joint_0` is `floating`, and placo adds its own
-  free base, which scrambles its joint indexing: `set_joint("head_tilt_joint", ...)` writes to the wrong slot
-  and no frame moves (and `get_joint_limits` returns another joint's limits). Setting `joint_0` to `fixed`, as
-  our numpy code treats it, fixes it. Do the same before using `RobotKinematics` on this URDF.
-- **Combining rotation errors:** several rotation errors on one joint are applied as one roll-pitch-yaw rotation
-  (`Rz(yaw) Ry(pitch) Rx(roll)`); applying them one after another gives a different result.
+**Why the SO-101 URDF for the arms.** The arm inside `xlerobot.urdf` is an older gripper (its wrist roll joint lacks
+the SO-101's 18 mm lateral offset, and its shoulder offsets differ by about 13 mm), while the hardware is an SO-101;
+and the SO-101 URDF's joint angles are LeRobot's calibrated degrees one to one (the teleop relies on this), so no
+sign or offset is guessed for the arm. The mount transform is the rigid fit of the SO-101's shoulder, elbow and
+wrist pivots onto those of the old arm over random poses (residual about 8 mm, the shoulder geometry difference).
+The XLeRobot URDF's pan zero points the arm sideways where LeRobot's points it forward (left arm +90 deg, right arm
+-90); checked against the wiggle test's camera frames (a +10 deg pan moves the arms to the right in the image, and
+at the center pose the tip is about 35 cm forward and 23 cm up from the arm base). The mount is then calibrated like
+everything else.
 
-## Click calibration (the path we are taking)
+A test checks the committed file is what the script builds; another, that the model reproduces the predictions of
+version 1 (which joined the two URDFs at runtime) to about 1e-6 px, with and without corrections.
 
-Instead of tags, a person clicks the tip of the closed gripper in the head camera's image, pose after pose, and a
-least-squares fit finds the kinematic corrections that make the model's predicted tip agree with the clicks. This is
-Option B below (calibrate the kinematic chain, with priors), with clicks as the observation. It needs no printed
-tags, it measures what matters (where the tip lands in the image), and it reuses the Step 1 forward kinematics.
-A tag or a colored marker on the gripper can replace the clicks later without changing the fit.
+### Parameters, nominal values and estimates
 
-**Run it** (README, section 6): `calibration.collect` on your computer (against the server), then `calibration.fit`.
-`collect` plans arm poses spread around the wiggle's center pose, moves the arm slowly, turns the head towards where
-the current model predicts the tip, and shows a cyan circle there; you click the real tip. Each click refits, so the
-circle converges on the tip. `fit` writes `kinematic_calibration.json`, `xlerobot_calibrated.urdf`,
-`so101_calibrated.urdf` and `fit_report.md`.
+Parameters are corrections on top of the URDF, one row each (`Param`: name, prior mean and sigma, group, arm):
 
-**The model** (`calibration/model.py`):
+- `zero:<joint>`: added to the joint's angle. For the head, the unknown angle at its recorded home; for an arm
+  joint, the servo's calibration offset.
+- `pos:<joint>:x|y|z`: added to the joint origin's translation, in the parent frame.
+- `rot:<joint>:x|y|z`: a rotation vector `w`: the origin's rotation becomes `R_urdf exp(w)`. Unlike roll-pitch-yaw
+  (version 1), its Jacobian is exact at any value and the order of combined corrections does not matter.
 
-- **Two URDFs.** The head and camera come from `xlerobot.urdf`; the arm from the official SO-101 URDF (vendored as
-  `so101_new_calib.urdf`, Apache 2.0). Reasons, found by comparing them: the arm inside `xlerobot.urdf` is an
-  older gripper (its wrist roll joint is at (0, -0.0601, 0) where the SO-101's is at (0, -0.0611, 0.0181), and
-  the jaw pivot and the shoulder offsets differ too, about 13 mm at the pivots), the hardware is an SO-101, and the
-  SO-101 URDF's joint angles are LeRobot's calibrated degrees one to one (the teleop depends on it), so no sign or
-  offset guessing for the arm, and the tool center point (`gripper_frame_link`, about 98 mm along the closed jaws)
-  is well defined.
-- **Mounting the SO-101 on the XLeRobot.** A constant transform `T` places the SO-101 chain on the XLeRobot's `Base`
-  frame: the best rigid match of the shoulder, elbow and wrist pivots of the two URDFs (residual about 8 mm). The
-  XLeRobot URDF's joint zero is not LeRobot's: lift and elbow are 90 degrees off (signs -1 and +1), and the pan
-  zero points the arm *sideways* (left arm +90 degrees, right arm -90) where LeRobot's center points it
-  forward. We checked this against the wiggle test's camera frames: with it, the arms' wrist and gripper land
-  below the picture at the left and right, where the arms are seen, a +10 degree pan moves them to the right as in
-  the images, and at the center pose the tip is about 35 cm forward and 23 cm up from the arm base. The mount
-  (6 parameters, wide priors) is then calibrated like everything else.
-- **Head angles** come from the servos' raw ticks: `sign * (ticks - ref) * 2pi / 4096`, with `ref` the recorded home.
-  The true angle at home is unknown (home is not level), so the head pan and tilt zeros are parameters with a
-  +/-20 degree prior.
-- **Parameters and priors** (43 per arm): head pan / tilt zeros (20 deg), their joint origins (2 mm), the camera
-  mount (3 mm in x and z, **15 mm laterally in y**, since the RGB sensor's lateral offset in the camera link is the
-  least certain; rotations 2 deg), the arm mount (15 mm, 5 deg), the SO-101 joint zeros (2 deg) and origins (2 mm),
-  and the tip offset (8 mm, "the tip of the closed gripper" versus the tool center point). The head tower is left
-  out, since moving it and moving the arm mount are indistinguishable (Step 1).
-- **Intrinsics** are not fitted. The camera stores its factory calibration and every `capture` carries it
-  (`fx`, `fy`, `ppx`, `ppy`); the color distortion coefficients of our D415 are all zero, so ignoring distortion is
-  right. RealSense's self-calibration tools (on-chip, tare) improve the *depth* stereo pair, not the color camera's
-  place on the robot, so they are not part of this; run them only if depth looks wrong (not verified here).
+`default_parameters()`: the head and camera once (both head joints' zeros and origins, the camera mount's position
+and rotation: 14), then per arm the mount's position and rotation, each SO-101 joint's zero and origin, and the
+pinch point's offset (29); 72 in all. Priors (`SIGMAS`): head zeros 20 deg (the head's home is not level), head
+joint origins 2 mm, camera mount 3 mm in x and z and **15 mm laterally** (the RGB sensor's position in the camera
+link is the least certain), 2 deg in rotation; arm mounts 15 mm and 5 deg; arm joint zeros 2 deg and origins 2 mm;
+pinch point offset 8 mm. The head tower is not a parameter: moving it and moving the arm mount shift every pixel
+identically, so only one of them can be found, and the mount is it. Most joint origins stay at their priors (the
+clicks do not move the pinch point enough to see them); the fit's report says which parameters were learned.
 
-**Starting a session** (`calibration/bootstrap.py`). The head's home is not level (on this robot the camera looks
-about 16 degrees down there), so a model that assumes zero sends the head too far down and the first frames show
-the elbow instead of the gripper. Before the first click, `collect`:
+`XleRobotModel` builds the pinocchio model from the URDF once and keeps it as `nominal_model`, never modified.
+`pin_model` is a copy (`model.copy()` is deep) with the estimates applied. **Every application starts from the URDF
+values**, so hundreds of updates during a fit cannot drift, and zero estimates give back the URDF exactly.
 
-- finds the table in the depth image (RANSAC over upward-facing planes, so a wall behind it is ignored) and reads
-  the camera's pitch from its normal, which pins the head tilt zero to a degree or two; this becomes the fit's
-  *prior* (mean the estimate, sigma 5 degrees), saved with the clicks so `fit` uses the same one;
-- gets the table's height from the same plane, and keeps every planned tip at least 4 cm above it;
-- searches for a first arm pose whose tip lands in the middle of the picture at the head's current pose, and
-  plans the other poses around it, keeping only those the head can bring into view within its recorded limits
-  (the neck defaults to +/-40 degrees from where it is when no limit is recorded).
+**Fixed joints.** Pinocchio folds a fixed joint into a frame and pre-multiplies its origin into the placements of
+everything below it, so editing that frame alone moves nothing below it (checked: editing the `fixed_Base` frame
+does not move the arm). Several important parameters sit on fixed joints: the camera mount, the arm mounts, the
+pinch points. So the model records, for every joint and frame placement pinocchio holds, the chain of URDF origins
+it is the product of (the fixed joints from the nearest moving joint down, then the joint itself), and rebuilds
+every placement whose chain contains a corrected joint. `check_structure()` verifies the chains reproduce
+pinocchio's placements, and the predictions are off by about 40 px if either joint or frame placements are not
+rebuilt.
 
-On the capture saved from the Pi, it reads 15.8 degrees below horizontal (tilt zero +16 degrees), puts the table
-3 cm below the arm base, and yields 40 or more poses per arm; the first pose's tip stays in the picture even if the
-pan zero is 20 degrees off or the tilt 5 degrees off. What it cannot know is the head's pan zero (about 20 degrees
-unsure with a recorded neck home, 45 without), which the first clicks pin down.
+**Explicit estimates.** Every method that depends on the estimates takes them (`theta`: a vector in parameter order
+or a `{name: value}` dict; `None` for the current ones) and applies them before computing. Nothing depends on what
+an earlier call left in the model; there is no caching. Applying rebuilds 28 placements in about 0.17 ms, so the
+batch methods (`predict_many`, `pixel_jacobian_many`) apply once for a whole set of clicks.
 
-**Seeing the pinch point.** The tip's position is not enough: the gripper hides its own pinch point when the
-camera looks along the plane the jaws open in. `CalibrationModel.hinge_axis_angle` gives the angle between the
-jaw hinge axis (the normal of that plane) and the line of sight; at 0 the camera sees the jaws meet from the side.
-At the wiggle-like poses with the wrist roll near 0 it is 75-86 degrees, which is why the first sessions showed
-the gripper but not its tip. The planner now rolls the wrist of each pose (within +/-`--max-roll`, default 130,
-about the joint's limit) to the roll that minimizes this angle, and drops poses where it stays above 50 degrees.
+**Joints.** `q` is pinocchio's configuration vector of *measured* angles: `joint_vector(arms, head_ticks)` takes
+LeRobot's arm degrees and the head servos' raw ticks, through the servo map `angle = sign * (ticks - ref) * 2 pi /
+4096` (`sign` and `ref`, the recorded home, from `setup.head`); the `zero:` corrections are added inside. So a
+click's `q` serves every `theta`. Measured, not commanded: under gravity the two differ by a few degrees (see
+`tuning_notes.md`), and the encoder reports where the joint is.
 
-*Which* side faces the camera matters too, because the wrist camera sits on one side of the gripper and its board
-hides the pinch point from that side. `CalibrationModel.hinge_axis_cosine` is signed: positive when the SO-101
-URDF's jaw hinge axis points at the camera. In the first left-arm session all 40 clicks were from the positive
-side (rolls +40 to +70), and right-arm frames from the negative side showed the wrist camera's board covering the
-gripper. So the wrist camera is on the negative side of both arms, and `collect` plans only the positive side by
-default (`--side`). For the right arm that takes rolls of about +120 to +130 at the usual poses (the mirror image of
-the left arm's +40 to +70), hence the larger roll limit; watch the wrist camera's cable. `--side either` plans both
-sides and switches to one after three clicks all seen from it.
+### Pinch points and visibility
 
-**What the fit can and cannot learn.** `fit` reports each parameter's posterior sigma next to its prior. In a
-simulation with the true parameters known (tests/felix_jr/test_calibration_fit.py), 20 to 80 clicks with 1.5 px of
-click noise brought the pixel error at clicks held out from the fit from about 220 px (uncalibrated) to about 2 px.
-The clicks pin down the head tilt zero (to about 2 deg), the head pan zero (4 deg), the camera roll and yaw, the
-arm mount roll and pitch, the tip offset and the camera's lateral offset; the rest (most joint origins, the wrist
-roll) stay at their priors, which is correct: they do not move the tip enough to be seen. That simulation uses the
-right model and random poses, so it is optimistic: real errors also include backlash, play and the gravity sag
-that the measured joint angles only partly capture.
+The assumptions specific to this robot, hence the name:
 
-**Trusting the result.** (1) `fit` holds out every 5th click by default and reports the pixel RMS on them before and
-after: that, not the training RMS, says whether the calibration generalizes. (2) Click noise is about 2 to 4 px
-(`--sigma-px`); an RMS after calibration near that is as good as the clicks allow. (3) Also try the result at poses
-you did not collect (the workspace where the VLM will plan), by clicking a few more and checking the error.
-(4) Check the report's "largest remaining errors": a mis-click shows up there, and `u` in `collect` undoes the
-last click. (5) A parameter marked "no" in the Learned column was not determined; do not read meaning into it.
+- **Pinch point:** `<arm>_gripper_frame_link`, the SO-101's tool center point, about 98 mm along the closed jaws;
+  its offset (the `pos:` parameters of `<arm>_gripper_frame_joint`) is calibrated. `pinch_point(arm, q)` is the one
+  place that says where it is; `predict`, `visibility`, the fit and the view finder go through it.
+- **Visibility:** the gripper hides its own pinch point when the camera looks along the plane the jaws open in.
+  `visibility(arm, q)` is the signed cosine between the jaw hinge axis (the SO-101 `gripper` joint's axis) and the
+  line of sight; near +/-1 the camera sees the jaws meet from one side. At wiggle-like poses with the wrist roll near
+  0 the hinge axis is 75 to 86 deg off the line of sight, which is why the first sessions showed the gripper but
+  not its tip.
+- **Visible side:** the wrist camera sits on the negative side of both grippers, and its board hides the pinch point
+  from there (all 40 first left-arm clicks were seen from the positive side; right-arm frames from the negative side
+  showed only the board). `model.visible_side` is "positive" for both arms by default.
+- **Floor:** `model.floor_z`, the table's height in the root frame; views keep the pinch point 4 cm above it.
 
-**First result (left arm, 40 clicks).** Pixel error on the 8 held-out clicks: about 498 px before calibration
-(mostly the unknown neck reference) and 2.0 px after, with click noise of about 3 px; all clicks 2.7 px RMS, worst
-5.5 px. Learned: head tilt zero +33.3 deg (+/-2.0), head pan zero -5.8 deg (+/-4.7), the camera's lateral offset
-**+20.9 mm (+/-6.4)**, as suspected from the RealSense adapter, camera roll +1.0 and yaw +3.5 deg, the SO-101 mount
-offset (+23 mm sideways, -14 mm down), the elbow zero -3.5 deg, and the tip offset (z -9 mm). Most joint origin
-positions stayed at their priors, as expected. The right arm can start from the left arm's head and camera
-(`collect --head-from`, README section 6).
+### Derivatives
 
-**Not done yet:** the second arm (fit its own mount, joint and tip parameters with the head and camera fixed), a
-marker instead of clicks, using depth at the click (`--use-depth`, off by default because dark shiny parts give
-poor depth), and applying the result to the runtime (projecting planned trajectories into the image).
+Pinocchio differentiates frame poses with respect to the joint angles, not the model's geometry, which is most of
+what we fit. `pixel_jacobian` is analytic and covers both: every parameter and joint moves everything below its URDF
+joint by a twist (a translation for `pos:`, a rotation about an axis through the joint's origin for `rot:`, `zero:`
+and revolute joints; `rot:` through the SO(3) right Jacobian of `exp`), and the pixel changes with the pinch point's
+motion relative to the camera's (both chains can move). It agrees with central finite differences to about 1e-10
+(relative), large rotation corrections included, and the fit's Jacobian for 40 clicks and 72 parameters takes
+18 ms.
 
-## Step 2: Repeatability test (hardware)
+## The fit (`xle_fit.py`)
 
-*The click calibration above gets a repeatability number for free: if the fit's held-out error stays well above the click noise, the remainder is play, backlash or model error, which is what this step was to find. A separate tag-based test is still the cleaner way to measure it.*
+The maximum a posteriori problem is plain nonlinear least squares once each Gaussian prior is a residual row:
 
-**Question:** how far does the same commanded pose land from itself? This is the floor: constant offsets
-cannot fix play, backlash or hysteresis.
+```
+residuals(theta) = [ (uv_predicted_i - uv_clicked_i) / sigma_px    for each click i ]
+                   [ (theta_j - mean_j) / sigma_j                   for each fitted parameter j ]
+```
 
-**Method:**
+solved by `least_squares` (trust region) with the analytic Jacobian.
 
-- One fiducial tag (ArUco or AprilTag) fixed to a rigid part of the robot body in the head camera's view, e.g.
-  the base or an arm's base.
-- Head: command the same pan/tilt many times, arriving from different directions (from left and right, from
-  above and below). Record the tag's corner pixels each time, with the head stationary.
-- Arm: a tag on a rigid link near the tool (the fixed jaw or wrist, not the moving jaw). With the head still,
-  command the same arm pose from different directions and record the tag's pixels.
-- Also log the measured joint angles each time, to separate "the servo reports a different angle" from "the
-  servo reports the same angle but the link is somewhere else" (play after the encoder).
+- **Robust loss:** Huber at 2 sigma, so a mis-click is down-weighted instead of bending the model. scipy applies
+  it to each residual (u, v and each prior row separately) rather than to a click's pixel distance; prior rows
+  within 2 sigma are in the quadratic part, so this rarely matters.
+- **Covariance:** `inv(J^T J)` at the solution, over all rows; a parameter is *learned* if its posterior sigma is
+  below half its prior's ("partly" below 0.85).
+- **Held-out clicks:** every 5th click of each session is left out, the fit runs on the rest, and the pixel RMS on
+  the left-out clicks before and after is reported per session. That number, not the training RMS, says whether
+  the calibration generalizes. The saved calibration is then fitted on all clicks.
+- **One fit for everything.** Every click of every session goes into one fit with the parameter table's wide priors:
+  the head and camera get one estimate from both arms' clicks, and each arm's parameters are fitted only when that
+  arm has clicks. An earlier calibration is only a starting point, never a prior, so no click counts twice (version 1
+  fed the left fit's head posteriors to the right arm as independent priors, which also gave two head estimates).
+  All sessions must share the head's servo map and the intrinsics, since clicks store raw head ticks;
+  `check_compatible` refuses sessions that do not.
+- **Sessions** are folders: `observations.json` (the clicks, with measured joints, head ticks, pixel, depth at the
+  click) and `images/`. `load_session` also reads version 1's folders.
 
-**Outputs:** pixel scatter (RMS and worst case) for head and arm repeatability, and whether the error depends on
-the approach direction. If it does, trajectories should approach their poses consistently, or per-frame
-correction (Step 3, option A) becomes more attractive.
+## Choosing views (`views.py`)
 
-## Step 3: Choose the main path
+`find_view(model, arm, seed, target, head_limits)` solves for the head's pan and tilt and the arm's five joints
+together, with `least_squares` (scipy's finite differences: 7 variables, cheap), from the seed and three random
+starts. Residuals:
 
-Decide with the numbers from Steps 1 and 2.
+- the pinch point's *angle* off the optical axis times the focal length (about its pixel offset from the middle;
+  / 20 px). An angle stays smooth when a trial pose puts the point behind the camera, where a pixel would jump;
+- `1 - visibility` on the visible side (/ 0.2);
+- the target position minus the pinch point (/ 2 cm), if a target is given;
+- a one-sided floor clearance (/ 5 mm);
+- a weak pull towards the seed pose (/ 1 rad).
 
-**Option A: camera pose from tags on the robot, every frame.** Tags on rigid parts of the robot that the head
-camera usually sees (base, arm bases). Each frame, PnP on the detected corners gives `X_CB` directly, so errors
-in the neck, eyes and camera mount stop mattering. Only the arm chain still needs calibrating.
+Bounds: the head's recorded limits (or +/-40 deg around where it is), the arm's URDF limits with a 0.8 margin, the
+wrist roll within 130 deg (the wrist camera's cable). `View.ok` says whether the result is usable: in the picture
+with a 60 px margin, the hinge axis within 50 deg of the line of sight, above the floor. Showing the pinch point beats
+reaching the target: a target the head cannot center (the neck at its limit) gets a view with the arm moved towards
+what the head can see.
 
-- Good when: head errors dominate Step 1 and head repeatability is poor in Step 2.
-- Costs: tags must be in view; it fails when the head looks away from the base. Tag size matters: a 2 cm tag
-  at 0.5 m is only about 24 px across, which gives poor depth and orientation; larger tags work better.
+`plan_targets` samples arm poses within +/-20 to 30 deg per joint of a seed pose (the center pose by default),
+keeps those whose pinch point is above the floor, and picks the most spread-out pinch points (farthest-point
+selection in Cartesian space); each target keeps the pose that reaches it as `find_view`'s seed.
 
-**Option B: calibrate the kinematic chain** (the original "fudge factor" idea). Each length and joint angle
-becomes `URDF value + correction`, with the corrections pulled toward 0 by a prior. That is a maximum a
-posteriori fit with Gaussian priors set from the assumed tolerances.
+On the joint calibration, 40 of 40 planned targets per arm get a usable view (median hinge angle 35 deg; wrist rolls
+49 to 66 deg for the left arm, 86 to 106 deg for the right), in 0.15 to 0.2 s each.
 
-- Good when: errors are mostly constant offsets (Step 2 shows good repeatability).
-- Costs: a calibration session, and identifiability care (below).
+## A session (`collect.py`)
 
-**Hybrid:** calibrate the chain (B) as the baseline, and use tags (A) to refine the camera pose whenever they are
-visible.
+`collect` plans the targets (0.08 s), and on each `n` solves the next view with the latest estimates, moves the arm
+and then the head, and shows the frame with the predicted pinch point. Each click is saved and refits the model with
+every click (this session's and those of `--with` sessions), so the circle closes in on the pinch point. `q` runs
+the final fit with held-out validation and writes `calibration.urdf` and `calibration.md`.
 
-## Calibration procedure (after Step 3)
+- **Starting point:** `--start-from` an earlier calibration, and the first view shows the gripper. On a fresh robot
+  the head's zero angles are unknown (the tilt by about 20 deg), so the first views may miss: the person nudges the
+  head with the arrow keys and clicks, and from 4 clicks the refits pin the head down. (Version 1 estimated the
+  tilt from the table plane in the depth image; that is gone.)
+- **Floor:** `--floor-z`, else the calibration's, else the arm base's height (conservative: on this robot the table
+  is about 3 cm below it).
+- **Vary the head:** nudging it a few degrees before some clicks keeps the head's parameters from being confounded
+  with the arm's.
+- Everything runs inside a client session: Ctrl+C or a crash sends the robot to rest.
 
-Applies to Option B and to the arm part of Option A.
+## Saving (`calibration.urdf`)
 
-- **Residual: pixels, not depth.** Minimize the pixel distance between the predicted and the detected tag
-  corners: predicted = `K X_CB(head params) X_BA(arm params) p_AT`. Corners are detected to a fraction of a
-  pixel, and pixel error is what the VLM overlay needs. Depth from the D415 is the noisiest input (a few mm at
-  0.5 m, growing quickly with distance), so use it at most as a weak extra term.
-- **Parameters: a small set.** Joint zero offsets for every joint involved, the 6-DoF camera mount offset from
-  `head_tilt_link`, the tag's pose on its link if it cannot be measured well, and link-length corrections only
-  if Step 1 shows they matter. Many of these trade off against each other (a joint-zero error and a link offset
-  can produce the same image), so fewer is better.
-- **Stages.** Head first: tags fixed on the base, many head poses, solve the camera mount and the neck / eyes
-  offsets. Then the arm: with the head part fixed, many arm poses, solve the arm offsets.
-- **Pose design.** Spread poses over the ranges actually used, and approach them consistently. Check the
-  singular values of the Jacobian and report each parameter's uncertainty from `J^T J`. A parameter whose
-  estimate stays at its prior is not observable from the data.
-- **Data capture.** Arm and head stationary for each sample; record the image and the measured joint angles
-  together.
-- **Solver.** A numpy forward-kinematics chain with the parameters as inputs, and
-  `scipy.optimize.least_squares` with a robust loss (Huber) for occasional bad tag detections. No pinocchio or
-  sklearn needed.
-- **Validation.** Hold out some poses and report the pixel RMS before and after calibration. Add a physical
-  check: touch the tool tip to a marked point on the table and compare the predicted pixel with the observed one.
+`model.save(path)` writes `to_urdf()`, the merged URDF with the estimates written into the joint origins (zero
+offsets folded in as a rotation about the joint's axis, so a model of the file with no corrections predicts the same
+pixels), plus a `<felix_calibration>` element with what a URDF cannot hold: the servo map, intrinsics, visible sides,
+floor, the parameter table with its priors, the estimates and their covariance, `fit_info` (sessions, pixel errors,
+held-out errors) and the URDF's original origins of the corrected joints. Pinocchio and placo ignore the element, and
+placo's view of the exported URDF is tested against the model, so any URDF reader gets the calibrated robot.
+`XleRobotModel.load` restores the original origins and gives back the exact model, ready to refit.
 
-## Open questions
+## Trusting a result
 
-- Where to put the tags: which rigid links are visible from the head poses we use, and what tag size fits.
-- Whether `cv2.aruco` is available in this environment's OpenCV build.
-- Measuring the RealSense mount relative to `head_tilt_link` (ruler and calipers for the prior; the calibration
-  refines it).
-- Moving camera capture to a Linux machine (Raspberry Pi) changes nothing in the math, but image and joint
-  timestamps then come from two machines; for calibration this is fine as long as everything is stationary.
+1. **Held-out error.** It should be near the click noise (2 to 3 px). If it stays well above it, the remainder is
+   play, backlash, gravity sag the measured joint angles do not capture, or a model error, not something more
+   clicks fix. This replaces a separate repeatability test.
+2. **Largest remaining errors** in `calibration.md`: a mis-click shows up there; `u` in `collect` undoes the last
+   click.
+3. **Learned column:** a parameter marked "no" was not determined by the clicks; do not read meaning into its value.
+4. **Poses you did not collect:** try the result where the VLM will plan, by clicking a few more and checking the
+   error.
+5. **Simulation is optimistic:** with the right model and random poses, 20 to 80 clicks with 1.5 px noise bring the
+   held-out error from about 220 px to about 2 px. Real errors also include backlash and play.
+
+## Background: what the numbers say
+
+From the version 1 sensitivity analysis (default URDF, left arm, 54 configurations with the gripper in view):
+
+- **Geometry:** the head camera sees the arm only close up: the jaw pivot 0.16 to 0.51 m from the camera (median
+  0.35 m), in a band about 25 to 45 cm in front of the robot. The shoulder is never in view, the elbow rarely.
+- **Rules of thumb:** a head tilt error costs about 12 px/deg (fx times 1 deg in radians is 10.7 px), camera mount
+  yaw and pitch about 11 px/deg, the arm's shoulder joint zeros 6 to 8 px/deg, and every position error about fx /
+  depth: 1.6 to 1.9 px/mm at 0.35 m. At 0.5 m, 1 cm is about 12 px.
+- **So:** the head's joint zeros and the camera mount's rotation matter most, the arm's joint zeros next, link
+  lengths least; which is what the fits found.
+- **Identifiability:** moving the head tower and moving an arm mount give exactly the same pixel shifts; fit one.
+
+The camera: the D415's factory color intrinsics at 640x480 are fx 611.0, fy 610.0, principal point (315.9, 247.0),
+zero distortion (`diagnostics/realsense_check.py`), and every capture carries them, so intrinsics are not fitted.
+RealSense's self-calibration tools (on-chip, tare) improve the depth stereo pair, not the color camera's place on the
+robot; run them only if depth looks wrong.
+
+The head: a positive pan turns left (counter-clockwise from above), a positive tilt looks down; `setup.head`
+records the servo signs to match. The URDF's camera is a generic `head_camera_link` 2.5 cm forward and 3 cm up from
+`head_tilt_link`; the RealSense's actual mount is what the camera mount parameters learn.
+
+## History
+
+- **Version 1** (the first left and right sessions): two URDFs joined at runtime (`CalibrationModel`), our own
+  numpy kinematics, roll-pitch-yaw corrections, a hand-written Levenberg-Marquardt fit with finite differences,
+  poses from random sampling with a wrist-roll scan (8 to 26 s to start a session), the head tilt bootstrapped from
+  the table plane in the depth image, and the right arm fitted separately with the left fit's head as priors. Its
+  left fit: 1.99 px held out; right: 2.22 px. The current model reproduces its predictions (frozen in
+  `tests/felix_jr/reference/v1_reference.json`), and refitting the left session alone gives the same 1.99 px.
+- **Tags** (ArUco / AprilTag on the robot, to see the camera's pose every frame or to measure repeatability) were
+  considered and dropped: clicks need nothing printed, measure what matters (where the pinch point lands), and the
+  held-out error measures repeatability for free.
+- **The sensitivity analysis** decided the parameters and priors (numbers above); the fit's posterior sigmas now
+  answer the same question on real clicks.
+
+## Dependencies
+
+- `pin` (pinocchio) and `placo` through the `placo-dep` extra (it pins the cmeel libraries their wheels need), `scipy`
+  through `scipy-dep`; the `felix_jr` extra pulls in both (`uv sync --extra felix_jr`). Imports are guarded with
+  `_pinocchio_available` and `_scipy_available` (`utils/import_utils.py`).
+- Lock with the uv version CI pins (`UV_VERSION` in `.github/workflows`, 0.11.30), e.g.
+  `uvx --from uv==0.11.30 uv lock`: other versions rewrite the whole lock file's format.
+
+## Not done yet, and open questions
+
+- **Runtime:** projecting planned trajectories into the image with the calibration (`model.project`), and a
+  `robot_kinematics(arm)` helper that builds LeRobot's `RobotKinematics` from `to_urdf()` (LeRobot's
+  `RobotKinematics` on the merged URDF is tested to agree with the model).
+- A marker on the gripper instead of clicks (the fit does not change), and the depth at the click as an extra
+  residual (recorded, unused: dark shiny parts give poor depth).
+- The floor: measure it once by hand, or keep a one-off depth measurement as a setup step?
+- The right arm's rolls (86 to 106 deg now) and the wrist camera's cable; the view finder could penalize large rolls.
+- Backlash and gravity sag: if the held-out error stays well above the click noise, try an approach-direction
+  convention for the views before adding parameters.

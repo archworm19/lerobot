@@ -1,22 +1,28 @@
-"""`XleRobotModel` and the merged URDF: agreement with `CalibrationModel` (version 1), corrections, export, saving."""
+"""`XleRobotModel` and the merged URDF: agreement with version 1, corrections, export, saving, derivatives."""
+
+import json
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 pin = pytest.importorskip("pinocchio")
 
-from lerobot.felix_jr.calibration.merge_urdf import MERGED_URDF, build_merged_urdf  # noqa: E402
-from lerobot.felix_jr.calibration.model import ARM_JOINTS, CalibrationModel, Observation, parameter_set  # noqa: E402
+from lerobot.felix_jr.calibration.merge_urdf import (  # noqa: E402
+    MERGED_URDF,
+    SO101_JOINTS as ARM_JOINTS,
+    build_merged_urdf,
+)
 from lerobot.felix_jr.calibration.xle_robot_model import (  # noqa: E402
     XleRobotModel,
     default_parameters,
-    estimates_from_v1,
     pinch_frame,
 )
 
 INTRINSICS = {"fx": 610.97, "fy": 610.01, "ppx": 315.95, "ppy": 247.03, "width": 640, "height": 480}
 SIGNS = {"head_neck": -1, "head_eyes": 1}
 REFS = {"head_neck": 1520, "head_eyes": 1324}
+V1_REFERENCE = Path(__file__).parent / "reference" / "v1_reference.json"
 
 
 @pytest.fixture(scope="module")
@@ -49,29 +55,21 @@ def test_placements_rebuilt_from_the_urdf_origins_match_pinocchios(model):
     model.check_structure()
 
 
-@pytest.mark.parametrize("arm", ["left", "right"])
-def test_it_agrees_with_the_version_1_model_with_and_without_corrections(model, arm):
-    v1 = CalibrationModel(arm, INTRINSICS, SIGNS, REFS)
-    rng = np.random.default_rng(1)
-    for corrected in (False, True):
-        theta_v1 = {p.name: float(rng.normal(0, p.sigma)) for p in parameter_set(arm)} if corrected else {}
-        theta = estimates_from_v1(theta_v1, arm)
-        for _ in range(5):
-            arm_pose, ticks = random_readings(rng)
-            q = model.joint_vector({arm: arm_pose}, ticks)
-            expected = v1.predict(Observation(arm=arm_pose, head_ticks=ticks, pixel=(0.0, 0.0)), theta_v1)
-            got = model.predict(arm, q, theta)
-            np.testing.assert_allclose(got.uv, expected.uv, atol=1e-6)
-            assert got.z == pytest.approx(expected.z, abs=1e-9)
-            np.testing.assert_allclose(
-                model.pinch_point(arm, q, theta), v1.tip_in_root(arm_pose, theta_v1), atol=1e-9
-            )
-            np.testing.assert_allclose(
-                model.camera_pose(q, theta), v1.camera_pose(ticks, theta_v1), atol=1e-9
-            )
-            assert model.visibility(arm, q, theta) == pytest.approx(
-                v1.hinge_axis_cosine(arm_pose, ticks, theta_v1), abs=1e-9
-            )
+def test_it_reproduces_version_1s_predictions_with_and_without_corrections(model):
+    """Version 1 (`CalibrationModel`: two URDFs joined at runtime) produced the first calibrations; its predictions
+    for random readings and corrections were frozen in `reference/v1_reference.json` before it was deleted."""
+    reference = json.loads(V1_REFERENCE.read_text())
+    assert reference["head_refs"] == REFS and reference["intrinsics"] == INTRINSICS
+    for case in reference["cases"]:
+        arm, theta = case["arm"], case["theta"]
+        q = model.joint_vector({arm: case["arm_pose"]}, case["head_ticks"])
+        got = model.predict(arm, q, theta)
+        np.testing.assert_allclose(got.uv, case["uv"], atol=1e-6)
+        assert got.z == pytest.approx(case["z"], abs=1e-9)
+        np.testing.assert_allclose(got.point, case["pinch_point"], atol=1e-9)
+        np.testing.assert_allclose(model.camera_pose(q, theta), case["camera_pose"], atol=1e-9)
+        assert got.visibility == pytest.approx(case["hinge_cosine"], abs=1e-9)
+    assert any(case["theta"] for case in reference["cases"])  # some cases have corrections
 
 
 def test_predict_many_is_predict_at_each_configuration(model):
@@ -174,13 +172,15 @@ def test_save_and_load_give_back_the_same_model(model, tmp_path):
     np.testing.assert_allclose(plain.predict("left", q, {}).uv, original.predict("left", q).uv, atol=1e-6)
 
 
-def test_parameters_match_version_1_one_to_one():
+def test_the_default_parameters_cover_the_head_once_and_each_arm():
     for arm in ("left", "right"):
-        v1_names = [p.name for p in parameter_set(arm)]
-        names = [p.name for p in default_parameters([arm])]
-        assert len(names) == len(v1_names) == 43
-        assert sorted(estimates_from_v1(dict.fromkeys(v1_names, 0.0), arm)) == sorted(names)
+        params = default_parameters([arm])
+        assert len(params) == 43 and len({p.name for p in params}) == 43
+        assert {p.arm for p in params} == {None, arm}
     assert len(default_parameters()) == 14 + 2 * 29  # the head and camera once, then each arm
+    assert not any(
+        "top_base_link" in p.name for p in default_parameters()
+    )  # the head tower: see the docstring
     overridden = default_parameters(["left"], {"zero:head_tilt_joint": (0.3, 0.05)})[1]
     assert (overridden.mean, overridden.sigma) == (0.3, 0.05)
 
