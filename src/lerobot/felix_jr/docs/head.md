@@ -65,7 +65,7 @@ The arm-only tools (teleop, `lift_test`, `dump_servo_config`) pass `with_head=Fa
 ## Not done yet
 
 - The eyes' tilt range is set by `setup.head_range` (see the README, section 4): up limit, down limit and home,
-  saved as raw ticks in `<id>_head_range.json`. The neck has none yet (the script takes `--name head_neck`),
+  saved as raw ticks in `<id>_head_range.json`. The neck uses `--name head_neck` (left / right arrows, `[` / `]` for the limits),
   and the servos' normalized "degrees" in `get_observation` are still a full-range placeholder measured from
   raw 2048. The URDF suggests about -43 deg (up) to +83 deg (down) for the tilt and a very large pan range; the real
   limits are set by the mount and the camera cable.

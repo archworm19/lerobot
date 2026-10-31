@@ -295,6 +295,34 @@ def test_decode_key():
     assert decode_key(ord("x")) is None and decode_key(-1) is None
 
 
+def test_decode_key_for_the_neck():
+    assert decode_key(63234, NECK) == "left" and decode_key(ord("j"), NECK) == "left"
+    assert decode_key(63235, NECK) == "right" and decode_key(ord("l"), NECK) == "right"
+    assert decode_key(ord("["), NECK) == "limit_pos" and decode_key(ord("]"), NECK) == "limit_neg"
+    assert decode_key(ord("h"), NECK) == "home" and decode_key(ord("q"), NECK) == "quit"
+    assert decode_key(63232, NECK) is None and decode_key(ord("u"), NECK) is None  # the eyes' keys do nothing
+    assert decode_key(63234) is None  # and the neck's do nothing for the eyes
+
+
+def test_range_session_for_the_neck(client, served):
+    fake, _ = served
+    shown = []
+    session = HeadRangeSession(client, NECK, 2.0, shown.append)
+    assert "[: left limit" in session.help_lines()[0]
+    step = round(2.0 * TICKS_PER_DEG)
+    start = fake.head.backend.read_ticks(NECK)
+    session.handle("left")
+    session.handle("limit_pos")
+    assert session.message == "saved left limit"
+    session.handle("right")
+    session.handle("right")
+    session.handle("limit_neg")
+    state = client.head_state()[NECK]
+    # the neck's sign is -1: left (positive) is fewer raw ticks
+    assert state["limit_pos"] == start - step and state["limit_neg"] == start + step
+    assert "left limit" in " ".join(session.status_lines()) and len(shown) == 5
+
+
 def test_range_session_walks_through_setting_a_range(client, served):
     fake, _ = served
     shown = []

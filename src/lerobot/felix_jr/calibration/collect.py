@@ -68,7 +68,7 @@ from lerobot.felix_jr.calibration.xle_robot_model import (
     default_parameters,
 )
 from lerobot.felix_jr.depth import with_matrices
-from lerobot.felix_jr.scene import Scene
+from lerobot.felix_jr.harness.scene import Scene
 from lerobot.felix_jr.server.client import Capture, FelixClient
 from lerobot.felix_jr.server.protocol import DEFAULT_PORT, ServerError
 

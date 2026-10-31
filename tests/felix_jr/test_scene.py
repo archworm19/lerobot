@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from lerobot.felix_jr.scene import BLOCKED, FREE, UNKNOWN, Scene
-from tests.felix_jr.conftest import BOX_Z, FX, H, PPX, PPY, W, WALL_Z, make_calibration
+from lerobot.felix_jr.harness.scene import BLOCKED, FREE, UNKNOWN, Scene
+from tests.felix_jr.conftest import BOX_Z, FX, PPX, PPY, WALL_Z, H, W, make_calibration
 
 
 class TestPixelToXyz:

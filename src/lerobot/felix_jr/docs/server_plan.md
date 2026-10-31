@@ -62,7 +62,7 @@ capture()            ----------------->  ...
   robot.move_joints("left", ik(plan.waypoints))
   ```
 
-- IK (placo), the scene tools (`depth.py`, `scene.py`, `overlay.py`), projecting trajectories into the image, and
+- IK (placo), the harness (`depth.py`, `harness/`), projecting trajectories into the image, and
   the VLM calls all run here.
 - **The episode log is written on the laptop.** For each step it saves the snapshot, the rendered prompt image,
   the VLM's raw response, the commanded joints and the result. This log is the experiment data, so it lives with the

@@ -16,7 +16,7 @@ Serial ports for each arm are in [current_ports.md](current_ports.md). Findings 
 |---|---|
 | `home.py` | Shared: follower construction (`make_follower`), home pose files, the trapezoid-profile `move_all`. |
 | `depth.py` | Shared: align RealSense depth to the color image, depth-edge overlays and checks. |
-| `scene.py`, `overlay.py` | Shared: ask a color + depth capture for 3D points, projections and path checks; draw paths on it. |
+| `harness/` | The VLM harness: captures in the root frame, views, grids, table height, path checks, `render`, and the workspace DAG; design in `harness.md`. |
 | `ports.py` | Shared: the saved arm-to-port cache (`setup.find_ports` writes it, `resolve(robot_id)` reads it). |
 | `urdfs/xlerobot.urdf`, `urdfs/so101_new_calib.urdf` | The XLeRobot URDF and the official SO-101 URDF (Apache 2.0), merged by `calibration/merge_urdf.py` into `urdfs/xlerobot_so101.urdf` (the head and base with two SO-101 arms), which the calibration uses. |
 | `base_follower.py` | Shared: `SO101FollowerWithBase` (per-joint P gains, optional wheel servos). |
@@ -26,7 +26,7 @@ Serial ports for each arm are in [current_ports.md](current_ports.md). Findings 
 | `server/` | Robot server for the Raspberry Pi and its client (`FelixClient`); plan in `server_plan.md`. |
 | `teleop/` | `spacemouse_teleop`. |
 | `calibration/` | Camera-to-robot click calibration: the robot model (`xle_robot_model`, on pinocchio), the fit (`xle_fit`), choosing views (`views`), the interactive session (`collect`), the merged URDF (`merge_urdf`); design in `camera_calibration.md`. |
-| `docs/` | This file, `tuning_notes.md`, `realsense_m1.md`, `scene_tools.md`, `head.md`, `camera_calibration.md`, `server_plan.md`, `current_ports.md`. |
+| `docs/` | This file, `tuning_notes.md`, `realsense_m1.md`, `harness.md`, `head.md`, `camera_calibration.md`, `server_plan.md`, `current_ports.md`. |
 
 ## First-time order
 
@@ -115,7 +115,7 @@ apture`
    the laptop can't reach port 5555 (wrong host, or a firewall on the Pi).
 d. **Look at the capture.** `uv run python -m lerobot.felix_jr.diagnostics.alignment_from_saved ~/pi_capture`
    writes `alignment.png` next to the saved color and depth; check that the depth looks sensible and matches
-   the color. The folder also loads with `Scene.from_saved` (see [scene_tools.md](scene_tools.md)).
+   the color. The folder also loads with `harness.Scene.from_saved` (see [harness.md](harness.md)).
 e. **Add the arms.** Stop the server, then start it with their ports (from `setup.find_ports --show`):
    `uv run python -m lerobot.felix_jr.server.server --left-port <LEFT_PORT> --right-port <RIGHT_PORT>`
    and rerun the `server_check` from step c. It should now list both arms and print their joint positions.

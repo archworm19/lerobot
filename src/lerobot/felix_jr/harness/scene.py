@@ -23,6 +23,14 @@ from lerobot.felix_jr.depth import align_depth_to_color, load_calibration
 FREE, UNKNOWN, BLOCKED = 0, 1, 2  # state of a sample point / a whole segment (worst state wins)
 
 
+def read_image(path: str | Path, flags: int = cv2.IMREAD_COLOR) -> np.ndarray:
+    """`cv2.imread`, raising instead of returning None when the file is missing or unreadable."""
+    image = cv2.imread(str(path), flags)
+    if image is None:
+        raise FileNotFoundError(f"cannot read image {path}")
+    return image
+
+
 class SegmentCheck(NamedTuple):
     """Result of `Scene.segment_check` for N segments sampled at S points each."""
 
@@ -37,6 +45,8 @@ class SegmentCheck(NamedTuple):
 
 @dataclass(frozen=True)
 class Scene:
+    """One capture in the camera frame: color, depth aligned to color, and the color intrinsics."""
+
     color: np.ndarray  # (H, W, 3) uint8, RGB
     depth_m: np.ndarray  # (H, W) float32, meters, in the color pixel grid; NaN = no depth
     fx: float
@@ -46,18 +56,23 @@ class Scene:
 
     @property
     def height(self) -> int:
+        """Image height in pixels."""
         return self.depth_m.shape[0]
 
     @property
     def width(self) -> int:
+        """Image width in pixels."""
         return self.depth_m.shape[1]
 
     # ---- construction -------------------------------------------------------------------------------------
 
     @classmethod
     def from_capture(cls, color_rgb: np.ndarray, raw_depth: np.ndarray, calib: dict[str, Any]) -> "Scene":
-        """Build a scene from a LeRobot RealSense capture: RGB `uint8` color, raw `uint16` depth (as read from
-        the camera, not aligned) and the calibration from `diagnostics/realsense_check.py`."""
+        """Build a scene from a LeRobot RealSense capture.
+
+        Inputs: RGB `uint8` color, raw `uint16` depth (as read from the camera, not aligned) and the calibration
+        from `diagnostics/realsense_check.py`.
+        """
         aligned = align_depth_to_color(raw_depth, calib)
         depth_m = np.where(aligned > 0, aligned * calib["depth_scale_m_per_unit"], np.nan).astype(np.float32)
         ci = calib["color_intrinsics"]
@@ -67,8 +82,8 @@ class Scene:
     def from_saved(cls, folder: str | Path) -> "Scene":
         """Load color.png, depth_raw.png and calibration.json saved by `realsense_check --save-dir`."""
         folder = Path(folder)
-        color = cv2.cvtColor(cv2.imread(str(folder / "color.png")), cv2.COLOR_BGR2RGB)
-        raw = cv2.imread(str(folder / "depth_raw.png"), cv2.IMREAD_UNCHANGED)
+        color = cv2.cvtColor(read_image(folder / "color.png"), cv2.COLOR_BGR2RGB)
+        raw = read_image(folder / "depth_raw.png", cv2.IMREAD_UNCHANGED)
         return cls.from_capture(color, raw, load_calibration(folder / "calibration.json"))
 
     # ---- pixel <-> 3D -------------------------------------------------------------------------------------
@@ -193,7 +208,7 @@ class Scene:
         t = np.linspace(0.0, 1.0, samples)
 
         sample_xyz = p1[:, None, :] + (p2 - p1)[:, None, :] * t[None, :, None]
-        sample_state = np.empty((n, samples), dtype=np.int8)
+        sample_state: np.ndarray = np.empty((n, samples), dtype=np.int8)
         for start in range(0, n, chunk):
             part = slice(start, start + chunk)
             sample_state[part] = self._sample_states(sample_xyz[part], radius, tolerance, max_disc_px)

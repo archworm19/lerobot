@@ -5,7 +5,7 @@
   robot = FelixClient("tcp://raspberrypi.local:5555")
   print(robot.hello())
   snap = robot.capture()                       # a Capture: .color, .raw_depth, .calibration, .state
-  scene = snap.scene()                         # a felix_jr.scene.Scene, ready for pixel <-> xyz queries
+  scene = snap.scene()                         # a felix_jr.harness.scene.Scene, ready for pixel <-> xyz queries
 
 Every method blocks until the reply arrives and raises `TimeoutError` if the server stays silent, or
 `ServerError` if the server reports a failure.
@@ -90,7 +90,7 @@ class Capture:
     def scene(self):
         """The capture as a `Scene` (depth aligned to color, in meters)."""
         from lerobot.felix_jr.depth import with_matrices
-        from lerobot.felix_jr.scene import Scene
+        from lerobot.felix_jr.harness.scene import Scene
 
         return Scene.from_capture(self.color, self.raw_depth, with_matrices(self.calibration))
 

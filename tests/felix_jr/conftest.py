@@ -8,7 +8,7 @@ with no depth at rows 10-19 / columns 10-29.
 import numpy as np
 import pytest
 
-from lerobot.felix_jr.scene import Scene
+from lerobot.felix_jr.harness.scene import Scene
 
 H, W = 120, 160
 FX = FY = 100.0

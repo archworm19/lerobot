@@ -119,7 +119,7 @@ def test_add_librealsense_to_path(tmp_path, monkeypatch):
 
 def test_server_check_reports_and_saves_a_loadable_capture(client, tmp_path):
     from lerobot.felix_jr.checks.server_check import run
-    from lerobot.felix_jr.scene import Scene
+    from lerobot.felix_jr.harness.scene import Scene
 
     lines = []
     durations = run(client, captures=3, save_dir=tmp_path / "cap", say=lines.append)
