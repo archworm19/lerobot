@@ -32,10 +32,10 @@ from lerobot.utils.import_utils import _pinocchio_available, require_package
 if TYPE_CHECKING or _pinocchio_available:
     import pinocchio as pin
 
-FELIX_DIR = Path(__file__).resolve().parent.parent
-XLEROBOT_URDF = FELIX_DIR / "xlerobot.urdf"
-SO101_URDF = FELIX_DIR / "so101_new_calib.urdf"
-MERGED_URDF = FELIX_DIR / "xlerobot_so101.urdf"
+URDF_DIR = Path(__file__).resolve().parent.parent / "urdfs"
+XLEROBOT_URDF = URDF_DIR / "xlerobot.urdf"
+SO101_URDF = URDF_DIR / "so101_new_calib.urdf"
+MERGED_URDF = URDF_DIR / "xlerobot_so101.urdf"
 
 ARMS = ("left", "right")
 ARM_BASES = {"left": "Base", "right": "Base_2"}

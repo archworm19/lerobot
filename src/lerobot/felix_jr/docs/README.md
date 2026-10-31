@@ -18,7 +18,7 @@ Serial ports for each arm are in [current_ports.md](current_ports.md). Findings 
 | `depth.py` | Shared: align RealSense depth to the color image, depth-edge overlays and checks. |
 | `scene.py`, `overlay.py` | Shared: ask a color + depth capture for 3D points, projections and path checks; draw paths on it. |
 | `ports.py` | Shared: the saved arm-to-port cache (`setup.find_ports` writes it, `resolve(robot_id)` reads it). |
-| `xlerobot.urdf`, `so101_new_calib.urdf` | The XLeRobot URDF and the official SO-101 URDF (Apache 2.0), merged by `calibration/merge_urdf.py` into `xlerobot_so101.urdf` (the head and base with two SO-101 arms), which the calibration uses. |
+| `urdfs/xlerobot.urdf`, `urdfs/so101_new_calib.urdf` | The XLeRobot URDF and the official SO-101 URDF (Apache 2.0), merged by `calibration/merge_urdf.py` into `urdfs/xlerobot_so101.urdf` (the head and base with two SO-101 arms), which the calibration uses. |
 | `base_follower.py` | Shared: `SO101FollowerWithBase` (per-joint P gains, optional wheel servos). |
 | `setup/` | One-time, per-robot: `find_ports`, `record_home`, `wheels`, `head`. |
 | `checks/` | Hardware sign-of-life tests: `wiggle_test`, `wheel_test`. |
