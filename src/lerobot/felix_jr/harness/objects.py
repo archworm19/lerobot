@@ -349,27 +349,131 @@ class Focus:
 
 @dataclass(frozen=True, eq=False)
 class Reach:
-    """Whether `arm` can put its pinch point at each of `plan`'s waypoints (`reach.check_reach`)."""
+    """Legacy: whether `arm` reached each of `plan`'s waypoints.
+
+    Replaced by `Poses`; kept so that sessions saved before it still load.
+    """
 
     plan: Plan
     arm: str
     poses: tuple[dict[str, float], ...]  # per waypoint, the solved joints in LeRobot degrees
     position_error_m: np.ndarray  # (M,) how far the solution's pinch point is from the waypoint
-    tilt_deg: np.ndarray  # (M,) how far the gripper is from pointing straight down
+    pitch_error_deg: np.ndarray  # (M,) how far the gripper's pitch is from `pitch_deg`
     ok: np.ndarray  # (M,) bool
-    down: bool
+    pitch_deg: float | None  # the requested gripper pitch (-90 = straight down), None = any
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Unpickle, including a `Reach` saved before pitches (`tilt_deg` from straight down, `down`)."""
+        if "tilt_deg" in state:
+            state = dict(state)
+            state["pitch_error_deg"] = state.pop("tilt_deg")
+            state["pitch_deg"] = -90.0 if state.pop("down") else None
+        self.__dict__.update(state)
 
     def describe(self) -> str:
         """Which waypoints the arm reaches, and by how much it misses the others."""
         rows = []
-        for i, (ok, error, tilt) in enumerate(
-            zip(self.ok, self.position_error_m, self.tilt_deg, strict=True)
+        for i, (ok, error, off) in enumerate(
+            zip(self.ok, self.position_error_m, self.pitch_error_deg, strict=True)
         ):
             if ok:
                 rows.append(f"{i + 1} ok")
             else:
                 miss = f"{_cm(error)} cm short" if error > 0.005 else ""
-                bent = f"gripper {tilt:.0f} deg from down" if self.down and tilt > 5 else ""
+                bent = f"pitch {off:.0f} deg off" if off > 5 else ""
                 rows.append(f"{i + 1} unreachable ({', '.join(r for r in (miss, bent) if r)})")
         verdict = "reaches all waypoints" if self.ok.all() else f"reaches {int(self.ok.sum())}/{len(self.ok)}"
-        return f"{self.arm} arm {verdict}{' pointing down' if self.down else ''}: " + "; ".join(rows)
+        if self.pitch_deg is None:
+            how = ""
+        elif self.pitch_deg == -90:
+            how = " pointing down"
+        else:
+            how = f" at pitch {self.pitch_deg:+.0f} deg"
+        return f"{self.arm} arm {verdict}{how}: " + "; ".join(rows)
+
+
+def _xyz_cm(p: np.ndarray) -> str:
+    return "(" + ", ".join(_cm(float(c)) for c in p) + ") cm"
+
+
+def _ranges(runs: tuple[tuple[float, float], ...]) -> str:
+    return ", ".join(f"{lo:+.0f}..{hi:+.0f}" for lo, hi in runs) if runs else "none"
+
+
+@dataclass(frozen=True, eq=False)
+class Poses:
+    """Gripper poses solved for `arm` (`reach.check_poses`, `reach.approach_poses`).
+
+    Each pose puts the tool point (the midpoint of jaws `width` apart; the pinch frame's origin is the fixed jaw) at
+    `points[i]`, the gripper axis at `pitch_deg`, the jaws across `across`. `approach_poses` also fills the sweep
+    fields; when no pitch reaches every target, it has no poses and `pitch_deg` is None, and the per-target ranges
+    say what would work.
+    """
+
+    arm: str
+    capture: Capture
+    points: np.ndarray  # (M, 3) where each pose puts the tool point (root frame)
+    labels: tuple[str, ...]  # (M,) "1", "2", ... or "back1", "at1", "up1", ...
+    frames: np.ndarray  # (M, 4, 4) the solved X_root_pinch
+    joints: tuple[dict[str, float], ...]  # (M,) the solved joints, LeRobot degrees
+    position_error_m: np.ndarray  # (M,)
+    pitch_error_deg: np.ndarray  # (M,)
+    jaw_error_deg: np.ndarray  # (M,)
+    ok: np.ndarray  # (M,) bool
+    pitch_deg: float | None  # the pitch of every pose (None: any, or none found)
+    width: float  # m, between the jaws at the tool point
+    across: np.ndarray | None  # (3,) the jaws close across it (None: any)
+    targets: np.ndarray | None = None  # (K, 3) approach_poses: the targets
+    requested_deg: tuple[float, float] | None = None  # approach_poses: the range swept, preferred end first
+    reachable_deg: tuple[tuple[float, float], ...] = ()  # approach_poses: pitch runs that reach every target
+    target_reachable_deg: tuple[tuple[tuple[float, float], ...], ...] = ()  # approach_poses: runs per target
+    back: float = 0.0  # approach_poses: m along the gripper axis before / after each target
+    up: float = 0.0  # approach_poses: m above each target
+
+    def describe(self) -> str:
+        """The pitch and which poses work; for a sweep, the reachable ranges and which target limits them."""
+        head = f"{self.arm} arm"
+        if self.pitch_deg is not None:
+            head += " pointing down" if self.pitch_deg == -90 else f" at pitch {self.pitch_deg:+.0f} deg"
+        if self.width:
+            head += f", jaws {_cm(self.width)} cm apart"
+        if self.across is not None:
+            head += (
+                ", jaws closing horizontally"
+                if abs(self.across[2]) > 0.999
+                else ", jaws across (" + ", ".join(f"{c:.2f}" for c in self.across) + ")"
+            )
+        text = head + ": " + self._poses_text()
+        if self.targets is None or self.requested_deg is None:
+            return text
+        lo, hi = self.requested_deg
+        per_target = "; ".join(
+            f"target {k + 1} {_xyz_cm(t)}: {_ranges(r)}"
+            for k, (t, r) in enumerate(zip(self.targets, self.target_reachable_deg, strict=True))
+        )
+        sweep = (
+            f"asked pitch {lo:+.0f}..{hi:+.0f}, preferred first; every target: {_ranges(self.reachable_deg)}"
+        )
+        sweep += f" ({per_target})"
+        if self.pitch_deg is None:
+            return f"no pitch in {lo:+.0f}..{hi:+.0f} reaches every target with the {self.arm} arm; {sweep}"
+        return f"{text}; {sweep}; back {_cm(self.back)} cm along the gripper, up {_cm(self.up)} cm"
+
+    def _poses_text(self) -> str:
+        rows = []
+        for label, ok, error, pitch, jaw in zip(
+            self.labels, self.ok, self.position_error_m, self.pitch_error_deg, self.jaw_error_deg, strict=True
+        ):
+            if ok:
+                rows.append(f"{label} ok")
+                continue
+            misses = [
+                f"{_cm(error)} cm short" if error > 0.005 else "",
+                f"pitch {pitch:.0f} deg off" if pitch > 5 else "",
+                f"jaws {jaw:.0f} deg off" if jaw > 5 else "",
+            ]
+            rows.append(f"{label} unreachable ({', '.join(m for m in misses if m)})")
+        if not rows:
+            return "no poses"
+        verdict = "all reachable" if self.ok.all() else f"{int(self.ok.sum())}/{len(self.ok)} reachable"
+        return f"{verdict}: " + "; ".join(rows)

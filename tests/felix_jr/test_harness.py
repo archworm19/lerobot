@@ -16,6 +16,8 @@ from lerobot.felix_jr.harness import (
     Grid,
     Plan,
     Points,
+    Poses,
+    Reach,
     Scene,
     TableEstimate,
     View,
@@ -403,3 +405,109 @@ class TestScan:
         with pytest.raises(TimeoutError):
             scan_module.scan(client, model=None)  # type: ignore[arg-type]
         assert client.moves[-2:] == [("head_neck", None, "home"), ("head_eyes", None, "home")]
+
+
+DOWN_FRAME = np.column_stack([[0, 1, 0], [1, 0, 0], [0, 0, -1]])  # pinch frame pointing down, jaws along y
+
+
+def make_poses(capture, ok=(True, False), sweep: bool = False) -> Poses:
+    """Two poses from above over the box, jaws 3 cm apart along y (built by hand, no IK); the second unreachable."""
+    points = np.array([[0.65, 0.0, BOX_Z + 0.02], [0.7, 0.0, BOX_Z + 0.02]])
+    frames = np.repeat(np.eye(4)[None], 2, axis=0)
+    frames[:, :3, :3] = DOWN_FRAME
+    frames[:, :3, 3] = points + 0.015 * DOWN_FRAME[:, 0]  # the fixed jaw, half the width from the tool point
+    extra = {}
+    if sweep:
+        extra = {
+            "targets": points,
+            "requested_deg": (-90.0, -60.0),
+            "reachable_deg": ((-90.0, -70.0),),
+            "target_reachable_deg": (((-90.0, -70.0),), ((-90.0, -60.0),)),
+            "back": 0.05,
+            "up": 0.05,
+        }
+    return Poses(
+        "right",
+        capture,
+        points,
+        ("at1", "at2"),
+        frames,
+        ({}, {}),
+        np.array([0.0, 0.03]),
+        np.array([0.0, 8.0]),
+        np.array([0.0, 0.0]),
+        np.array(ok),
+        -90.0,
+        0.03,
+        np.array([0.0, 0.0, 1.0]),
+        **extra,
+    )
+
+
+def make_no_pitch(capture) -> Poses:
+    targets = np.array([[0.65, 0.0, BOX_Z + 0.02], [2.0, 0.0, BOX_Z]])
+    empty = np.zeros(0)
+    return Poses(
+        "right",
+        capture,
+        np.zeros((0, 3)),
+        (),
+        np.zeros((0, 4, 4)),
+        (),
+        empty,
+        empty,
+        empty,
+        empty.astype(bool),
+        None,
+        0.03,
+        np.array([0.0, 0.0, 1.0]),
+        targets,
+        (-90.0, -60.0),
+        (),
+        (((-90.0, -60.0),), ()),
+        0.05,
+        0.05,
+    )
+
+
+class TestPoses:
+    def test_describe(self, capture):
+        text = make_poses(capture).describe()
+        assert text.startswith(
+            "right arm pointing down, jaws 3.0 cm apart, jaws closing horizontally: 1/2 reachable"
+        )
+        assert "at1 ok" in text and "at2 unreachable (3.0 cm short, pitch 8 deg off)" in text
+        swept = make_poses(capture, (True, True), sweep=True).describe()
+        assert "every target: -90..-70" in swept and "target 2 (70.0, 0.0, 42.0) cm: -90..-60" in swept
+        assert "back 5.0 cm along the gripper, up 5.0 cm" in swept
+        none = make_no_pitch(capture).describe()
+        assert (
+            none.startswith("no pitch in -90..-60 reaches every target")
+            and "target 2 (200.0, 0.0, 40.0) cm: none" in none
+        )
+
+    def test_render(self, capture):
+        view = full_view(capture)
+        for poses in (make_poses(capture), make_poses(capture, (True, True)), make_no_pitch(capture)):
+            assert (render(view, poses) != render(view)).any()
+
+    def test_recorded_and_pickled(self, capture):
+        ws = Workspace()
+        poses = ws.call(make_poses, capture)
+        assert ws.nodes["poses1"].parents == ("capture1",)
+        loaded = pickle.loads(pickle.dumps(ws))
+        assert loaded["poses1"].capture is loaded["capture1"] and loaded["poses1"].labels == poses.labels
+        json.dumps(loaded.log())
+
+
+def test_reach_pickled_before_pitches_still_loads(capture):
+    plan = check_path(capture, np.array([[0.5, 0.0, 0.6], [0.9, 0.0, 0.35]]))
+    reach = Reach(plan, "right", ({}, {}), np.zeros(2), np.array([1.0, 9.0]), np.array([True, False]), -90.0)
+    state = dict(reach.__dict__)
+    state["tilt_deg"] = state.pop("pitch_error_deg")
+    del state["pitch_deg"]
+    state["down"] = True
+    old = Reach.__new__(Reach)
+    old.__setstate__(state)
+    np.testing.assert_array_equal(old.pitch_error_deg, [1.0, 9.0])
+    assert old.pitch_deg == -90.0 and "pointing down" in old.describe()

@@ -472,6 +472,26 @@ class XleRobotModel:
         self._evaluate(q, theta)
         return self._pose(frame)
 
+    def frame_jacobian(
+        self,
+        frame: str,
+        q: np.ndarray,
+        joints: Sequence[str],
+        theta: np.ndarray | Mapping[str, float] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """X_root_frame (4x4) and its Jacobian (6, len(joints)) w.r.t. the angles of `joints`.
+
+        Rows 0-2: the velocity of the frame's origin, rows 3-5: its angular velocity, both in the root frame, per
+        unit change of each joint (zero for a joint that does not move the frame).
+        """
+        self._evaluate(q, theta)
+        pose = self._pose(frame)
+        linear, angular = self._twists([("zero", joint, None) for joint in joints])
+        chain = self._ancestors(frame)
+        moves = np.array([[joint in chain] for joint in joints], dtype=float)
+        point = (linear + np.cross(angular, pose[:3, 3])) * moves
+        return pose, np.vstack([point.T, (angular * moves).T])
+
     def camera_pose(self, q: np.ndarray, theta: np.ndarray | Mapping[str, float] | None = None) -> np.ndarray:
         """X_root_optical (4x4): the color camera's optical frame (x right, y down, z forward)."""
         return self.frame_pose(OPTICAL_FRAME, q, theta)

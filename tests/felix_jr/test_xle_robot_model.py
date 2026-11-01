@@ -229,3 +229,27 @@ def test_the_pixel_jacobian_matches_finite_differences(model, arm):
         np.testing.assert_allclose(d_joints[:, i], numeric, atol=1e-4, err_msg=joint)
     many = model.pixel_jacobian_many(arm, [q, q], theta)
     np.testing.assert_array_equal(many[1], d_parameters)
+
+
+@pytest.mark.parametrize("arm", ["left", "right"])
+def test_the_frame_jacobian_matches_finite_differences(model, arm):
+    rng = np.random.default_rng(6)
+    theta = np.array([rng.normal(0, p.sigma) for p in model.parameters])  # with corrections, as after a fit
+    joints = [f"{arm}_{j}" for j in ARM_JOINTS] + ["head_pan_joint"]  # the head does not move the pinch frame
+    q = model.joint_vector({arm: random_readings(rng)[0]})
+    pose, jacobian = model.frame_jacobian(pinch_frame(arm), q, joints, theta)
+    np.testing.assert_allclose(pose, model.frame_pose(pinch_frame(arm), q, theta))
+    step = 1e-6
+    for i, joint in enumerate(joints):
+        e = np.zeros_like(q)
+        e[model.q_index(joint)] = step
+        after, before = (
+            model.frame_pose(pinch_frame(arm), q + e, theta),
+            model.frame_pose(pinch_frame(arm), q - e, theta),
+        )
+        np.testing.assert_allclose(jacobian[:3, i], (after[:3, 3] - before[:3, 3]) / (2 * step), atol=1e-6)
+        spin = (after[:3, :3] - before[:3, :3]) / (2 * step) @ pose[:3, :3].T  # [omega]x
+        np.testing.assert_allclose(
+            jacobian[3:, i], [spin[2, 1], spin[0, 2], spin[1, 0]], atol=1e-6, err_msg=joint
+        )
+    np.testing.assert_array_equal(jacobian[:, -1], 0.0)

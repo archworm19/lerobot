@@ -1,7 +1,7 @@
 """`render(view, *overlays)`: the one function that draws (`docs/harness.md`, section 1.D).
 
 The view's crop of the capture is scaled first and the overlays are drawn after, in view pixels, so lines and text
-stay sharp when zoomed in. Root-frame objects (`Grid`, `Points`, `Plan`) can be drawn in any view; a
+stay sharp when zoomed in. Root-frame objects (`Grid`, `Points`, `Plan`, `Poses`) can be drawn in any view; a
 `TableEstimate`'s mask only in views of its own capture. One style per overlay type, so the VLM learns one visual
 language. Images are RGB `uint8`; the capture is never modified.
 """
@@ -12,17 +12,23 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .objects import STATE_NAMES, Grid, Plan, Points, Reach, TableEstimate, View
+from .objects import STATE_NAMES, Grid, Plan, Points, Poses, TableEstimate, View
 from .scene import BLOCKED, FREE, UNKNOWN
 
 STATE_COLORS = {FREE: (0, 200, 0), UNKNOWN: (255, 190, 0), BLOCKED: (230, 30, 30)}
 GRID_COLOR = (255, 230, 0)
 POINT_COLOR = (0, 220, 255)
 TABLE_COLOR = (0, 160, 255)
+GRIPPER_COLOR = (255, 60, 220)
+GRIPPER_BODY_M = 0.04  # how much of the gripper axis is drawn, back from the pinch point
+JAW_CLEARANCE_M = 0.01  # how much wider than the object the open jaws are drawn
 
 
 def render(view: View, *overlays: Any, legend: bool = True) -> np.ndarray:
-    """The view's image with `overlays` drawn in order (a `Grid`, `Points`, `Plan` or `TableEstimate` each)."""
+    """The view's image with `overlays` drawn in order.
+
+    Overlays: `Grid`, `Points`, `Plan`, `TableEstimate`, `Poses`.
+    """
     s = view.capture.scene
     crop = s.color[view.v0 : view.v0 + view.height, view.u0 : view.u0 + view.width]
     interpolation = cv2.INTER_CUBIC if view.scale > 1 else cv2.INTER_AREA
@@ -38,8 +44,8 @@ def render(view: View, *overlays: Any, legend: bool = True) -> np.ndarray:
             plans = True
         elif isinstance(overlay, TableEstimate):
             _draw_table(out, view, overlay)
-        elif isinstance(overlay, Reach):
-            _draw_reach(out, view, overlay)
+        elif isinstance(overlay, Poses):
+            _draw_poses(out, view, overlay)
         else:
             raise TypeError(f"cannot render a {type(overlay).__name__}")
     if legend and plans:
@@ -246,18 +252,44 @@ def _draw_plan(img: np.ndarray, view: View, plan: Plan) -> None:
     _draw_points(img, uv_way[[g[0] for g in groups]], labels, color=(255, 220, 0))
 
 
-def _draw_reach(img: np.ndarray, view: View, reach: Reach) -> None:
-    """A ring around each waypoint: green if the arm reaches it, red with an X if not."""
-    for p, ok in zip(view.project(reach.plan.waypoints), reach.ok, strict=True):
-        if not _inside(img, p):
-            continue
-        c = _pixel(p)
-        color = STATE_COLORS[FREE] if ok else STATE_COLORS[BLOCKED]
-        cv2.circle(img, c, 11, color, 2, cv2.LINE_AA)
-        if not ok:
-            for d in (-1, 1):
-                cv2.line(img, (c[0] - 7, c[1] - 7 * d), (c[0] + 7, c[1] + 7 * d), color, 2, cv2.LINE_AA)
-    _text(img, f"reach: {reach.arm} arm", (8, img.shape[0] - 30), 0.5)
+def _draw_poses(img: np.ndarray, view: View, poses: Poses) -> None:
+    """Each pose as a gripper; without poses (no pitch found), an X on each target.
+
+    A gripper is the axis back from the pinch point, the open jaws (a square at the fixed jaw, the pinch point, and
+    one at the moving jaw, opened past `width`), and a ring at the tool point, green if reached and red with an X if
+    not, with its label.
+    """
+    if not len(poses.points):
+        for target in poses.targets if poses.targets is not None else ():
+            p = view.project(target[None])[0]
+            if _inside(img, p):
+                _cross(img, _pixel(p), STATE_COLORS[BLOCKED])
+        _text(img, f"{poses.arm} arm: no pitch", (8, img.shape[0] - 30), 0.5)
+        return
+    for frame, point, label, ok in zip(poses.frames, poses.points, poses.labels, poses.ok, strict=True):
+        pinch, jaw, axis = frame[:3, 3], frame[:3, 0], frame[:3, 2]
+        moving = pinch - (poses.width + JAW_CLEARANCE_M) * jaw  # the moving jaw opens along -x
+        uv = view.project(np.array([pinch - GRIPPER_BODY_M * axis, pinch, moving, point]))
+        _polyline(img, uv[[0, 1]], GRIPPER_COLOR, 2)
+        _polyline(img, uv[[1, 2]], GRIPPER_COLOR, 2)
+        for corner in uv[[1, 2]]:
+            if _inside(img, corner):
+                q = _pixel(corner)
+                cv2.rectangle(img, (q[0] - 3, q[1] - 3), (q[0] + 3, q[1] + 3), GRIPPER_COLOR, -1)
+        if _inside(img, uv[3]):
+            c = _pixel(uv[3])
+            color = STATE_COLORS[FREE] if ok else STATE_COLORS[BLOCKED]
+            cv2.circle(img, c, 9, color, 2, cv2.LINE_AA)
+            if not ok:
+                _cross(img, c, color)
+            _text(img, label, (c[0] + 10, c[1] + 16), 0.45, GRIPPER_COLOR)
+    pitch = "any pitch" if poses.pitch_deg is None else f"pitch {poses.pitch_deg:+.0f} deg"
+    _text(img, f"{poses.arm} arm, {pitch}", (8, img.shape[0] - 30), 0.5)
+
+
+def _cross(img: np.ndarray, c: tuple[int, int], color) -> None:
+    for d in (-1, 1):
+        cv2.line(img, (c[0] - 7, c[1] - 7 * d), (c[0] + 7, c[1] + 7 * d), color, 2, cv2.LINE_AA)
 
 
 def _draw_table(img: np.ndarray, view: View, table: TableEstimate) -> None:
