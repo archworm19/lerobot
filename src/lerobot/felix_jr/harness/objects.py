@@ -477,3 +477,48 @@ class Poses:
             return "no poses"
         verdict = "all reachable" if self.ok.all() else f"{int(self.ok.sum())}/{len(self.ok)} reachable"
         return f"{verdict}: " + "; ".join(rows)
+
+
+@dataclass(frozen=True)
+class Move:
+    """One command of an `Execution`: joint targets (LeRobot degrees; `gripper.pos` 0-100) for one arm."""
+
+    label: str
+    targets: dict[str, float]
+    timeout: float  # s, to settle
+    settle: bool  # must it settle? (a gripper closing on an object stalls before its target)
+
+
+@dataclass(frozen=True, eq=False)
+class Execution:
+    """What `execute` will run (`execute.prepare_execution`): the moves through `poses`, in order.
+
+    The path through the poses is cut into short straight steps (`steps`, each solved like the poses), so the
+    joint-space moves stay close to the checked lines; gripper actions go at the poses they name.
+    """
+
+    poses: Poses  # the poses the path goes through
+    steps: Poses  # the solved steps along it
+    moves: tuple[Move, ...]
+
+    def describe(self) -> str:
+        """The poses and gripper actions in order, with how many steps lie between."""
+        rows, between = [], 0
+        labels = set(self.poses.labels)
+        for move in self.moves:
+            name = move.label.split(" ")[0]
+            if name in labels or "gripper" in move.label:
+                if between:
+                    rows.append(f"{between} steps")
+                    between = 0
+                rows.append(move.label)
+            else:
+                between += 1
+        return f"{len(self.moves)} moves for the {self.poses.arm} arm: " + ", ".join(rows)
+
+    def lines(self) -> list[str]:
+        """Every move with its targets, for a person to check before it runs."""
+        return [
+            f"{m.label}: " + ", ".join(f"{j.removesuffix('.pos')} {v:+.0f}" for j, v in m.targets.items())
+            for m in self.moves
+        ]

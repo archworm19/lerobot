@@ -19,9 +19,9 @@ from typing import Any
 
 import numpy as np
 
-from .objects import Capture, Focus, Grid, Plan, Points, Poses, Reach, TableEstimate, View
+from .objects import Capture, Execution, Focus, Grid, Plan, Points, Poses, Reach, TableEstimate, View
 
-OBJECT_TYPES = (Capture, View, Grid, TableEstimate, Points, Plan, Focus, Poses, Reach)
+OBJECT_TYPES = (Capture, View, Grid, TableEstimate, Points, Plan, Focus, Poses, Execution, Reach)
 MAX_LOGGED_ELEMENTS = 64  # arrays with more elements are logged by shape only
 
 
@@ -85,7 +85,14 @@ class Workspace:
             logged = {f"arg{i}": self._summarize(a) for i, a in enumerate(args)} | {
                 k: self._summarize(v) for k, v in kwargs.items()
             }
-            self.add(result, getattr(fn, "__name__", repr(fn)), tuple(parents), logged)
+            name = getattr(fn, "__name__", repr(fn))
+            several = (
+                isinstance(result, (list, tuple))
+                and result
+                and all(isinstance(r, OBJECT_TYPES) for r in result)
+            )
+            for one in result if several else [result]:  # a tool that makes several objects records each
+                self.add(one, name, tuple(parents), logged)
         return result
 
     def moved(self) -> None:

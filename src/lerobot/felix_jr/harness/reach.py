@@ -261,7 +261,7 @@ def check_poses(
     points: np.ndarray,
     pitch_deg: float | None = DOWN_DEG,
     width: float = 0.0,
-    across: Sequence[float] | None = VERTICAL,
+    across: Sequence[float] | np.ndarray | None = VERTICAL,
     roll_deg: float | None = None,
     labels: Sequence[str] | None = None,
     starts: int = STARTS,
@@ -294,7 +294,7 @@ def approach_poses(
     width: float = 0.0,
     back: float = 0.05,
     up: float = 0.05,
-    across: Sequence[float] | None = VERTICAL,
+    across: Sequence[float] | np.ndarray | None = VERTICAL,
     step_deg: float = 5.0,
     order: Sequence[str] | None = None,
 ) -> Poses:
@@ -362,7 +362,7 @@ def pitch_ranges(pitches_deg: Sequence[float], reachable: Sequence[bool]) -> lis
     return [(lo, hi) for lo, hi in runs]
 
 
-def _unit(direction: Sequence[float] | None) -> np.ndarray | None:
+def _unit(direction: Sequence[float] | np.ndarray | None) -> np.ndarray | None:
     if direction is None:
         return None
     vector = np.asarray(direction, dtype=np.float64)

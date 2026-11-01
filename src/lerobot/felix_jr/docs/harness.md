@@ -325,17 +325,16 @@ The VLM controls looking, drawing, measuring and replanning. In section 0, the s
 WAA, CaP-Agent0) let the agent zoom, re-render and re-check as it chooses. PIVOT, where the harness fixed all of
 that, did worst. The harness keeps three jobs:
 
-- **No tool moves the robot.** Tools only read what the harness has already captured. The robot moves only at phase
-  boundaries, run by the harness: the **startup scan** (head only) and the **execution of an approved plan** (arm).
-  If the model needs a view the scan didn't give, it asks for one at the end of its turn and the harness fulfils it
-  between turns (later; head-only requests could be approved by policy).
-- **Gating motion.** Nothing moves unless a plan has been previewed and checked (IK, joint limits, workspace,
-  collisions) and then **approved by the user**. Approval by the user is the gate for the first experiments; an
-  automatic gate can come later.
+- **Tools are marked by what they can do to the world** (G): software tools compute from what is recorded; `capture`
+  reads the robot; `scan` moves the head; `execute` moves the arm; `end_session` sends the robot to rest. The
+  model calls any of them, as often as it likes, but the harness runs every call (`api.Harness`, H).
+- **Gating motion.** A tool that moves the head or the arm runs only after a **person approves** it, seeing exactly
+  what will run (for `execute`: every move, already checked for reach and joint jumps). Software tools never wait.
+  Approval by a person is the gate for the first experiments; an automatic gate (policy) can come later.
 - **Freshness.** The world changes outside the model's calls (the arm moves, an object slips). The harness marks
   which results are stale (see C).
 
-## B. State: a DAG of immutable objects
+## B. State: a DAG of immutable objects (the `Workspace`)
 
 A reasoning chain is recorded as an **append-only DAG**. Every object is immutable and has an id, the call that
 made it, and the ids of its parents. Calls take ids as arguments. It is a graph, not a stack: the model goes back
@@ -347,10 +346,13 @@ to an earlier view, compares two plans made from the same grid, and so on.
 | `View` | 2D | `capture_id` + crop rectangle + scale: only a mapping between view pixels and capture pixels, no data |
 | `Grid` | world | the plane `z = h` in the base frame (default `h` = table height), origin, cell size, extent |
 | `Points` | world | xyz + labels (e.g. from `locate`), and the pixels they came from |
-| `Plan` | world | primitives with xyz / yaw, and the checks on them (IK per waypoint, `segment_check` states per leg) |
+| `Plan` | world | a path through waypoints and its `segment_check` states per leg (free / unknown / blocked against depth) |
 | `TableEstimate` | world | table height `h` in the base frame, inlier count, spread, tilt, inlier mask (see below) |
+| `Focus` | 2D | the views the model chose to work in, and why |
+| `Poses` | world | gripper poses solved for one arm: tool point, pitch, jaw direction, the joints, reachable or by how much it misses; for a sweep, the pitch ranges per target (J) |
+| `Execution` | world | the exact moves `execute` would send through some `Poses`: joint targets every ~1 cm and gripper actions |
 
-Geometry lives in the world frame (`Grid`, `Points`, `Plan`). Images live in `Capture` / `View`. So drawing an
+Geometry lives in the world frame (`Grid`, `Points`, `Plan`, `Poses`). Images live in `Capture` / `View`. So drawing an
 object in any view is projection plus the view's pixel mapping, and nothing is recomputed when the model zooms.
 
 The robot's model and its current state (`XleRobotModel`, `q`, gripper opening, holding) are *not* in the DAG: they
@@ -394,7 +396,8 @@ surface gives two peaks (take the one with the most points within reach, warn ab
 Every object inherits the capture(s) it was derived from. After the **world** may have changed (an executed plan:
 the arm moved, an object may have moved), objects derived from older captures are **stale**. Moving only the head
 does not stale anything: the scan's captures all share one epoch, and a grid or point found in one capture is still
-true in the others. `preview` and execute refuse stale inputs; renders of stale objects are labeled stale.
+true in the others. A new `scan` also starts an epoch (the scene may have changed since the last one).
+`prepare_execution` and `execute` refuse stale inputs; `is_stale` and the history mark them.
 
 ## D. Rendering is one pure function
 
@@ -411,24 +414,30 @@ model's context holds ids, small renders and summaries, never arrays. The DAG is
 
 ## F. Long-term tools and scratch space (hybrid)
 
-- **Long-term tools:** a Python library over the objects in B (`observe`, `zoom`, `grid`, `locate`, `preview`,
-  `render`).
+- **Long-term tools:** a Python library over the objects in B, registered in `api.py` (G).
 - **Scratch space:** the model works in a **persistent Python session**. Variables hold references to DAG
   objects. Functions the model writes in a session are scratch tools.
 - **Promotion:** every executed cell and every object created is logged with its parents. Scratch tools that keep
   being useful across sessions are copied into the library. The logs are also replayable, and are the kind of
   trace Guava / WAA trained small models on.
-- Execute is outside the session: the model cannot move the robot from its own code.
+- The model's code moves the robot only through the hardware tools, which the runner gates (A). This is a guardrail,
+  not a boundary: a snippet could import the robot client directly. Before unattended runs, the robot server must
+  enforce approval itself, and the model should act through tool calls only (`open_issues.md`, 15).
 
 ## G. Types of tool calls
 
-| Type | Tools | Changes the world? |
-|---|---|---|
-| look | `zoom`, `focus` (choose captures from the scan) | no (the scan is a harness phase, not a tool) |
-| analyze | `grid`, `locate`, (later) `segment` | no |
-| render | `render` | no |
-| plan | `preview` | no |
-| act | execute (user-approved) | yes → stales older captures |
+Every tool is in `harness/api.py`, registered with `@tool(effect=...)`; its docstring is the model's documentation
+(`api.describe_tools()` builds the tool list for the prompt from signatures and docstrings).
+
+| Effect | Tools | Asks a person? | Changes the world? |
+|---|---|---|---|
+| software | `full_view`, `zoom`, `focus`, `table_height`, `make_grid`, `locate_pixels`, `locate_grid`, `check_path`, `render`, `contact_sheet`, `check_poses`, `approach_poses`, `prepare_execution`; queries `history`, `lineage`, `is_stale` | no | no |
+| sense | `capture` (a new frame from where the head is) | no | no |
+| move head | `scan` | yes | no (a new scan starts an epoch: the scene may have changed) |
+| move arm | `execute` | yes, showing every move | yes → everything older is stale |
+| end | `end_session` (the robot goes to rest) | no | ends the session |
+
+The policy (`api.SAFE`) decides which effects ask; `UNATTENDED` is for tests against fake hardware.
 
 ## H. Interfaces (layers)
 
@@ -438,23 +447,28 @@ intermediate objects are what the VLM works with inside that loop.
 1. **Objects (data):** `Capture`, `View`, `Grid`, `TableEstimate`, `Points`, `Plan` (B). Immutable. They hold
    direct references to the objects they were made from (a `View` holds its `Capture`), so they are usable without
    a workspace.
-2. **Long-term tools (pure functions over objects):** `zoom`, `make_grid`, `table_height`, `locate_pixels`,
-   `locate_grid`, `check_path`, (later) `preview`, and `render`. They are both the library and the VLM's tool API.
-   They know nothing about the DAG.
-3. **Workspace (the session):** the DAG store. `ws.call(fn, *args)` runs any function (a long-term tool or a
-   scratch function the VLM wrote), finds which arguments are workspace objects (its parents), and records the
-   result with an id. It also tracks freshness (C) and writes the log. In the persistent Python session the VLM
-   holds results in variables; the workspace holds the ids, parents and log.
-4. **Agent loop (`propose_plan`):**
+2. **Implementations (pure functions over objects):** `tools.py` (views, table, grids, points, paths), `render.py`,
+   `reach.py` (`check_poses`, `approach_poses`, J), `execute.py` (`prepare_execution`; `run_execution` drives the
+   robot client), `scan.py`. They know nothing about the DAG.
+3. **Workspace:** the DAG store. `ws.call(fn, *args)` runs any function (a tool or a scratch function the VLM
+   wrote), finds which arguments are workspace objects (its parents), and records the result with an id (a tool
+   that makes several objects, like `scan`, records each). It also tracks freshness (C) and writes the log.
+4. **Tools and runner (`api.py`):** the registered tools (G) and `Harness`, which runs every call: asks a person when
+   the policy says so (showing what will run), records the result in the workspace, starts a new epoch after a move
+   of the arm, and logs every call, queries and refusals included. `Harness.run_snippet` runs the model's Python in
+   a namespace holding the tools (each going through the runner), the recorded objects by id and by the names the
+   model gave them, and numpy; names persist from one snippet to the next.
+5. **Agent loop (`propose_plan`):**
    ```python
    def propose_plan(task: str, capture: Capture, vlm: VLM, budget: int) -> Episode:
        # ws = Workspace(); add the capture; send the task + render(full view) to the VLM
-       # loop: the VLM writes a cell -> run it in the session -> return text summaries + any new renders
-       # until the VLM calls submit(plan) or the budget runs out
+       # loop: the VLM writes a cell -> Harness.run_snippet -> return text summaries + any new renders
+       # until the VLM calls end_session or the budget runs out
        # Episode = (plan | None, workspace, transcript)
    ```
    The VLM only chooses the next cell. The harness owns everything else.
-5. **Approval:** `render(full view, table, plan)` shown to the user → y / n → execute.
+6. **Approval:** inside the runner, at the hardware call itself (4): the person sees the call and, for `execute`, every
+   move, and answers y / n. A refusal is logged and raised to the model, which can plan again.
 
 Why keep the intermediates rather than only the final plan: the user can render any step of how the model got to
 its plan; Step 3 scores intermediates (`locate` error, reading the grid); and repeated call patterns in the DAG
@@ -469,6 +483,30 @@ from one capture renders correctly in all the others: find the object in one cap
 draw one plan in both. Later: `check_path` against several captures at once (blocked if any sees a collision, free
 only if one sees the space empty), to shrink UNKNOWN.
 
+## J. Reach: where the gripper can go, and at what pitch
+
+Details in the `reach.py` docstring; the choices behind them:
+
+- **The tool point is the midpoint between the open jaws**, where the object's center goes. The pinch frame's origin
+  is the fixed jaw (the moving jaw opens along its -x), so with the jaws `width` apart the tool point is `width / 2`
+  from it. Aiming the pinch point at an object's center would land the fixed jaw on the object.
+- **Pitch, not full orientation.** The SO-101 bends in one vertical plane through the shoulder, so the heading of the
+  gripper follows from the shoulder pan. A pose asks for a position (3), a pitch (the axis' angle above horizontal:
+  -90 down, 0 horizontal) and the jaws across a direction (default vertical: they close horizontally): five
+  constraints on five joints. Asking for a full orientation (six) has no solution for most requests.
+- **Pointing straight down is often out of reach.** On the first experiments (cable1, chapstick1) most waypoints
+  failed only because the wrist cannot bend past +-95 deg at those heights; placo agrees (smoke test). Every one is
+  reachable at some tilt, and some only at -35..-50 deg. So the VLM gives a pitch *range*, preferred end first, and
+  the harness picks the pitch.
+- **`approach_poses` is the composite; `check_poses` the primitive.** `check_poses` solves given points at one pitch.
+  `approach_poses` sweeps the pitch from the preferred end and, at each pitch and for each target (an object to take,
+  where it goes), solves the target, derives the points `back` along the gripper axis and `up` from the *solved*
+  pose (the axis depends on the heading, which is known only after solving), and solves those. It keeps a pitch
+  that works for every target, one step in from the edge, or says which pitches each target would need. What the
+  poses mean (a pick, a place) stays with the model.
+- **One pose at a time has no lookahead.** Pointing down with the jaws free, the roll is nearly free and drifts from
+  pose to pose; `prepare_execution` pins it (`open_issues.md`, 7). Solving the whole path at once would fix it.
+
 
 # 2. Experiments
 
@@ -476,23 +514,22 @@ only if one sees the space empty), to shrink UNKNOWN.
 
 An episode runs in phases:
 
-0. **Scan (harness):** the head moves through fixed poses (3 tilts x 3 pans); each pose gives a capture with its
-   `table_height`; the model gets one **contact sheet** of all captures. Nothing else moves the head.
+0. **Scan (`scan`, approved by a person):** the head moves through fixed poses (3 tilts x 3 pans); each pose gives a
+   capture with its `table_height`; the model gets one **contact sheet** of all captures.
 1. **Focus (model):** choose the captures that show the task (`focus`): no motion, a selection recorded in the DAG.
 2. **Analyze (model):** zoom, grids, locate, ... on those views.
-3. **Propose → approve (user) → execute (harness).** Execution starts a new epoch and the next round scans again.
+3. **Poses (model):** `approach_poses(arm, capture, [object, target], pitch range, width)` finds the pitch and the
+   poses (or `check_poses` for hand-picked points); `check_path` checks the path through them against depth;
+   `render` draws both. Repeated until the model is satisfied.
+4. **Execute:** `prepare_execution(poses)` gives the exact moves (checked every ~1 cm); `execute(execution)` runs
+   them after a person approves, seeing every move. It starts a new epoch; the next round captures or scans again.
 
-Within phases 2–3:
-
-1. The model reasons, using the long-term tools and its scratch space, and proposes a **trajectory plan** (a list
-   of primitives: `move_to(xyz, arc_z)`, `grasp(xyz, yaw)`, `place(xyz)`, `open`, `close`, `home`).
-2. `preview(plan)` checks it (IK, joint limits, `segment_check` against depth) and renders it on the image with
-   possible collisions marked.
-3. The **user** looks at the render and decides whether to execute.
-
-Motion: straight-line / arc moves in Cartesian space on pinocchio IK (`XleRobotModel`). No sampling planner and no
-VoxPoser-style cost maps to start (section 0: ReKep's optimizer was its smallest source of error; perception was the
-largest). Upgrade path if clutter defeats straight moves: PyRoki (CPU, used by CaP-X).
+Motion: straight lines in Cartesian space between the poses, cut into ~1 cm steps solved with the IK (J), so the
+joint-space moves stay close to the checked lines. No sampling planner yet: only the tool point is checked against
+depth, not the arm's links, and the move from home to the first pose is unchecked (`open_issues.md`, 3-6). The
+candidate for free-space moves is OMPL (wheels for macOS arm64 and Linux aarch64), once the arm has collision
+geometry. No VoxPoser-style cost maps (section 0: ReKep's optimizer was its smallest source of error; perception was
+the largest).
 
 ## Development plan (bottom-up)
 
@@ -504,7 +541,9 @@ Each layer of 1.H is built and tested before the one above it, so nothing waits 
 3. **Evaluate the renders** against the checks fixed in advance. (Step 3)
 4. **Agent loop.** First version: Claude Code itself is the agent, working in the workspace (as VIA did with Claude
    Code / Codex), so no loop is built until the tools settle. Then `propose_plan` with a VLM API.
-5. **`preview(primitives)` + execute on the robot**, with the user approving each plan.
+5. **Poses + execute on the robot**, with a person approving each move: built (`check_poses`, `approach_poses`,
+   `prepare_execution`, `execute`, `api.Harness`), dry-run and tested against fake hardware; not yet run on the
+   robot (`open_issues.md`, 1).
 
 ## Step 1: objects + render + workspace (offline)
 
@@ -567,16 +606,20 @@ Open questions for Step 2:
 ## Step 2: sample renders
 
 Driven by hand with `harness/scratch/session.py` (usage in its docstring), live from the robot, one session folder
-per experiment (`harness/scratch/sessions/<name>/`, gitignored):
+per experiment (`harness/scratch/sessions/<name>/`, gitignored). Every command runs tools through one
+`api.Harness`, as the VLM will, so the same approval applies:
 
-1. `scan <name>`: the harness phase: the head steps through 3 tilts x 3 pans from home, a capture and its
-   `table_height` at each pose, then back home; a contact sheet and the tilt per pose (desk vs calibration).
+1. `scan <name>`: the `scan` tool (asks first): 3 tilts x 3 pans from home, a capture and its `table_height` at each
+   pose, then back home; a contact sheet and the tilt per pose (desk vs calibration).
 2. `focus <name> capture4 [capture7]`: name the captures to work in (`view`, `view2`, ...): a 2 cm grid in each.
-3. `analyze <name> "<snippet>"`: Python run in the session (tools recorded by the workspace, `show(view, ...)` saves a
-   PNG, assigned names persist). Repeated until the renders answer what we need.
-4. `propose <name> "x,y,z; ..." --views close --decide`: waypoints in cm, checked against depth, drawn in the full
-   view and the named views; approve / reject is logged. Nothing moves.
-5. `log <name>`: names, nodes, parents, staleness, decisions.
+3. `analyze <name> "<snippet>"`: Python run by `Harness.run_snippet` (`show(view, ...)` saves a PNG, assigned names
+   persist). Repeated until the renders answer what we need; `approach_poses` goes here.
+4. `propose <name> "x,y,z; ..." --pitch -90` or `propose <name> --poses pp`: solve (or take) the poses, check the
+   path against depth, draw both in the full view and the named views. Nothing moves.
+5. `execute <name>`: the moves through the proposed poses (a dry run); `--go` runs them after approval, `--step`
+   confirms each move.
+6. `log <name>`: names, nodes, parents, staleness, and every tool call with its effect and outcome.
+7. `tools`: the tool documentation the VLM gets.
 
 On a handful of saved scenes (a clear table, one object, an object next to an obstacle, an object near the edge of
 the depth image), produce renders of the chain from the reasoning example:
@@ -598,17 +641,24 @@ Decide what counts before looking at renders. Checks, roughly in order:
   (b) say which leg of a plan is blocked, (c) say whether a plan will hit something, matching `segment_check`?
   Compare the image alone, image + text summary, and text summary alone (tests 1.E).
 - **Selecting a target (open question from section 0):** ask the model for a target three ways (world grid cell,
-  numbered marks, raw pixel) on the same scenes, and score each by the 3D error after `locate`. Only `observe` /
-  `zoom` / `locate` are needed.
+  numbered marks, raw pixel) on the same scenes, and score each by the 3D error after `locate_pixels`. Only `full_view` /
+  `zoom` / `locate_pixels` are needed.
 
 ## Later
 
-- Run the full flow on the robot with the user approving each plan.
+- Run the full flow on the robot with a person approving each move (after the free-air test, `open_issues.md` 1).
 - `segment(text)` / candidate keypoints (SAM3 or GroundedSAM, as in MOKA / ReKep) when grid + depth fails on object
   edges or grasp points.
 - Grasp yaw from depth (PCA of the object's depth blob), so the model doesn't estimate the angle.
-- Automatic gate replacing user approval.
+- Automatic gate replacing a person's approval, enforced by the robot server (`open_issues.md`, 15).
 
 ## Results
 
-TODO: maybe this should be in a separate file once there are results.
+**cable1 / chapstick1 (2026-10-31), driven by hand.** Task: pick an upright chapstick and put it on the other side
+of a cable (cable1) or past a journal (chapstick1). The scan, table height (72.5-74.2 cm over 9 poses, tilt ~2 deg:
+the desk) and grids worked; `locate_pixels` on a zoomed view gave usable points on the chapstick and the target.
+Planning failed on reach, not perception: every waypoint pointing straight down above ~82 cm, and chapstick1's
+place at any height, was out of reach. The cause is the wrist flex limit (+-95 deg), confirmed against placo
+(`tests/felix_jr/smoke_tests/test_ik_smoke.py`). With the pitch free, every waypoint is reachable; `approach_poses`
+finds -20 deg (from the side) for cable1's pick and place together, and the steepest shared pitch for chapstick1.
+Not yet run on the robot. Open issues from these runs: `open_issues.md`.

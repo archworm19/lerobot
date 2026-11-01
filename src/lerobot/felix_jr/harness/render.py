@@ -7,6 +7,7 @@ language. Images are RGB `uint8`; the capture is never modified.
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import cv2
@@ -27,30 +28,49 @@ JAW_CLEARANCE_M = 0.01  # how much wider than the object the open jaws are drawn
 def render(view: View, *overlays: Any, legend: bool = True) -> np.ndarray:
     """The view's image with `overlays` drawn in order.
 
-    Overlays: `Grid`, `Points`, `Plan`, `TableEstimate`, `Poses`.
+    Overlays: `Grid`, `Points`, `Plan`, `TableEstimate`, `Poses`. Text goes on last, laid out so labels don't cover
+    each other or the markers (`_Layout`). A `Plan` drawn with the `Poses` it goes through names its waypoints after
+    the poses (`up1 (x,y,z)`), and those poses add no second label.
     """
     s = view.capture.scene
     crop = s.color[view.v0 : view.v0 + view.height, view.u0 : view.u0 + view.width]
     interpolation = cv2.INTER_CUBIC if view.scale > 1 else cv2.INTER_AREA
     out = cv2.resize(crop, view.size, interpolation=interpolation)
+    layout = _Layout(out.shape)
+    all_poses = [o for o in overlays if isinstance(o, Poses)]
+    named_by = {id(o): _poses_of(o, all_poses) for o in overlays if isinstance(o, Plan)}
+    labeled_elsewhere = {id(m) for m in named_by.values() if m is not None}
     plans = False
     for overlay in overlays:
         if isinstance(overlay, Grid):
-            _draw_grid(out, view, overlay)
+            _draw_grid(out, view, overlay, layout)
         elif isinstance(overlay, Points):
-            _draw_points(out, view.project(overlay.xyz), [_point_label(n, p) for n, p in _named(overlay)])
+            labels = [_point_label(n, p) for n, p in _named(overlay)]
+            _draw_points(out, view.project(overlay.xyz), labels, layout)
         elif isinstance(overlay, Plan):
-            _draw_plan(out, view, overlay)
+            poses = named_by[id(overlay)]
+            _draw_plan(out, view, overlay, layout, poses.labels if poses is not None else None)
             plans = True
         elif isinstance(overlay, TableEstimate):
-            _draw_table(out, view, overlay)
+            _draw_table(out, view, overlay, layout)
         elif isinstance(overlay, Poses):
-            _draw_poses(out, view, overlay)
+            _draw_poses(out, view, overlay, layout, labeled=id(overlay) not in labeled_elsewhere)
         else:
             raise TypeError(f"cannot render a {type(overlay).__name__}")
     if legend and plans:
+        layout.reserve((0, 0, 90, 60))
+    layout.draw(out)
+    if legend and plans:
         _draw_legend(out)
     return out
+
+
+def _poses_of(plan: Plan, poses: Sequence[Poses]) -> Poses | None:
+    """The poses whose points are `plan`'s waypoints, if any."""
+    for candidate in poses:
+        if candidate.points.shape == plan.waypoints.shape and np.allclose(candidate.points, plan.waypoints):
+            return candidate
+    return None
 
 
 def contact_sheet(
@@ -92,6 +112,122 @@ def _text(
     cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
 
 
+@dataclass
+class _Label:
+    text: str
+    anchor: tuple[int, int]
+    scale: float
+    color: tuple[int, int, int]
+    priority: int  # placed in order: 0 fixed footers, 1 point labels, 2 grid labels, 3 leg lengths
+    required: bool  # placed even if it must overlap (else skipped)
+    gap: int  # px from the anchor to the nearest spot
+    fixed: bool  # at `anchor` exactly (a footer)
+    near_only: bool  # only the spot next to the anchor (grid labels sit where their line leaves the image)
+
+
+class _Layout:
+    """Where the text of one render goes: labels avoid the markers and each other, and are drawn last, on top.
+
+    Overlays draw their marks at once, `block` the markers and queue their text with `label`. `draw` then places the
+    labels by priority, each at the first free spot around its anchor (right, left, above, below, then farther out
+    with a thin leader line back to the anchor). An optional label with no free spot is skipped; a required one is
+    put at its nearest spot anyway.
+    """
+
+    def __init__(self, shape: tuple[int, ...]):
+        self.height, self.width = shape[0], shape[1]
+        self.taken: list[tuple[int, int, int, int]] = []
+        self.labels: list[_Label] = []
+
+    def block(self, c: tuple[int, int], radius: int) -> None:
+        """Keep text off a marker of `radius` px at `c`."""
+        self.taken.append((c[0] - radius, c[1] - radius, c[0] + radius, c[1] + radius))
+
+    def reserve(self, box: tuple[int, int, int, int]) -> None:
+        """Keep text off a box (u0, v0, u1, v1), e.g. the legend."""
+        self.taken.append(box)
+
+    def label(
+        self,
+        text: str,
+        anchor: tuple[int, int],
+        scale: float = 0.5,
+        color: tuple[int, int, int] = (255, 255, 255),
+        priority: int = 1,
+        required: bool = True,
+        gap: int = 8,
+        fixed: bool = False,
+        near_only: bool = False,
+    ) -> None:
+        """Queue `text` near `anchor` (or exactly at it, with `fixed`)."""
+        self.labels.append(_Label(text, anchor, scale, color, priority, required, gap, fixed, near_only))
+
+    def draw(self, img: np.ndarray) -> list[tuple[str, tuple[int, int, int, int]]]:
+        """Place every queued label and draw it; returns each placed label's text and box."""
+        taken = list(self.taken)
+        placed: list[tuple[_Label, tuple[int, int], bool]] = []
+        for label in sorted(
+            self.labels, key=lambda lab: lab.priority
+        ):  # stable: same priority keeps its order
+            (w, h), _ = cv2.getTextSize(label.text, cv2.FONT_HERSHEY_SIMPLEX, label.scale, 1)
+            spots = self._spots(label, w, h)
+            choice = next(((org, far) for org, far in spots if self._free(_box(org, w, h), taken)), None)
+            if choice is None:
+                if not label.required:
+                    continue
+                choice = spots[0]
+            taken.append(_box(choice[0], w, h))
+            placed.append((label, *choice))
+        for label, org, far in placed:
+            if far:  # a leader line from the anchor to the label's nearest corner
+                (w, h), _ = cv2.getTextSize(label.text, cv2.FONT_HERSHEY_SIMPLEX, label.scale, 1)
+                u = int(np.clip(label.anchor[0], org[0], org[0] + w))
+                v = int(np.clip(label.anchor[1], org[1] - h, org[1]))
+                cv2.line(img, label.anchor, (u, v), label.color, 1, cv2.LINE_AA)
+            _text(img, label.text, org, label.scale, label.color)
+        return [
+            (label.text, _box(org, *cv2.getTextSize(label.text, cv2.FONT_HERSHEY_SIMPLEX, label.scale, 1)[0]))
+            for label, org, _ in placed
+        ]
+
+    def _spots(self, label: _Label, w: int, h: int) -> list[tuple[tuple[int, int], bool]]:
+        """Candidate baselines for a `w` x `h` label, nearest first, kept in the image; True if it needs a leader."""
+        x, y = label.anchor
+        if label.fixed:
+            return [((x, y), False)]
+        if label.near_only:
+            return [(self._clip(x + 3, y - 3, w, h), False)]
+        spots = []
+        for ring in (1, 2, 3, 5):
+            g = label.gap * ring
+            for dx, dy in (
+                (g, -g),
+                (g, h // 2),
+                (g, g + h),
+                (-g - w, -g),
+                (-g - w, h // 2),
+                (-g - w, g + h),
+                (-w // 2, -g),
+                (-w // 2, g + h),
+            ):
+                spots.append((self._clip(x + dx, y + dy, w, h), ring > 1))
+        return spots
+
+    def _clip(self, u: int, v: int, w: int, h: int) -> tuple[int, int]:
+        return int(np.clip(u, 0, max(0, self.width - w - 1))), int(
+            np.clip(v, h + 1, max(h + 1, self.height - 2))
+        )
+
+    @staticmethod
+    def _free(box: tuple[int, int, int, int], taken: list[tuple[int, int, int, int]]) -> bool:
+        return not any(box[0] < b[2] and b[0] < box[2] and box[1] < b[3] and b[1] < box[3] for b in taken)
+
+
+def _box(org: tuple[int, int], w: int, h: int) -> tuple[int, int, int, int]:
+    """The box of text drawn at baseline `org`, with a 2 px margin."""
+    return org[0] - 2, org[1] - h - 2, org[0] + w + 2, org[1] + 4
+
+
 def _inside(img: np.ndarray, uv: np.ndarray) -> bool:
     return bool(np.isfinite(uv).all() and 0 <= uv[0] < img.shape[1] and 0 <= uv[1] < img.shape[0])
 
@@ -108,22 +244,17 @@ def _polyline(img: np.ndarray, uv: np.ndarray, color, thickness: int = 1) -> Non
 
 
 def _draw_points(
-    img: np.ndarray, uv: np.ndarray, labels: list[str], color=POINT_COLOR, radius: int = 6
+    img: np.ndarray, uv: np.ndarray, labels: list[str], layout: "_Layout", color=POINT_COLOR, radius: int = 6
 ) -> None:
-    """Numbered markers; points off the image or with NaN pixels are skipped.
-
-    A label goes to the right of its marker, or to the left when it would run off the image.
-    """
+    """Markers, labeled through `layout`; points off the image or with NaN pixels are skipped."""
     for p, label in zip(np.atleast_2d(uv), labels, strict=True):
         if not _inside(img, p):
             continue
         c = _pixel(p)
         cv2.circle(img, c, radius + 2, (0, 0, 0), -1, cv2.LINE_AA)
         cv2.circle(img, c, radius, color, -1, cv2.LINE_AA)
-        (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-        x = c[0] + radius + 3 if c[0] + radius + 3 + w < img.shape[1] else max(0, c[0] - radius - 3 - w)
-        y = int(np.clip(c[1] - radius - 2, h + 2, img.shape[0] - 3))
-        _text(img, label, (x, y))
+        layout.block(c, radius + 2)
+        layout.label(label, c, gap=radius + 4)
 
 
 def _cm_text(value: float) -> str:
@@ -148,7 +279,12 @@ def _point_label(name: str, xyz: np.ndarray) -> str:
 
 
 def _draw_grid(
-    img: np.ndarray, view: View, grid: Grid, label_every: int = 5, occlusion_m: float = 0.02
+    img: np.ndarray,
+    view: View,
+    grid: Grid,
+    layout: "_Layout",
+    label_every: int = 5,
+    occlusion_m: float = 0.02,
 ) -> None:
     """Lines on the plane; every `label_every`-th one is stronger and labeled.
 
@@ -156,12 +292,11 @@ def _draw_grid(
     x lines at their lowest point, y lines at their leftmost.
 
     The plane is hidden where the view's depth shows a surface more than `occlusion_m` in front of it (an object,
-    the arm), so the grid shows only where the plane itself is visible. Labels that would overlap are skipped.
+    the arm), so the grid shows only where the plane itself is visible. Labels that would overlap anything are
+    skipped (`layout`).
     """
     original, minor, major = img.copy(), img.copy(), img.copy()
     samples = max(20, int(4 * max(np.ptp(grid.x_range), np.ptp(grid.y_range)) / grid.cell))
-    labels: list[tuple[str, tuple[int, int]]] = []
-    taken: list[tuple[int, int, int, int]] = []
     for axis, values, span in (("x", grid.xs, grid.y_range), ("y", grid.ys, grid.x_range)):
         t = np.linspace(span[0], span[1], samples)
         for value in values:
@@ -176,14 +311,13 @@ def _draw_grid(
             if not is_major or not on.any():
                 continue
             pick = np.flatnonzero(on)[np.argmax(uv[on, 1]) if axis == "x" else np.argmin(uv[on, 0])]
-            _place_label(img, f"{axis}{_cm_text(value)}", uv[pick], labels, taken)
+            text = f"{axis}{_cm_text(value)}"
+            layout.label(text, _pixel(uv[pick]), 0.4, GRID_COLOR, priority=2, required=False, near_only=True)
     # half-transparent minor lines, stronger major ones: the scene stays visible under the grid
     cv2.addWeighted(minor, 0.35, img, 0.65, 0, dst=img)
     blend = cv2.addWeighted(major, 0.8, img, 0.2, 0)
     changed = (major != original).any(axis=-1)  # only where a major line was drawn
     img[changed] = blend[changed]
-    for text, org in labels:
-        _text(img, text, org, 0.4, GRID_COLOR)
 
 
 def _occluded(view: View, xyz: np.ndarray, margin: float) -> np.ndarray:
@@ -204,29 +338,13 @@ def _occluded(view: View, xyz: np.ndarray, margin: float) -> np.ndarray:
     return hidden
 
 
-def _place_label(
-    img: np.ndarray,
-    text: str,
-    uv: np.ndarray,
-    labels: list[tuple[str, tuple[int, int]]],
-    taken: list[tuple[int, int, int, int]],
+def _draw_plan(
+    img: np.ndarray, view: View, plan: Plan, layout: "_Layout", names: Sequence[str] | None = None
 ) -> None:
-    """Queue `text` near `uv`, kept inside the image, unless it would overlap a label already queued."""
-    (w, h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
-    u = int(np.clip(uv[0] + 3, 0, img.shape[1] - w - 1))
-    v = int(np.clip(uv[1] - 3, h + 1, img.shape[0] - 2))
-    box = (u - 2, v - h - 2, u + w + 2, v + 2)
-    if any(box[0] < b[2] and b[0] < box[2] and box[1] < b[3] and b[1] < box[3] for b in taken):
-        return
-    taken.append(box)
-    labels.append((text, (u, v)))
-
-
-def _draw_plan(img: np.ndarray, view: View, plan: Plan) -> None:
     """The path, with each sample colored by its state.
 
-    A thin white line joins the waypoints; the waypoints are numbered with their xyz in cm and each leg shows its
-    length in cm.
+    A thin white line joins the waypoints; the waypoints are labeled with their name (`names`, default 1, 2, ...) and
+    xyz in cm, and each leg shows its length in cm where there is room.
     """
     uv_way = view.project(plan.waypoints)
     _polyline(img, uv_way, (255, 255, 255))
@@ -239,7 +357,8 @@ def _draw_plan(img: np.ndarray, view: View, plan: Plan) -> None:
     for a, b, length in zip(uv_way[:-1], uv_way[1:], lengths, strict=True):
         mid = (a + b) / 2
         if _inside(img, mid):
-            _text(img, f"{100 * length:.1f} cm", (int(mid[0]) + 4, int(mid[1]) + 14), 0.45)
+            layout.label(f"{100 * length:.1f} cm", _pixel(mid), 0.45, priority=3, required=False)
+    names = list(names) if names is not None else [str(i + 1) for i in range(len(plan.waypoints))]
     # waypoints at the same place (down to a grasp and back up) share one marker: "1,3 (x,y,z)"
     groups: list[list[int]] = []
     for i, p in enumerate(plan.waypoints):
@@ -248,23 +367,23 @@ def _draw_plan(img: np.ndarray, view: View, plan: Plan) -> None:
             groups.append([i])
         else:
             same.append(i)
-    labels = [_point_label(",".join(str(i + 1) for i in g), plan.waypoints[g[0]]) for g in groups]
-    _draw_points(img, uv_way[[g[0] for g in groups]], labels, color=(255, 220, 0))
+    labels = [_point_label(",".join(names[i] for i in g), plan.waypoints[g[0]]) for g in groups]
+    _draw_points(img, uv_way[[g[0] for g in groups]], labels, layout, color=(255, 220, 0))
 
 
-def _draw_poses(img: np.ndarray, view: View, poses: Poses) -> None:
+def _draw_poses(img: np.ndarray, view: View, poses: Poses, layout: "_Layout", labeled: bool = True) -> None:
     """Each pose as a gripper; without poses (no pitch found), an X on each target.
 
     A gripper is the axis back from the pinch point, the open jaws (a square at the fixed jaw, the pinch point, and
     one at the moving jaw, opened past `width`), and a ring at the tool point, green if reached and red with an X if
-    not, with its label.
+    not, with its label (unless `labeled` is False: a plan drawn with them names its waypoints after them).
     """
     if not len(poses.points):
         for target in poses.targets if poses.targets is not None else ():
             p = view.project(target[None])[0]
             if _inside(img, p):
                 _cross(img, _pixel(p), STATE_COLORS[BLOCKED])
-        _text(img, f"{poses.arm} arm: no pitch", (8, img.shape[0] - 30), 0.5)
+        layout.label(f"{poses.arm} arm: no pitch", (8, img.shape[0] - 30), priority=0, fixed=True)
         return
     for frame, point, label, ok in zip(poses.frames, poses.points, poses.labels, poses.ok, strict=True):
         pinch, jaw, axis = frame[:3, 3], frame[:3, 0], frame[:3, 2]
@@ -282,9 +401,11 @@ def _draw_poses(img: np.ndarray, view: View, poses: Poses) -> None:
             cv2.circle(img, c, 9, color, 2, cv2.LINE_AA)
             if not ok:
                 _cross(img, c, color)
-            _text(img, label, (c[0] + 10, c[1] + 16), 0.45, GRIPPER_COLOR)
+            layout.block(c, 11)
+            if labeled:
+                layout.label(label, c, 0.45, GRIPPER_COLOR, gap=13)
     pitch = "any pitch" if poses.pitch_deg is None else f"pitch {poses.pitch_deg:+.0f} deg"
-    _text(img, f"{poses.arm} arm, {pitch}", (8, img.shape[0] - 30), 0.5)
+    layout.label(f"{poses.arm} arm, {pitch}", (8, img.shape[0] - 30), priority=0, fixed=True)
 
 
 def _cross(img: np.ndarray, c: tuple[int, int], color) -> None:
@@ -292,7 +413,7 @@ def _cross(img: np.ndarray, c: tuple[int, int], color) -> None:
         cv2.line(img, (c[0] - 7, c[1] - 7 * d), (c[0] + 7, c[1] + 7 * d), color, 2, cv2.LINE_AA)
 
 
-def _draw_table(img: np.ndarray, view: View, table: TableEstimate) -> None:
+def _draw_table(img: np.ndarray, view: View, table: TableEstimate, layout: "_Layout") -> None:
     """Tint the inlier pixels (only in a view of the estimate's own capture)."""
     if table.capture is not view.capture:
         raise ValueError("a TableEstimate's mask can only be drawn in a view of its own capture")
@@ -300,7 +421,9 @@ def _draw_table(img: np.ndarray, view: View, table: TableEstimate) -> None:
     mask = cv2.resize(mask.astype(np.uint8), view.size, interpolation=cv2.INTER_NEAREST).astype(bool)
     tint = np.array(TABLE_COLOR, dtype=np.float32)
     img[mask] = (0.65 * img[mask] + 0.35 * tint).astype(np.uint8)
-    _text(img, f"table z = {100 * table.h:.1f} cm", (8, img.shape[0] - 10), 0.5, TABLE_COLOR)
+    layout.label(
+        f"table z = {100 * table.h:.1f} cm", (8, img.shape[0] - 10), color=TABLE_COLOR, priority=0, fixed=True
+    )
 
 
 def _draw_legend(img: np.ndarray) -> None:

@@ -1,6 +1,8 @@
 """The harness on a synthetic table scene: a camera 1 m above the root origin, pitched 50 degrees down, looking
 along +x at a table (z = 0.3 m) with a box on it (top at z = 0.4 m, x 0.6..0.75 m, y -0.1..0.1 m)."""
 
+import contextlib
+import dataclasses
 import json
 import pickle
 
@@ -22,6 +24,7 @@ from lerobot.felix_jr.harness import (
     TableEstimate,
     View,
     Workspace,
+    api,
     check_path,
     contact_sheet,
     focus,
@@ -34,6 +37,8 @@ from lerobot.felix_jr.harness import (
     table_height,
     zoom,
 )
+from lerobot.felix_jr.harness.objects import Execution, Move
+from lerobot.felix_jr.harness.render import _Layout, _poses_of
 
 H, W = 120, 160
 FX = FY = 100.0
@@ -239,6 +244,35 @@ class TestRender:
         points = locate_pixels(view, np.array([[80.0, 60.0]]))
         out = render(view, make_grid(view, TABLE_Z), table_height(capture), points, plan)
         assert (out != render(view)).any()
+
+    def test_labels_at_one_spot_do_not_overlap(self):
+        layout = _Layout((200, 300, 3))
+        layout.block((150, 100), 8)
+        for name in (
+            "back1",
+            "up1",
+            "at1",
+        ):  # three points nearly on top of each other, as at a steep approach
+            layout.label(f"{name} (-37.3,9.6,83.0)", (150, 100))
+        layout.label("5.0 cm", (150, 100), priority=3, required=False)
+        boxes = [box for _, box in layout.draw(np.zeros((200, 300, 3), dtype=np.uint8))]
+        assert len(boxes) == 4  # the three required labels, and the optional one found room
+        for i, box in enumerate(boxes):  # clear of each other and of the marker
+            assert _Layout._free(box, boxes[:i] + boxes[i + 1 :] + [(142, 92, 158, 108)])
+
+    def test_an_optional_label_without_room_is_skipped(self):
+        layout = _Layout((40, 60, 3))
+        layout.reserve((0, 0, 60, 40))  # nothing is free
+        layout.label("5.0 cm", (30, 20), required=False)
+        layout.label("1 (0,0,0)", (30, 20))
+        assert [text for text, _ in layout.draw(np.zeros((40, 60, 3), dtype=np.uint8))] == ["1 (0,0,0)"]
+
+    def test_a_plan_is_named_after_its_poses(self, capture):
+        poses = make_poses(capture, (True, True))
+        same = check_path(capture, poses.points)
+        other = check_path(capture, poses.points + 0.01)
+        assert _poses_of(same, [poses]) is poses
+        assert _poses_of(other, [poses]) is None
 
     def test_errors(self, capture):
         with pytest.raises(TypeError):
@@ -511,3 +545,159 @@ def test_reach_pickled_before_pitches_still_loads(capture):
     old.__setstate__(state)
     np.testing.assert_array_equal(old.pitch_error_deg, [1.0, 9.0])
     assert old.pitch_deg == -90.0 and "pointing down" in old.describe()
+
+
+# ---- api: the tools, their effects, approval -------------------------------------------------------------------
+
+
+class FakeRobot:
+    """Just enough of `FelixClient` for capture / execute / end_session, recording what it is asked."""
+
+    def __init__(self, arms: dict):
+        self.arms, self.sent, self.homed = arms, [], 0
+
+    def get_state(self):
+        return {f"{arm}_arm": dict(pose) for arm, pose in self.arms.items()}
+
+    @contextlib.contextmanager
+    def session(self):
+        yield self
+
+    def move_joints(self, targets, **kwargs):
+        self.sent.append(targets)
+        return {"state": "done", "result": {"reached": True}}
+
+    def home(self):
+        self.homed += 1
+        return {"state": "done", "finished_at": 2.0}
+
+    def capture(self, after=None):
+        return "snapshot"
+
+
+REST_POSE = {
+    "shoulder_pan.pos": 0.0,
+    "shoulder_lift.pos": 0.0,
+    "elbow_flex.pos": 0.0,
+    "wrist_flex.pos": 0.0,
+    "wrist_roll.pos": 0.0,
+}
+
+
+def make_execution(capture) -> Execution:
+    capture = dataclasses.replace(capture, arms={"right": dict(REST_POSE)})
+    poses = dataclasses.replace(
+        make_poses(capture, (True, True)), capture=capture, joints=(dict(REST_POSE),) * 2
+    )
+    moves = (
+        Move("start: gripper open", {"gripper.pos": 60.0}, 10.0, True),
+        Move("at1 [65, 0, 42] cm", dict(REST_POSE), 10.0, True),
+        Move("at1: gripper close", {"gripper.pos": 1.0}, 2.0, False),
+    )
+    return Execution(poses, poses, moves)
+
+
+class TestApi:
+    def harness(self, answers=(), robot=None):
+        asked = []
+
+        def ask(spec, preview):
+            asked.append((spec.name, preview))
+            return answers[len(asked) - 1] if len(asked) <= len(answers) else False
+
+        h = api.Harness(ask=ask, client=robot, model=object())
+        return h, asked
+
+    def test_every_tool_has_an_effect_and_documentation(self):
+        hardware = {
+            name: spec.effect for name, spec in api.TOOLS.items() if spec.effect is not api.Effect.SOFTWARE
+        }
+        assert hardware == {
+            "capture": api.Effect.SENSE,
+            "scan": api.Effect.MOVE_HEAD,
+            "execute": api.Effect.MOVE_ARM,
+            "end_session": api.Effect.END,
+        }
+        text = api.describe_tools()
+        for name in api.TOOLS:
+            assert f"\n{name}(" in f"\n{text}"
+        assert "(h:" not in text and "Harness" not in text  # the runner is not the model's to pass
+        assert "full_view(capture: Capture, scale: float = 1.0)  [software]" in text  # short type names
+
+    def test_software_never_asks_and_is_recorded(self, capture):
+        h, asked = self.harness()
+        view = h.call("full_view", capture)
+        grid = h.call("make_grid", view, TABLE_Z)
+        h.call("render", view, grid)
+        assert not asked
+        assert [c["tool"] for c in h.calls] == ["full_view", "make_grid", "render"]
+        assert h.ws.nodes["grid1"].parents == ("view1",) and "image1" in h.ws.nodes
+
+    def test_queries_are_logged_not_recorded(self, capture):
+        h, _ = self.harness()
+        view = h.call("full_view", capture)
+        assert "view1 = full_view(capture1)" in h.call("history")
+        assert h.call("lineage", view) == "capture1 = external()"
+        assert h.call("is_stale", "view1") is False
+        assert len(h.ws.nodes) == 2 and len(h.calls) == 4
+
+    def test_a_move_needs_approval_and_a_refusal_is_logged(self, capture, monkeypatch):
+        monkeypatch.setattr(
+            api._scan, "scan", lambda client, model, tilts, pans: [make_capture(), make_capture()]
+        )
+        h, asked = self.harness(answers=(False, True), robot=FakeRobot({}))
+        with pytest.raises(api.RefusedError):
+            h.call("scan")
+        assert h.calls[-1]["outcome"] == "refused" and not h.ws.nodes
+        captures = h.call("scan", tilts=(0.0,), pans=(10.0, -10.0))
+        assert [n for n, _ in asked] == ["scan", "scan"]
+        assert list(h.ws.nodes) == ["capture1", "capture2"]  # several objects: each recorded
+        assert h.calls[-1]["result"] == ["capture1", "capture2"] and len(captures) == 2
+
+    def test_execute_shows_every_move_runs_them_and_makes_the_past_stale(self, capture, monkeypatch):
+        monkeypatch.setattr(
+            api.Capture, "from_snapshot", classmethod(lambda cls, snap, model: make_capture())
+        )
+        robot = FakeRobot({"right": dict(REST_POSE)})
+        h, asked = self.harness(answers=(True, True), robot=robot)
+        execution = h.ws.call(make_execution, capture)
+        after = h.call("execute", execution)
+        ((name, preview),) = asked
+        assert name == "execute" and "at1: gripper close: gripper +1" in preview
+        assert len(robot.sent) == 3 and robot.homed == 1
+        assert h.ws.is_stale(execution) and not h.ws.is_stale(after)
+        with pytest.raises(ValueError, match="before the arm last moved"):
+            h.call("execute", execution)  # approved again, refused by the tool: it is stale now
+
+    def test_capture_does_not_ask(self, monkeypatch):
+        monkeypatch.setattr(
+            api.Capture, "from_snapshot", classmethod(lambda cls, snap, model: make_capture())
+        )
+        h, asked = self.harness(robot=FakeRobot({}))
+        h.call("capture")
+        assert not asked and "capture1" in h.ws.nodes
+
+    def test_nothing_runs_after_the_session_ends(self, capture):
+        robot = FakeRobot({})
+        h, _ = self.harness(robot=robot)
+        assert h.call("end_session", "done") == "session ended: done" and robot.homed == 1
+        with pytest.raises(api.RefusedError, match="ended"):
+            h.call("full_view", capture)
+
+    def test_snippets_go_through_the_runner_and_keep_their_names(self, capture, monkeypatch):
+        monkeypatch.setattr(api._scan, "scan", lambda client, model, tilts, pans: [make_capture()])
+        h, asked = self.harness(answers=(False,), robot=FakeRobot({}))
+        h.ws.add(capture, "external")
+        made = h.run_snippet("v = full_view(capture1)\ng = make_grid(v, 0.3)\n_tmp = zoom(v, (0, 0, 40, 30))")
+        assert made == ["view1", "grid1", "view2"] and h.names == {"v": "view1", "g": "grid1"}
+        assert "g" in h.namespace()
+        with pytest.raises(api.RefusedError):
+            h.run_snippet("captures = scan()")  # a snippet's move still asks
+        assert [n for n, _ in asked] == ["scan"]
+
+    def test_state_survives_pickling(self, capture):
+        h, _ = self.harness()
+        h.run_snippet("v = full_view(c)", {"c": capture})
+        loaded = api.Harness(model=object())
+        loaded.restore(pickle.loads(pickle.dumps(h.state())))
+        assert loaded.names == {"v": "view1"} and loaded.calls == h.calls
