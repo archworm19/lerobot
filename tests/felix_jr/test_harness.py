@@ -11,12 +11,8 @@ import numpy as np
 import pytest
 
 from lerobot.felix_jr.harness import (
-    BLOCKED,
-    FREE,
-    UNKNOWN,
     Capture,
     Grid,
-    Plan,
     Points,
     Poses,
     Reach,
@@ -25,8 +21,8 @@ from lerobot.felix_jr.harness import (
     View,
     Workspace,
     api,
-    check_path,
     contact_sheet,
+    execute as execute_module,
     focus,
     full_view,
     locate_grid,
@@ -37,8 +33,8 @@ from lerobot.felix_jr.harness import (
     table_height,
     zoom,
 )
-from lerobot.felix_jr.harness.objects import Execution, Move
-from lerobot.felix_jr.harness.render import _Layout, _poses_of
+from lerobot.felix_jr.harness.objects import Execution, Move, Plan, angles_of, orientation
+from lerobot.felix_jr.harness.render import _Layout
 
 H, W = 120, 160
 FX = FY = 100.0
@@ -203,24 +199,6 @@ class TestLocate:
         assert np.isnan(locate_pixels(full_view(capture), np.array([[-5.0, 5.0]])).xyz).all()
 
 
-class TestCheckPath:
-    def test_states(self, capture):
-        over = np.array([[0.5, -0.2, 0.6], [0.9, 0.2, 0.6]])  # in the open, between camera and table
-        through_box = np.array([[0.5, 0.0, BOX_Z - 0.03], [0.9, 0.0, BOX_Z - 0.03]])
-        under = np.array([[0.7, 0.3, 0.1], [0.9, 0.3, 0.1]])  # below the table: hidden
-        assert check_path(capture, over).check.status[0] == FREE
-        assert check_path(capture, through_box).check.status[0] == BLOCKED
-        assert check_path(capture, under).check.status[0] == UNKNOWN
-
-    def test_samples_are_in_the_root_frame(self, capture):
-        wp = np.array([[0.5, 0.0, 0.6], [0.9, 0.0, 0.6], [0.9, 0.2, 0.6]])
-        plan = check_path(capture, wp)
-        np.testing.assert_allclose(plan.check.sample_xyz[0, 0], wp[0], atol=1e-12)
-        np.testing.assert_allclose(plan.check.sample_xyz[1, -1], wp[2], atol=1e-12)
-        with pytest.raises(ValueError):
-            check_path(capture, wp[:1])
-
-
 class TestRender:
     def test_size_and_input_untouched(self, capture):
         view = zoom(full_view(capture), (40, 30, 80, 60))
@@ -240,9 +218,8 @@ class TestRender:
 
     def test_every_overlay_type(self, capture):
         view = full_view(capture)
-        plan = check_path(capture, np.array([[0.5, 0.0, 0.6], [0.9, 0.0, 0.35]]))
         points = locate_pixels(view, np.array([[80.0, 60.0]]))
-        out = render(view, make_grid(view, TABLE_Z), table_height(capture), points, plan)
+        out = render(view, make_grid(view, TABLE_Z), table_height(capture), points, make_poses(capture))
         assert (out != render(view)).any()
 
     def test_labels_at_one_spot_do_not_overlap(self):
@@ -267,18 +244,13 @@ class TestRender:
         layout.label("1 (0,0,0)", (30, 20))
         assert [text for text, _ in layout.draw(np.zeros((40, 60, 3), dtype=np.uint8))] == ["1 (0,0,0)"]
 
-    def test_a_plan_is_named_after_its_poses(self, capture):
-        poses = make_poses(capture, (True, True))
-        same = check_path(capture, poses.points)
-        other = check_path(capture, poses.points + 0.01)
-        assert _poses_of(same, [poses]) is poses
-        assert _poses_of(other, [poses]) is None
-
     def test_errors(self, capture):
         with pytest.raises(TypeError):
             render(full_view(capture), "grid")
         with pytest.raises(ValueError, match="own capture"):
             render(full_view(make_capture()), table_height(capture))
+        with pytest.raises(TypeError):  # legacy plans are not drawn
+            render(full_view(capture), Plan(np.zeros((2, 3)), None, capture, 0.02))  # type: ignore[arg-type]
 
 
 class TestDescribe:
@@ -289,8 +261,6 @@ class TestDescribe:
             "P1: (90.0, 20.0, 30.0) cm"
             in locate_grid(Grid(TABLE_Z, 0.02, (0, 1), (0, 1)), [[0.9, 0.2]]).describe()
         )
-        plan = check_path(capture, np.array([[0.5, 0.0, BOX_Z - 0.03], [0.9, 0.0, BOX_Z - 0.03]]))
-        assert "leg 1->2 (40.0 cm): blocked" in plan.describe()
 
 
 class TestWorkspace:
@@ -329,22 +299,22 @@ class TestWorkspace:
         assert ws.is_stale(view) and ws.is_stale("capture1")
         assert not ws.is_stale(by_hand)  # depends on no capture
         fresh = ws.call(full_view, make_capture())
-        plan = ws.call(check_path, ws["capture2"], np.array([[0.5, 0.0, 0.6], [0.9, 0.0, 0.6]]))
-        assert not ws.is_stale(fresh) and not ws.is_stale(plan)
+        points = ws.call(locate_pixels, fresh, np.array([[80.0, 60.0]]))
+        assert not ws.is_stale(fresh) and not ws.is_stale(points)
         mixed = ws.call(lambda a, b: Points(np.zeros((1, 3)), ("p",)), view, fresh)
         assert ws.is_stale(mixed)  # the oldest capture it depends on wins
 
     def test_log_is_json(self, capture, tmp_path):
         ws = Workspace()
         view = ws.call(full_view, capture)
-        ws.call(check_path, capture, np.array([[0.5, 0.0, 0.6], [0.9, 0.0, 0.6]]))
+        ws.call(locate_grid, Grid(TABLE_Z, 0.02, (0.4, 1.0), (-0.3, 0.3)), np.array([[0.5, 0.0], [0.9, 0.1]]))
         ws.call(render, view)
         ws.save_log(tmp_path / "log.jsonl")
         entries = [json.loads(line) for line in (tmp_path / "log.jsonl").read_text().splitlines()]
-        assert [e["id"] for e in entries] == ["capture1", "view1", "plan1", "image1"]
-        assert entries[2]["args"]["arg1"] == [[0.5, 0.0, 0.6], [0.9, 0.0, 0.6]]
-        assert entries[2]["describe"].startswith("path, 2 waypoints")
-        assert entries[3]["describe"] == f"image {W}x{H}"
+        assert [e["id"] for e in entries] == ["capture1", "view1", "grid1", "points1", "image1"]
+        assert entries[3]["args"]["arg1"] == [[0.5, 0.0], [0.9, 0.1]]
+        assert entries[3]["describe"].startswith("points: P1: (50.0, 0.0, 30.0) cm")
+        assert entries[4]["describe"] == f"image {W}x{H}"
 
     def test_survives_pickling(self, capture):
         ws = Workspace()
@@ -444,22 +414,12 @@ class TestScan:
 DOWN_FRAME = np.column_stack([[0, 1, 0], [1, 0, 0], [0, 0, -1]])  # pinch frame pointing down, jaws along y
 
 
-def make_poses(capture, ok=(True, False), sweep: bool = False) -> Poses:
-    """Two poses from above over the box, jaws 3 cm apart along y (built by hand, no IK); the second unreachable."""
+def make_poses(capture, ok=(True, False)) -> Poses:
+    """Two poses from above over the box, jaws 3 cm apart along y (built by hand, no IK); the second misses."""
     points = np.array([[0.65, 0.0, BOX_Z + 0.02], [0.7, 0.0, BOX_Z + 0.02]])
     frames = np.repeat(np.eye(4)[None], 2, axis=0)
     frames[:, :3, :3] = DOWN_FRAME
     frames[:, :3, 3] = points + 0.015 * DOWN_FRAME[:, 0]  # the fixed jaw, half the width from the tool point
-    extra = {}
-    if sweep:
-        extra = {
-            "targets": points,
-            "requested_deg": (-90.0, -60.0),
-            "reachable_deg": ((-90.0, -70.0),),
-            "target_reachable_deg": (((-90.0, -70.0),), ((-90.0, -60.0),)),
-            "back": 0.05,
-            "up": 0.05,
-        }
     return Poses(
         "right",
         capture,
@@ -469,60 +429,38 @@ def make_poses(capture, ok=(True, False), sweep: bool = False) -> Poses:
         ({}, {}),
         np.array([0.0, 0.03]),
         np.array([0.0, 8.0]),
+        np.array([np.nan, np.nan]),
         np.array([0.0, 0.0]),
+        ((), ("wrist_flex",)),
         np.array(ok),
-        -90.0,
+        ((-90.0, None, 0.0), (-90.0, None, 0.0)),
         0.03,
-        np.array([0.0, 0.0, 1.0]),
-        **extra,
-    )
-
-
-def make_no_pitch(capture) -> Poses:
-    targets = np.array([[0.65, 0.0, BOX_Z + 0.02], [2.0, 0.0, BOX_Z]])
-    empty = np.zeros(0)
-    return Poses(
-        "right",
-        capture,
-        np.zeros((0, 3)),
-        (),
-        np.zeros((0, 4, 4)),
-        (),
-        empty,
-        empty,
-        empty,
-        empty.astype(bool),
-        None,
-        0.03,
-        np.array([0.0, 0.0, 1.0]),
-        targets,
-        (-90.0, -60.0),
-        (),
-        (((-90.0, -60.0),), ()),
-        0.05,
-        0.05,
+        (0.005, 10.0, 10.0),
     )
 
 
 class TestPoses:
     def test_describe(self, capture):
         text = make_poses(capture).describe()
-        assert text.startswith(
-            "right arm pointing down, jaws 3.0 cm apart, jaws closing horizontally: 1/2 reachable"
-        )
-        assert "at1 ok" in text and "at2 unreachable (3.0 cm short, pitch 8 deg off)" in text
-        swept = make_poses(capture, (True, True), sweep=True).describe()
-        assert "every target: -90..-70" in swept and "target 2 (70.0, 0.0, 42.0) cm: -90..-60" in swept
-        assert "back 5.0 cm along the gripper, up 5.0 cm" in swept
-        none = make_no_pitch(capture).describe()
-        assert (
-            none.startswith("no pitch in -90..-60 reaches every target")
-            and "target 2 (200.0, 0.0, 40.0) cm: none" in none
-        )
+        assert text.startswith("right arm, jaws 3.0 cm apart: 1/2 meet their targets: ")
+        assert "at1 ok (pitch -90, heading +0, roll +0)" in text
+        assert "at2 misses (3.0 cm off, pitch 8.0 deg off, at limit: wrist_flex; got pitch -90" in text
+
+    def test_orientation_round_trip(self):
+        for pitch, heading, roll in [
+            (-20.0, -172.0, 0.0),
+            (-70.0, 40.0, 180.0),
+            (10.0, 90.0, -35.0),
+            (-90.0, 0.0, 30.0),
+        ]:
+            rotation = orientation(pitch, heading, roll)
+            np.testing.assert_allclose(rotation.T @ rotation, np.eye(3), atol=1e-12)
+            assert angles_of(rotation, heading) == pytest.approx((pitch, heading, roll), abs=1e-9)
+        np.testing.assert_allclose(orientation(-90.0, 0.0, 0.0), DOWN_FRAME, atol=1e-12)  # jaws along +y
 
     def test_render(self, capture):
         view = full_view(capture)
-        for poses in (make_poses(capture), make_poses(capture, (True, True)), make_no_pitch(capture)):
+        for poses in (make_poses(capture), make_poses(capture, (True, True))):
             assert (render(view, poses) != render(view)).any()
 
     def test_recorded_and_pickled(self, capture):
@@ -535,8 +473,8 @@ class TestPoses:
 
 
 def test_reach_pickled_before_pitches_still_loads(capture):
-    plan = check_path(capture, np.array([[0.5, 0.0, 0.6], [0.9, 0.0, 0.35]]))
-    reach = Reach(plan, "right", ({}, {}), np.zeros(2), np.array([1.0, 9.0]), np.array([True, False]), -90.0)
+    arrays = (np.zeros(2), np.array([1.0, 9.0]), np.array([True, False]))
+    reach = Reach(None, "right", ({}, {}), *arrays, -90.0)  # type: ignore[arg-type]
     state = dict(reach.__dict__)
     state["tilt_deg"] = state.pop("pitch_error_deg")
     del state["pitch_deg"]
@@ -553,8 +491,16 @@ def test_reach_pickled_before_pitches_still_loads(capture):
 class FakeRobot:
     """Just enough of `FelixClient` for capture / execute / end_session, recording what it is asked."""
 
-    def __init__(self, arms: dict):
+    def __init__(self, arms: dict, head: dict | None = None):
         self.arms, self.sent, self.homed = arms, [], 0
+        self.head, self.head_moves = head or {}, []
+
+    def head_state(self):
+        return {name: dict(servo) for name, servo in self.head.items()}
+
+    def head_move(self, name, delta_deg=None, to=None):
+        self.head_moves.append((name, delta_deg))
+        return {"done_at": 3.0}
 
     def get_state(self):
         return {f"{arm}_arm": dict(pose) for arm, pose in self.arms.items()}
@@ -615,6 +561,8 @@ class TestApi:
         assert hardware == {
             "capture": api.Effect.SENSE,
             "scan": api.Effect.MOVE_HEAD,
+            "look_at": api.Effect.MOVE_HEAD,
+            "look_at_pixel": api.Effect.MOVE_HEAD,
             "execute": api.Effect.MOVE_ARM,
             "end_session": api.Effect.END,
         }
@@ -701,3 +649,96 @@ class TestApi:
         loaded = api.Harness(model=object())
         loaded.restore(pickle.loads(pickle.dumps(h.state())))
         assert loaded.names == {"v": "view1"} and loaded.calls == h.calls
+
+
+# ---- looking and the arm's body (on the robot model) ---------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def robot_model():
+    pytest.importorskip("pinocchio")
+    pytest.importorskip("scipy")
+    from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
+
+    return XleRobotModel.from_urdf(
+        head_signs={"head_neck": -1, "head_eyes": 1}, head_refs={"head_neck": 1520, "head_eyes": 1324}
+    )
+
+
+class TestLookAndArm:
+    def test_aim_head_points_the_camera_at_the_target(self, robot_model):
+        from lerobot.felix_jr.harness.look import aim_head
+
+        home = {"head_neck": 1520, "head_eyes": 1324}
+        q = robot_model.joint_vector(None, home)
+        camera = robot_model.camera_pose(q)
+        target = camera[:3, 3] + 0.6 * np.array([-0.6, 0.3, -0.75])  # ahead, to one side and below
+        ticks, off = aim_head(robot_model, home, target)
+        pose = robot_model.camera_pose(robot_model.joint_vector(None, ticks))
+        to_target = (target - pose[:3, 3]) / np.linalg.norm(target - pose[:3, 3])
+        assert (
+            off < 0.5 and np.degrees(np.arccos(pose[:3, 2] @ to_target)) < 1.0
+        )  # whole ticks: within a degree
+        assert ticks != home
+
+    def test_look_at_asks_moves_by_the_solved_deltas_and_captures(self, robot_model, monkeypatch):
+        from lerobot.felix_jr.harness.look import aim_head, head_moves
+
+        monkeypatch.setattr(
+            api.Capture, "from_snapshot", classmethod(lambda cls, snap, model: make_capture())
+        )
+        head = {"head_neck": {"ticks": 1520, "sign": 1}, "head_eyes": {"ticks": 1324, "sign": -1}}
+        robot = FakeRobot({}, head)
+        asked = []
+        h = api.Harness(
+            ask=lambda spec, preview: asked.append(spec.name) or True, client=robot, model=robot_model
+        )
+        target = np.array([0.4, -0.1, 0.5])
+        h.call("look_at", target)
+        goal, _ = aim_head(robot_model, {"head_neck": 1520, "head_eyes": 1324}, target)
+        assert asked == ["look_at"] and dict(robot.head_moves) == pytest.approx(head_moves(head, goal))
+        assert "capture1" in h.ws.nodes
+
+    def test_arm_path_samples_the_first_move_and_the_poses(self, robot_model, capture):
+        execution = make_execution(capture)
+        path = execute_module.arm_path(robot_model, execution, every=1, first_samples=4)
+        assert path.kinds[:4] == ("first move",) * 4 and "at1" in path.kinds
+        assert path.skeletons.shape[1:] == (len(execute_module.SKELETON), 3)
+        assert "4 skeletons along the first move" in path.describe()
+
+    def test_render_without_labels_keeps_only_the_footer(self, capture):
+        view = full_view(capture)
+        poses = make_poses(capture, (True, True))
+        assert (render(view, poses, labels=False) != render(view, poses)).any()
+
+
+class TestGripperAndHeldObject:
+    def flipped(self, capture) -> Poses:
+        """make_poses, with the second pose rolled 180 deg about the gripper axis (the jaws swap sides)."""
+        poses = make_poses(capture, (True, True))
+        frames = poses.frames.copy()
+        frames[1, :3, :3] = frames[1, :3, :3] @ np.diag([-1.0, -1.0, 1.0])
+        return dataclasses.replace(poses, frames=frames)
+
+    def test_the_roll_of_each_pose_is_in_the_text(self, capture):
+        text = self.flipped(capture).describe()
+        assert "at1 ok (pitch -90, heading +0, roll +0); at2 ok (pitch -90, heading +0, roll +180)" in text
+
+    def test_a_held_object_turns_with_the_jaws(self, capture):
+        kept = execute_module.held_object(make_poses(capture, (True, True)), 0.06, "at1", "at2")
+        assert kept.tilt_deg.tolist() == pytest.approx([0.0, 0.0])
+        np.testing.assert_allclose(
+            kept.centers[0], make_poses(capture).points[0], atol=1e-12
+        )  # at the tool point
+        turned = execute_module.held_object(self.flipped(capture), 0.06, "at1", "at2", axis=(1.0, 0.0, 0.0))
+        assert turned.tilt_deg.tolist() == pytest.approx([0.0, 180.0])
+        assert "tilt from how it was grasped (deg): at1 0, at2 180" in turned.describe()
+        with pytest.raises(ValueError):
+            execute_module.held_object(make_poses(capture), 0.06, grasp="at2", release="at1")
+
+    def test_the_glyph_shows_which_jaw_is_which(self, capture):
+        view = full_view(capture)
+        poses = make_poses(capture, (True, True))
+        assert (render(view, poses) != render(view, self.flipped(capture))).any()
+        with pytest.raises(TypeError):  # a held object is described, not drawn
+            render(view, poses, execute_module.held_object(poses, 0.06, "at1", "at2"))

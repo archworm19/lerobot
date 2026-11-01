@@ -19,9 +19,35 @@ from typing import Any
 
 import numpy as np
 
-from .objects import Capture, Execution, Focus, Grid, Plan, Points, Poses, Reach, TableEstimate, View
+from .objects import (
+    ArmPath,
+    Capture,
+    Execution,
+    Focus,
+    Grid,
+    HeldObject,
+    Plan,
+    Points,
+    Poses,
+    Reach,
+    TableEstimate,
+    View,
+)
 
-OBJECT_TYPES = (Capture, View, Grid, TableEstimate, Points, Plan, Focus, Poses, Execution, Reach)
+OBJECT_TYPES = (
+    Capture,
+    View,
+    Grid,
+    TableEstimate,
+    Points,
+    Focus,
+    Poses,
+    Execution,
+    ArmPath,
+    HeldObject,
+    Plan,
+    Reach,
+)
 MAX_LOGGED_ELEMENTS = 64  # arrays with more elements are logged by shape only
 
 

@@ -33,8 +33,8 @@ import numpy as np
 
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 
-from . import execute as _execute, reach as _reach, scan as _scan, tools as _tools
-from .objects import Capture, Execution, Focus, Grid, Plan, Points, Poses, TableEstimate, View
+from . import execute as _execute, look as _look, reach as _reach, scan as _scan, tools as _tools
+from .objects import ArmPath, Capture, Execution, Focus, Grid, HeldObject, Points, Poses, TableEstimate, View
 from .render import contact_sheet as _contact_sheet, render as _render  # the package re-exports `render`
 from .workspace import Workspace
 
@@ -310,19 +310,19 @@ def locate_grid(h: Harness, grid: Grid, xy: np.ndarray, labels: Sequence[str] | 
 
 
 @tool(Effect.SOFTWARE)
-def check_path(h: Harness, capture: Capture, waypoints: np.ndarray, radius: float = 0.02) -> Plan:
-    """Check the straight legs between root-frame `waypoints` (M, 3, meters) against the capture's depth.
+def render(h: Harness, view: View, *overlays: Any, labels: bool = True) -> np.ndarray:
+    """The view's image with the overlays you choose drawn on it.
 
-    Each sample along a leg is free, unknown (no depth there) or blocked, for a ball of `radius` meters around it.
-    The object being grasped or carried counts as blocked too.
+    Overlays: `Grid`, `Points`, `TableEstimate`, `Poses`, `ArmPath`.
+
+    `Poses` are drawn as the path through them (in order) and a gripper at each: two fingers on a base, the fixed one
+    pink and the moving one cyan (a roll of the wrist shows as the colors swapping sides), a ring at the tool point
+    (green if reachable, red with an X if not) and the label with its xyz in cm. `ArmPath` draws the arm's body
+    (from `arm_path`). The text of `Poses` gives each pose's wrist roll; `held_object` says what a roll does to what
+    the gripper carries. Pick what helps: poses alone, poses with the arm, a grid to read positions;
+    `labels=False` drops the text. Nothing is checked against the depth: judge clearance from the images.
     """
-    return _tools.check_path(capture, waypoints, radius)
-
-
-@tool(Effect.SOFTWARE)
-def render(h: Harness, view: View, *overlays: Any, legend: bool = True) -> np.ndarray:
-    """The view's image with overlays drawn on it: `Grid`, `Points`, `Plan`, `TableEstimate`, `Poses`."""
-    return _render(view, *overlays, legend=legend)
+    return _render(view, *overlays, labels=labels)
 
 
 @tool(Effect.SOFTWARE)
@@ -337,72 +337,114 @@ def contact_sheet(
 
 
 @tool(Effect.SOFTWARE)
-def check_poses(
+def solve_pose(
     h: Harness,
     arm: str,
     capture: Capture,
-    points: np.ndarray,
-    pitch_deg: float | None = -90.0,
+    position: Sequence[float],
+    pitch_deg: float,
+    heading_deg: float | None = None,
+    roll_deg: float | None = 0.0,
     width: float = 0.0,
-    across: Sequence[float] | None = (0.0, 0.0, 1.0),
+    position_tol: float = 0.005,
+    heading_tol_deg: float = 10.0,
+    roll_tol_deg: float = 10.0,
+    init: Any = None,
+    label: str = "1",
 ) -> Poses:
-    """Can `arm` ("left" / "right") put its tool point at each of `points` (M, 3, root frame, m)?
+    """Solve the joints that put `arm`'s gripper at a pose: one constrained optimization, from `init`.
 
-    The tool point is the midpoint between the jaws, opened `width` meters (the object's width: its center goes
-    there). `pitch_deg` is the gripper axis' angle above horizontal: -90 straight down, 0 horizontal (None: any).
-    The jaws close across `across` (default vertical: they close horizontally; None: any). The heading is not a
-    choice: it follows from the shoulder. `capture` gives the robot's pose. Returns the solved poses: per pose,
-    reachable or by how much it misses.
+    The target: `position` (root frame, m) for the tool point, the midpoint between the jaws opened `width` m (the
+    object's center goes there); `pitch_deg`, the gripper axis above horizontal (-90 straight down, 0 horizontal);
+    `heading_deg`, the axis' direction about the vertical (deg from +x toward +y; None: free); `roll_deg`, the jaws
+    about the axis (0: jaws horizontal; 180: the jaws swapped; None: free, but then it can land anywhere: for a path,
+    hold the roll the first pose got, or the wrist swings between poses). The pitch is held; position, heading and
+    roll are met as closely as the arm allows, each weighted by its tolerance. On this arm the heading follows from
+    the position (the gripper stays in the vertical plane through the shoulder), so leave it free unless it matters.
+    `init`: where the solver starts (joints in LeRobot degrees, or `Poses` to continue from its last pose; default the
+    arm's pose in the capture). It decides the branch (elbow up or down). One local solve, no retries: if a pose
+    misses, the description says by how much and which joints are at a limit; try another pitch, start or tolerance.
     """
-    return _reach.check_poses(h.model, arm, capture, points, pitch_deg, width, across)
-
-
-@tool(Effect.SOFTWARE)
-def approach_poses(
-    h: Harness,
-    arm: str,
-    capture: Capture,
-    targets: np.ndarray,
-    pitch_deg: Sequence[float] = (0.0, -90.0),
-    width: float = 0.0,
-    back: float = 0.05,
-    up: float = 0.05,
-    across: Sequence[float] | None = (0.0, 0.0, 1.0),
-    order: Sequence[str] | None = None,
-) -> Poses:
-    """Find one gripper pitch at which `arm` reaches every target (K, 3, root frame, m), from either side.
-
-    Each target is reached from `back` m along the gripper axis and left `up` m above (or the reverse). Use it to
-    pick and place: targets = [where the object is, where it goes].
-
-    `pitch_deg` = (preferred, other end): (0, -90) prefers from the side, (-90, 0) from above. `width`, `across` as
-    in `check_poses`. Returns poses labeled back1, at1, up1 (in along the axis, leave upward), then up2, at2, back2
-    for the next target (come down, leave along the axis); `order` changes the order. If no pitch works for all,
-    there are no poses, and the description says which pitches each target would need.
-    """
-    return _reach.approach_poses(
-        h.model, arm, capture, targets, pitch_deg, width, back, up, across, order=order
+    return _reach.solve_pose(
+        h.model,
+        arm,
+        capture,
+        np.asarray(position, dtype=np.float64),
+        pitch_deg,
+        heading_deg,
+        roll_deg,
+        width,
+        position_tol,
+        heading_tol_deg,
+        roll_tol_deg,
+        init,
+        label,
     )
 
 
 @tool(Effect.SOFTWARE)
-def prepare_execution(
-    h: Harness,
-    poses: Poses,
-    grip: Mapping[str, str] | None = None,
-    gripper_open: float = 60.0,
-    roll_deg: float | None = None,
-) -> Execution:
-    """The exact moves `execute` would send to go through `poses` in order, checked step by step (~1 cm apart).
+def join_poses(h: Harness, *poses: Poses) -> Poses:
+    """Solved poses as one path, in the order given (same arm, capture and jaw width; labels unique).
 
-    `grip` maps a pose label (or "start") to "open" / "close"; by default for `approach_poses` output: open at the
-    start, close at at1, open at at2. Fails if a step is out of reach or a joint would jump. Nothing moves.
+    Draw it with `render`, run it with `prepare_execution`.
+    """
+    return _reach.join_poses(*poses)
+
+
+@tool(Effect.SOFTWARE)
+def approach(
+    h: Harness, pose: Poses, back: float = 0.05, up: float = 0.05, order: Sequence[str] = ("back", "at", "up")
+) -> Poses:
+    """A solved pose with its neighbors: `back` m back along the gripper axis and `up` m above, same orientation.
+
+    In `order`. For a pose labeled "pick": "pick.back", "pick", "pick.up". ("back", "at", "up") goes in along the axis and leaves
+    upward (a pick); ("up", "at", "back") comes down and leaves along the axis (a place).
+    """
+    return _reach.approach(h.model, pose, back, up, order)
+
+
+@tool(Effect.SOFTWARE)
+def prepare_execution(
+    h: Harness, poses: Poses, grip: Mapping[str, str] | None = None, gripper_open: float = 60.0
+) -> Execution:
+    """The exact moves `execute` would send to go through `poses` in order, solved every ~1 cm.
+
+    `grip` maps a pose label (or "start", before the first move) to "open" / "close", e.g. {"start": "open",
+    "pick": "close", "place": "open"}. Fails if a step misses or a joint would jump. Nothing moves.
     """
     if h.ws.is_stale(poses):
         raise ValueError(
             "these poses come from before the arm last moved: capture again and solve them again"
         )
-    return _execute.prepare_execution(h.model, poses, grip, gripper_open, roll_deg=roll_deg)
+    return _execute.prepare_execution(h.model, poses, grip, gripper_open)
+
+
+@tool(Effect.SOFTWARE)
+def arm_path(h: Harness, execution: Execution, every: int = 5) -> ArmPath:
+    """The arm's body along an execution, to draw with `render`: where the shoulder, elbow, wrist and gripper go.
+
+    Skeletons along the first move (from where the capture saw the arm, all joints at once: it arcs, it does not
+    follow a straight line), at every pose, and at every `every`-th step between. The return home is not included.
+    """
+    return _execute.arm_path(h.model, execution, every)
+
+
+@tool(Effect.SOFTWARE)
+def held_object(
+    h: Harness,
+    poses: Poses,
+    length: float,
+    grasp: str,
+    release: str,
+    axis: Sequence[float] = (0.0, 0.0, 1.0),
+) -> HeldObject:
+    """How the object taken at pose `grasp` and let go at `release` turns while the jaws carry it (text, not drawn).
+
+    `length` (m) and `axis` (its long direction at the grasp; default vertical, an upright object) describe it; its
+    center is the tool point. The description gives its tilt from how it was grasped at each pose: a roll of the
+    wrist on the way turns it, and could put it down tilted or upside down.
+    """
+    return _execute.held_object(poses, length, grasp, release, axis)
 
 
 # ---- software: the history ----------------------------------------------------------------------------------------
@@ -456,6 +498,38 @@ def scan(
     if any(isinstance(node.obj, Capture) for node in h.ws.nodes.values()):
         h.ws.moved()
     return _scan.scan(h.client, h.model, tilts, pans)
+
+
+@tool(Effect.MOVE_HEAD)
+def look_at(h: Harness, target: Any) -> Capture:
+    """Point the camera at `target` (a root-frame xyz in m, or `Points`: the first one) and take a capture there.
+
+    The head turns and tilts to center the target, within its limits (if it cannot, the target is off center in the
+    new capture: `render` it with the point to see). Moves the head: a person approves first.
+    """
+    xyz = target.xyz[0] if isinstance(target, Points) else np.asarray(target, dtype=np.float64)
+    if not np.isfinite(xyz).all():
+        raise ValueError("the target has no position (no depth there?): use look_at_pixel")
+    state = h.client.head_state()
+    goal, _ = _look.aim_head(h.model, {name: int(state[name]["ticks"]) for name in state}, xyz)
+    done_at = None
+    for name, delta_deg in _look.head_moves(state, goal).items():
+        done_at = h.client.head_move(name, delta_deg=delta_deg)["done_at"]
+    return Capture.from_snapshot(h.client.capture(after=done_at), h.model)
+
+
+@tool(Effect.MOVE_HEAD)
+def look_at_pixel(h: Harness, view: View, uv: Sequence[float], distance: float = 0.5) -> Capture:
+    """Point the camera at what `view` shows at pixel `uv` and take a capture there.
+
+    The target is the depth at that pixel, or, where there is none, the point `distance` m along its viewing ray.
+    Moves the head: a person approves first.
+    """
+    xyz = _tools.locate_pixels(view, np.array([uv], dtype=np.float64)).xyz[0]
+    if not np.isfinite(xyz).all():
+        origin, direction = view.capture.rays(view.to_capture(np.asarray(uv, dtype=np.float64)))
+        xyz = origin + distance * direction
+    return look_at(h, xyz)
 
 
 @tool(Effect.MOVE_ARM)

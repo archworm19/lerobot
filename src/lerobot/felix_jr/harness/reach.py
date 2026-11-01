@@ -1,43 +1,35 @@
-"""Where can an arm put its gripper? Inverse kinematics on the calibrated model: `check_poses` and `approach_poses`.
+"""Where can an arm put its gripper? One constrained optimization per pose (`solve_pose`); the rest is built on it.
 
-**The tool point** is the midpoint between the open jaws, where the object's center goes. The pinch frame's origin is
-where the closed jaws meet, which is the fixed jaw; the moving jaw opens along the pinch frame's -x. So with the jaws
-`width` apart (the object's width), the tool point is `width / 2` along -x from the pinch point. Width 0 makes it the
-pinch point itself.
+The reasoning is in `docs/harness.md` (1.J). In short:
 
-**Pitch** is the gripper axis' angle above the horizontal (the axis is the pinch frame's +z, from the wrist to the
-fingertips): -90 deg points straight down, 0 is horizontal, positive points up. The SO-101 keeps its gripper in the
-vertical plane through the shoulder (lift, elbow and wrist flex all bend in it), so the heading follows from the
-shoulder pan and is not a choice. **Jaws across** a direction makes the jaw axis (pinch x) perpendicular to it: across
-the vertical (the default), the jaws close horizontally, as an upright object or one lying on the table needs.
+**The target** is a full gripper pose in the root frame: the tool point's position, and an orientation given as
+pitch, heading and roll (`orientation`). The **tool point** is the midpoint between the open jaws, where the object's
+center goes: the pinch frame's origin is where the closed jaws meet, the fixed jaw, and the moving jaw opens along
+the pinch frame's -x, so with the jaws `width` apart the tool point is `width / 2` along -x from the pinch point.
+**Pitch** is the gripper axis' angle above horizontal (the axis is the pinch frame's +z, wrist to fingertips): -90
+straight down, 0 horizontal. **Heading** is the axis' direction about the vertical (deg from root +x toward +y).
+**Roll** turns the jaws about the axis: 0 has the jaw axis horizontal, along heading + 90 deg; 180 swaps the jaws.
 
-**Solve.** `scipy.optimize.least_squares` puts the tool point on the target, the axis at the pitch and the jaws
-across the direction: 3 + 1 + 1 constraints on the arm's five joints, so the solutions are isolated (elbow up or
-down, ...), except pointing straight down, where the jaws are horizontal at any roll. A weak pull picks among them:
-toward the previous solution, so consecutive poses get nearby joints; for a first pose, with none to follow, also
-toward the neutral pose (all joints at 0, mid-range; the roll at 0 keeps the wrist camera's cable slack). Within the
-tolerances, staying close wins over a tighter fit (the pinch axis is not quite the roll axis, so the roll trades a
-fraction of a degree of pitch; chasing it would swing the roll between neighbors). When that pulled solve misses,
-a second one from there with the pulls almost off meets the constraints, so the pulls never cost reach at the edge
-of the workspace. After the seed, random starts (without the pulls, which would steer them all alike) run only
-until one works. The Jacobian is analytic (`XleRobotModel.frame_jacobian`). A pose is reachable when the solution is
-within
-`POSITION_TOL_M`, `PITCH_TOL_DEG` and `JAW_TOL_DEG`, inside the joint limits (times `LIMIT_MARGIN`; the wrist roll
-within `MAX_ROLL_DEG`).
+**The optimization.** The arm has five joints, a pose has six numbers. So one of them is held and the rest are traded
+off: the pitch is held (it decides reach on this arm, the wrist flex limit, and it is the approach's main choice);
+position, heading and roll are soft, each weighted by a tolerance the caller gives (an error of one tolerance costs one
+unit). Joint limits are hard bounds. `scipy.optimize.least_squares` solves it once, locally, from `init` (default: the
+arm's pose in the capture): the start decides the branch (elbow up or down, the jaws on one side or the other). There
+are no restarts and no sweeps: trying another pitch, start or tolerance is the caller's (the model's) choice.
 
-**The tools.** `check_poses` solves explicit points at one pitch, each from the last solution. `approach_poses` finds
-the pitch for a set of targets (say, an object to take and where it goes): it sweeps the pitch range from the
-preferred end and, at each pitch and for each target, solves the target, derives the points `back` along the gripper
-axis and `up` from the solved pose, and solves those. The first pitch where every target works and whose neighbors
-in the sweep work too (a margin from the edge of what the arm can do) wins; failing that, the first that works at
-all. The derived points depend on the solved heading, so they are checked at every candidate pitch, not after.
+Holding the pitch is a stiff penalty (`PITCH_TOL_DEG`) checked afterwards, not an equality constraint: pointing
+straight down, an equality on the pitch pins both horizontal components of the axis and its gradient vanishes, which
+equality-constrained solvers handle badly. The stiff penalty is the same constraint in the limit and stays smooth.
 
-This checks poses only: not the motion between them, and not collisions of the arm's links.
+On this arm the heading mostly follows from the position: the gripper stays in the vertical plane through the
+shoulder. So by default the heading is free; asking for one that the position does not allow trades position for it.
+
+This checks poses only: not the motion between them, and not collisions (`docs/harness.md`, 1.K).
 """
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -46,39 +38,22 @@ from lerobot.felix_jr.calibration.views import MAX_ROLL_DEG, arm_pose_degrees
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, arm_joint, pinch_frame
 from lerobot.utils.import_utils import _scipy_available, require_package
 
-from .objects import Capture, Poses
+from .objects import VERTICAL_COS, Capture, Poses, angles_of
 
 if TYPE_CHECKING or _scipy_available:
     from scipy.optimize import least_squares
 
 LIMIT_MARGIN = 0.95  # joints stay within this fraction of their URDF limits
+PITCH_TOL_DEG = 0.1  # the held pitch: its penalty scale
+PITCH_OK_DEG = 0.5  # and how far off it may end up and still count as held
 POSITION_TOL_M = 0.005
-PITCH_TOL_DEG = 5.0
-JAW_TOL_DEG = 5.0
-DOWN_DEG = -90.0
-VERTICAL = (0.0, 0.0, 1.0)
-FULL_RANGE_DEG = (-90.0, 30.0)  # swept to say which pitches would work, after `approach_poses` finds none
-# Residual scales: how far from its goal each term may be before it costs as much as one unit.
-POSITION_SCALE_M = 0.002
-AXIS_SCALE = 0.02  # on differences of unit vectors (about 1 degree)
-SEED_SCALE_RAD = 3.0  # a weak pull toward the previous solution
-NEUTRAL_SCALE_RAD = 3.0  # a weak pull toward the neutral pose
-POLISH_PULL = 0.01  # the pulls' weight in the second, polishing solve
-STARTS = 12  # solves per pose at most: the seed, then random ones until one works (6 missed ~5%)
+ROLL_TOL_DEG = 10.0
+AT_LIMIT_RAD = 1e-3  # a joint this close to a bound is reported as at its limit
 
 
-def pitch_of(pose: np.ndarray) -> float:
-    """The pitch (deg) of a pinch frame pose's +z axis: -90 = straight down, 0 = horizontal."""
-    axis = pose[:3, 2]
-    return float(np.degrees(np.arctan2(axis[2], np.hypot(axis[0], axis[1]))))
-
-
-def heading_of(pose: np.ndarray) -> float:
-    """The heading (deg, root frame, from +x toward +y) of a pinch frame pose's +z axis; NaN when it is vertical."""
-    axis = pose[:3, 2]
-    return (
-        float(np.degrees(np.arctan2(axis[1], axis[0]))) if np.hypot(axis[0], axis[1]) > 1e-3 else float("nan")
-    )
+def _angle(a: float, b: float) -> float:
+    """|a - b| in degrees, wrapped to 0..180."""
+    return float(abs((a - b + 180.0) % 360.0 - 180.0))
 
 
 @dataclass(frozen=True)
@@ -89,15 +64,15 @@ class Solution:
     joints: dict[str, float]  # the same in LeRobot degrees
     frame: np.ndarray  # (4, 4) X_root_pinch
     position_error_m: float  # of the tool point
-    pitch_error_deg: float  # from the requested pitch (0 when none was requested)
-    jaw_error_deg: (
-        float  # how far the jaws are from across the requested direction (0 when none was requested)
-    )
-    ok: bool
+    pitch_error_deg: float
+    heading_error_deg: float  # NaN if the heading was free
+    roll_error_deg: float  # NaN if the roll was free
+    at_limit: tuple[str, ...]  # joints that ended at a bound
+    ok: bool  # within every tolerance, the pitch held
 
 
 class ArmIK:
-    """The solver for one arm: its joints, their limits, the tool point and the rest of the robot's pose."""
+    """One arm's joints, their limits, the tool point and the rest of the robot's pose; solves one pose at a time."""
 
     def __init__(
         self,
@@ -106,18 +81,12 @@ class ArmIK:
         arms: Mapping[str, Mapping[str, float]],
         head_ticks: Mapping[str, int] | None = None,
         width: float = 0.0,
-        roll_deg: float | None = None,
     ):
-        """Set up `arm`'s solver.
-
-        `arms` / `head_ticks` fix the rest of the robot and give the first seed; `width` places the tool point (see
-        the module docstring); `roll_deg` pins the wrist roll.
-        """
+        """`arms` / `head_ticks` fix the rest of the robot and give the default start; `width` places the tool point."""
         require_package("scipy", extra="felix_jr")
         self.model, self.arm = model, arm
-        self.joint_names = [arm_joint(arm, j) for j in SO101_JOINTS]
-        self.index = [model.q_index(j) for j in self.joint_names]
-        limits = [model.limits(j) for j in self.joint_names]
+        self.index = [model.q_index(arm_joint(arm, j)) for j in SO101_JOINTS]
+        limits = [model.limits(arm_joint(arm, j)) for j in SO101_JOINTS]
         self.lower = np.array([lo for lo, _ in limits]) * LIMIT_MARGIN
         self.upper = np.array([hi for _, hi in limits]) * LIMIT_MARGIN
         roll = SO101_JOINTS.index(
@@ -125,330 +94,287 @@ class ArmIK:
         )  # the wrist camera's cable limits the roll (as in calibration)
         self.lower[roll] = max(self.lower[roll], -np.radians(MAX_ROLL_DEG))
         self.upper[roll] = min(self.upper[roll], np.radians(MAX_ROLL_DEG))
-        if roll_deg is not None:
-            pinned = np.radians(roll_deg)
-            if not self.lower[roll] <= pinned <= self.upper[roll]:
-                raise ValueError(f"roll {roll_deg} deg is outside the allowed wrist roll")
-            self.lower[roll] = max(self.lower[roll], pinned - 1e-4)
-            self.upper[roll] = min(self.upper[roll], pinned + 1e-4)
         self.offset = np.array([-width / 2, 0.0, 0.0])  # the tool point in the pinch frame
         self.q = model.joint_vector(arms, head_ticks or None)
         self.start = self.clip(self.q[self.index])
-        self.neutral = self.clip(np.zeros(len(SO101_JOINTS)))
 
     def clip(self, x: np.ndarray) -> np.ndarray:
-        """`x` strictly inside the limits (least_squares wants a strictly feasible start)."""
+        """`x` strictly inside the bounds (least_squares wants a strictly feasible start)."""
         return np.clip(x, self.lower + 1e-6, self.upper - 1e-6)
+
+    def radians(self, joints: Mapping[str, float]) -> np.ndarray:
+        """LeRobot degrees -> the five joints in radians, inside the bounds."""
+        return self.clip(np.radians([joints[f"{j}.pos"] for j in SO101_JOINTS]))
 
     def frame(self, x: np.ndarray) -> np.ndarray:
         """X_root_pinch with the arm's joints at `x`."""
-        return self.model.frame_pose(pinch_frame(self.arm), self._q(x))
+        q = self.q.copy()
+        q[self.index] = x
+        return self.model.frame_pose(pinch_frame(self.arm), q)
 
     def tool(self, frame: np.ndarray) -> np.ndarray:
         """The tool point of a pinch frame."""
         return frame[:3, :3] @ self.offset + frame[:3, 3]
 
-    def _q(self, x: np.ndarray) -> np.ndarray:
-        q = self.q.copy()
-        q[self.index] = x
-        return q
-
     def solve(
         self,
-        target: np.ndarray,
-        pitch_deg: float | None,
-        seed: np.ndarray,
-        rng: np.random.Generator,
-        starts: int = STARTS,
-        across: np.ndarray | None = None,
-        neutral: bool = False,
+        position: np.ndarray,
+        pitch_deg: float,
+        heading_deg: float | None = None,
+        roll_deg: float | None = None,
+        position_tol: float = POSITION_TOL_M,
+        heading_tol_deg: float = 10.0,
+        roll_tol_deg: float = ROLL_TOL_DEG,
+        init: np.ndarray | None = None,
     ) -> Solution:
-        """The first of up to `starts` solves that works, from `seed` then random ones; else the closest.
+        """The pose closest to the target from `init` (see the module docstring); None heading / roll: free."""
+        position = np.asarray(position, dtype=np.float64)
+        pitch = np.radians(pitch_deg)
+        vertical = abs(np.cos(pitch)) < VERTICAL_COS
+        heading_goal = None if heading_deg is None else np.radians(heading_deg)
+        roll_goal = None if roll_deg is None else np.radians(roll_deg)
 
-        The tool point at `target`, the axis at `pitch_deg` (None: any), the jaws across `across` (a unit vector;
-        None: any). The seeded solve stays near `seed`, and with `neutral` (for a first pose, with no previous one
-        to follow) near the neutral pose too.
-        """
-        to_neutral = 1.0 if neutral else 0.0
-        pitch = None if pitch_deg is None else np.radians(pitch_deg)
-        n = len(SO101_JOINTS)
+        def residuals(x: np.ndarray) -> np.ndarray:
+            frame = self.frame(x)
+            rotation, axis = frame[:3, :3], frame[:3, 2]
+            horizontal = np.hypot(axis[0], axis[1])
+            direction = axis[:2] / horizontal if horizontal > 1e-9 else np.array([1.0, 0.0])
+            rows = [(self.tool(frame) - position) / position_tol]
+            # the held pitch: the axis vs the nearest axis at that pitch (same heading); smooth, even at -90
+            goal = np.array([*(np.cos(pitch) * direction), np.sin(pitch)])
+            rows.append((axis - goal) / np.radians(PITCH_TOL_DEG))
+            if heading_goal is not None and not vertical:
+                wanted = np.array([np.cos(heading_goal), np.sin(heading_goal)])
+                rows.append(np.cos(pitch) * (direction - wanted) / np.radians(heading_tol_deg))
+            if roll_goal is not None:
+                if vertical:  # heading and roll are one angle: the jaws' direction is set by both
+                    reference = heading_goal if heading_goal is not None else 0.0
+                else:
+                    reference = np.arctan2(direction[1], direction[0])
+                level = np.array([-np.sin(reference), np.cos(reference), 0.0])
+                roll = np.arctan2(rotation[:, 0] @ np.cross(axis, level), rotation[:, 0] @ level)
+                rows.append(
+                    np.array([np.cos(roll) - np.cos(roll_goal), np.sin(roll) - np.sin(roll_goal)])
+                    / np.radians(roll_tol_deg)
+                )
+            return np.concatenate(rows)
 
-        def terms(x: np.ndarray, pull: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
-            frame, jacobian = self.model.frame_jacobian(pinch_frame(self.arm), self._q(x), self.joint_names)
-            rotation, linear, angular = frame[:3, :3], jacobian[:3], jacobian[3:]
-            lever = rotation @ self.offset
-            rows = [(frame[:3, 3] + lever - target) / POSITION_SCALE_M]
-            jac = [(linear + np.cross(angular.T, lever).T) / POSITION_SCALE_M]
-            if (
-                pitch is not None
-            ):  # the axis vs the nearest axis at `pitch` (same heading): smooth, even at -90
-                axis = rotation[:, 2]
-                d_axis = np.cross(angular.T, axis).T
-                horizontal = np.hypot(axis[0], axis[1])
-                heading = axis[:2] / horizontal if horizontal > 1e-9 else np.array([1.0, 0.0])
-                rows.append((axis - np.array([*(np.cos(pitch) * heading), np.sin(pitch)])) / AXIS_SCALE)
-                d_goal = np.zeros((3, 3))
-                if horizontal > 1e-9:
-                    d_goal[:2, :2] = np.cos(pitch) * (np.eye(2) - np.outer(heading, heading)) / horizontal
-                jac.append((np.eye(3) - d_goal) @ d_axis / AXIS_SCALE)
-            if across is not None:
-                jaw = rotation[:, 0]
-                rows.append(np.array([jaw @ across]) / AXIS_SCALE)
-                jac.append((across @ np.cross(angular.T, jaw).T)[None] / AXIS_SCALE)
-            rows += [
-                pull * (x - seed) / SEED_SCALE_RAD,
-                to_neutral * pull * (x - self.neutral) / NEUTRAL_SCALE_RAD,
-            ]
-            jac += [pull * np.eye(n) / SEED_SCALE_RAD, to_neutral * pull * np.eye(n) / NEUTRAL_SCALE_RAD]
-            return np.concatenate(rows), np.vstack(jac)
-
-        best: tuple[float, Solution] | None = None
-
-        def run(x0: np.ndarray, pull: float) -> Any:
-            return least_squares(
-                lambda x: terms(x, pull)[0],
-                self.clip(x0),
-                jac=lambda x: terms(x, pull)[1],
-                bounds=(self.lower, self.upper),
-                max_nfev=200,
-            )
-
-        for start in range(starts):
-            if start == 0:
-                # from the seed, with the pulls: within the tolerances, staying close beats a tighter fit
-                result = run(seed, 1.0)
-                solution = self._solution(result.x, target, pitch_deg, across)
-                if solution.ok:
-                    return solution
-                result = run(
-                    result.x, POLISH_PULL
-                )  # else polish: nearly without the pulls, to meet the constraints
-            else:  # random starts look for any solution: pulls toward the seed or neutral would steer them all alike
-                result = run(np.asarray(rng.uniform(self.lower, self.upper)), POLISH_PULL)
-            solution = self._solution(result.x, target, pitch_deg, across)
-            if solution.ok:  # the first that works: from the seed when it can, so neighbors stay close
-                return solution
-            if best is None or result.cost < best[0]:
-                best = (result.cost, solution)
-        assert best is not None
-        return best[1]
+        start = self.clip(self.start if init is None else init)
+        result = least_squares(residuals, start, jac="2-point", bounds=(self.lower, self.upper), max_nfev=400)
+        return self._solution(
+            result.x, position, pitch_deg, heading_deg, roll_deg, position_tol, heading_tol_deg, roll_tol_deg
+        )
 
     def _solution(
-        self, x: np.ndarray, target: np.ndarray, pitch_deg: float | None, across: np.ndarray | None
+        self,
+        x: np.ndarray,
+        position: np.ndarray,
+        pitch_deg: float,
+        heading_deg: float | None,
+        roll_deg: float | None,
+        position_tol: float,
+        heading_tol_deg: float,
+        roll_tol_deg: float,
     ) -> Solution:
         frame = self.frame(x)
-        error = float(np.linalg.norm(self.tool(frame) - target))
-        pitch_error = 0.0 if pitch_deg is None else abs(pitch_of(frame) - pitch_deg)
-        jaw_error = (
-            0.0 if across is None else float(np.degrees(np.arcsin(min(1.0, abs(frame[:3, 0] @ across)))))
+        pitch, heading, roll = angles_of(frame[:3, :3], heading_deg if heading_deg is not None else 0.0)
+        error = float(np.linalg.norm(self.tool(frame) - position))
+        pitch_error = abs(pitch - pitch_deg)
+        vertical = abs(np.cos(np.radians(pitch_deg))) < VERTICAL_COS
+        heading_error = float("nan") if heading_deg is None or vertical else _angle(heading, heading_deg)
+        roll_error = float("nan") if roll_deg is None else _angle(roll, roll_deg)
+        q = self.q.copy()
+        q[self.index] = x
+        names = [
+            j
+            for j, v, lo, hi in zip(SO101_JOINTS, x, self.lower, self.upper, strict=True)
+            if min(v - lo, hi - v) < AT_LIMIT_RAD
+        ]
+        ok = (
+            error <= position_tol
+            and pitch_error <= PITCH_OK_DEG
+            and not heading_error > heading_tol_deg
+            and not roll_error > roll_tol_deg
         )
-        joints = arm_pose_degrees(self.model, self.arm, self._q(x))
         return Solution(
             x=x,
-            joints={k: v for k, v in joints.items() if k != "gripper.pos"},
+            joints={k: v for k, v in arm_pose_degrees(self.model, self.arm, q).items() if k != "gripper.pos"},
             frame=frame,
             position_error_m=error,
             pitch_error_deg=pitch_error,
-            jaw_error_deg=jaw_error,
-            ok=error <= POSITION_TOL_M and pitch_error <= PITCH_TOL_DEG and jaw_error <= JAW_TOL_DEG,
+            heading_error_deg=heading_error,
+            roll_error_deg=roll_error,
+            at_limit=tuple(names),
+            ok=bool(ok),
         )
 
 
-def check_poses(
+def solve_pose(
     model: XleRobotModel,
     arm: str,
     capture: Capture,
-    points: np.ndarray,
-    pitch_deg: float | None = DOWN_DEG,
+    position: np.ndarray,
+    pitch_deg: float,
+    heading_deg: float | None = None,
+    roll_deg: float | None = 0.0,
     width: float = 0.0,
-    across: Sequence[float] | np.ndarray | None = VERTICAL,
-    roll_deg: float | None = None,
-    labels: Sequence[str] | None = None,
-    starts: int = STARTS,
-    rng_seed: int = 0,
+    position_tol: float = POSITION_TOL_M,
+    heading_tol_deg: float = 10.0,
+    roll_tol_deg: float = ROLL_TOL_DEG,
+    init: Mapping[str, float] | Poses | None = None,
+    label: str = "1",
 ) -> Poses:
-    """Solve `arm` for the tool point at each of `points` (M, 3), at `pitch_deg`, each pose seeded by the last.
+    """Solve one pose (see the module docstring) and return it as `Poses` of one.
 
-    `capture` fixes the rest of the robot and seeds the first pose; `roll_deg` pins the wrist roll.
+    `init` is the start: joints in LeRobot degrees, or `Poses` (its last pose's joints); default the arm's pose in
+    `capture`.
     """
-    points = np.atleast_2d(np.asarray(points, dtype=np.float64))
-    ik = ArmIK(model, arm, capture.arms, capture.head_ticks, width, roll_deg)
-    jaws = _unit(across)
-    rng = np.random.default_rng(rng_seed)
-    previous, solutions = ik.start, []
-    for i, point in enumerate(points):
-        solution = ik.solve(point, pitch_deg, previous, rng, starts, jaws, neutral=i == 0)
-        solutions.append(solution)
-        if solution.ok:
-            previous = solution.x
-    names = tuple(labels) if labels is not None else tuple(str(i + 1) for i in range(len(points)))
-    return _poses(arm, capture, points, names, solutions, pitch_deg, width, jaws)
+    ik = ArmIK(model, arm, capture.arms, capture.head_ticks, width)
+    start = None
+    if isinstance(init, Poses):
+        start = ik.radians(init.joints[-1])
+    elif init is not None:
+        start = ik.radians(init)
+    solution = ik.solve(
+        position, pitch_deg, heading_deg, roll_deg, position_tol, heading_tol_deg, roll_tol_deg, start
+    )
+    target = (float(pitch_deg), heading_deg, roll_deg)
+    return _poses(
+        arm,
+        capture,
+        width,
+        [np.asarray(position, dtype=np.float64)],
+        [label],
+        [solution],
+        [target],
+        (position_tol, heading_tol_deg, roll_tol_deg),
+    )
 
 
-def approach_poses(
+def join_poses(*parts: Poses) -> Poses:
+    """Several `Poses` (same arm, capture and jaw width) as one path, in the order given; labels must be unique."""
+    if not parts:
+        raise ValueError("nothing to join")
+    first = parts[0]
+    for part in parts[1:]:
+        if part.arm != first.arm or part.capture is not first.capture or part.width != first.width:
+            raise ValueError("only poses of the same arm, capture and jaw width can be joined")
+    labels = tuple(label for part in parts for label in part.labels)
+    if len(set(labels)) != len(labels):
+        raise ValueError(f"labels repeat: {labels}")
+    return Poses(
+        first.arm,
+        first.capture,
+        np.vstack([p.points for p in parts]),
+        labels,
+        np.concatenate([p.frames for p in parts]),
+        tuple(j for p in parts for j in p.joints),
+        np.concatenate([p.position_error_m for p in parts]),
+        np.concatenate([p.pitch_error_deg for p in parts]),
+        np.concatenate([p.heading_error_deg for p in parts]),
+        np.concatenate([p.roll_error_deg for p in parts]),
+        tuple(a for p in parts for a in p.at_limit),
+        np.concatenate([p.ok for p in parts]),
+        tuple(t for p in parts for t in p.targets),
+        first.width,
+        first.tolerances,
+    )
+
+
+def approach(
     model: XleRobotModel,
-    arm: str,
-    capture: Capture,
-    targets: np.ndarray,
-    pitch_deg: Sequence[float] = (0.0, -90.0),
-    width: float = 0.0,
+    pose: Poses,
     back: float = 0.05,
     up: float = 0.05,
-    across: Sequence[float] | np.ndarray | None = VERTICAL,
-    step_deg: float = 5.0,
-    order: Sequence[str] | None = None,
+    order: Sequence[str] = ("back", "at", "up"),
 ) -> Poses:
-    """Find one pitch at which `arm` reaches every target, from `back` along the gripper axis and `up` above.
+    """The pose's neighbors: `back` m back along its gripper axis and `up` m above, at the same orientation.
 
-    See the module docstring. `pitch_deg` is (preferred end, other end). Each target k gives the poses `back{k}`,
-    `at{k}`, `up{k}`. `order` lists them as the path goes; by default the first target is entered along the axis
-    and left upward (`back1, at1, up1`) and the others are entered from above and left along the axis
-    (`up2, at2, back2`): a pick and its places.
+    `pose` is a solved single pose (its label L); the result has poses "L.back", "L" and "L.up" in `order` (e.g.
+    ("up", "at", "back") to come down and leave along the axis), each solved from the pose's own joints.
     """
-    targets = np.atleast_2d(np.asarray(targets, dtype=np.float64))
-    ik = ArmIK(model, arm, capture.arms, capture.head_ticks, width)
-    jaws = _unit(across)
-    rng = np.random.default_rng(0)
-    requested = (float(pitch_deg[0]), float(pitch_deg[1]))
-    pitches = _sweep_grid(requested, step_deg)
-    found = _sweep(ik, targets, pitches, back, up, jaws, rng)
-    every = [all(s is not None for s in row) for row in found]
-    chosen = _choose(every)
-    if chosen is None:  # say which pitches would work
-        pitches = _sweep_grid(FULL_RANGE_DEG, step_deg)
-        found = _sweep(ik, targets, pitches, back, up, jaws, rng)
-        every = [all(s is not None for s in row) for row in found]
-    sweep: dict[str, Any] = {
-        "targets": targets,
-        "requested_deg": requested,
-        "reachable_deg": _runs(pitches, every),
-        "target_reachable_deg": tuple(
-            _runs(pitches, [row[k] is not None for row in found]) for k in range(len(targets))
-        ),
-        "back": back,
-        "up": up,
-    }
-    if chosen is None:
-        return _poses(arm, capture, np.zeros((0, 3)), (), [], None, width, jaws, **sweep)
-    by_label: dict[str, tuple[np.ndarray, Solution]] = {}
-    for k, poses in enumerate(found[chosen], start=1):
-        assert poses is not None
-        for role, pose in zip(("back", "at", "up"), poses, strict=True):
-            by_label[f"{role}{k}"] = pose
-    if order is None:
-        order = ["back1", "at1", "up1"]
-        for k in range(2, len(targets) + 1):
-            order += [f"up{k}", f"at{k}", f"back{k}"]
-    unknown = [label for label in order if label not in by_label]
-    if unknown:
-        raise ValueError(f"unknown poses {unknown}; have {sorted(by_label)}")
-    points = np.array([by_label[label][0] for label in order])
-    solutions = [by_label[label][1] for label in order]
-    return _poses(arm, capture, points, tuple(order), solutions, float(pitches[chosen]), width, jaws, **sweep)
+    if len(pose.labels) != 1:
+        raise ValueError("approach takes one solved pose")
+    label, frame = pose.labels[0], pose.frames[0]
+    ik = ArmIK(model, pose.arm, pose.capture.arms, pose.capture.head_ticks, pose.width)
+    tool = ik.tool(frame)
+    pitch, heading, roll = angles_of(frame[:3, :3])
+    points = {"back": tool - back * frame[:3, 2], "at": tool, "up": tool + np.array([0.0, 0.0, up])}
+    names = {"back": f"{label}.back", "at": label, "up": f"{label}.up"}
+    position_tol, _, roll_tol = pose.tolerances
+    start = ik.radians(pose.joints[0])
+    parts = []
+    for key in order:
+        if key == "at":
+            parts.append(pose)
+            continue
+        solution = ik.solve(points[key], pitch, heading, roll, position_tol, 10.0, roll_tol, start)
+        parts.append(
+            _poses(
+                pose.arm,
+                pose.capture,
+                pose.width,
+                [points[key]],
+                [names[key]],
+                [solution],
+                [(pitch, heading, roll)],
+                pose.tolerances,
+            )
+        )
+    return join_poses(*parts)
 
 
-def pitch_ranges(pitches_deg: Sequence[float], reachable: Sequence[bool]) -> list[tuple[float, float]]:
-    """The reachable pitches as (low, high) runs of consecutive ones."""
-    order = np.argsort(pitches_deg)
-    runs: list[list[float]] = []
-    last_ok = False
-    for i in order:
-        if reachable[i]:
-            if last_ok:
-                runs[-1][1] = float(pitches_deg[i])
-            else:
-                runs.append([float(pitches_deg[i]), float(pitches_deg[i])])
-        last_ok = bool(reachable[i])
-    return [(lo, hi) for lo, hi in runs]
+def solve_path(model: XleRobotModel, poses: Poses, points: np.ndarray, marks: Sequence[int]) -> Poses:
+    """Solve `points` (the path through `poses` cut into steps; pose i is at `points[marks[i]]`) in order.
 
-
-def _unit(direction: Sequence[float] | np.ndarray | None) -> np.ndarray | None:
-    if direction is None:
-        return None
-    vector = np.asarray(direction, dtype=np.float64)
-    return vector / np.linalg.norm(vector)
+    Each step starts from the last one's joints; its pitch and roll are interpolated between the poses it lies
+    between (as they were achieved), its heading is free (`execute.prepare_execution`).
+    """
+    ik = ArmIK(model, poses.arm, poses.capture.arms, poses.capture.head_ticks, poses.width)
+    position_tol, heading_tol, roll_tol = poses.tolerances
+    achieved = [angles_of(f[:3, :3]) for f in poses.frames]
+    start, solutions, targets = ik.radians(poses.joints[0]), [], []
+    for i, point in enumerate(points):
+        k = next(k for k, m in enumerate(marks) if i <= m)
+        a, b = achieved[max(k - 1, 0)], achieved[k]
+        t = 1.0 if k == 0 else (i - marks[k - 1]) / (marks[k] - marks[k - 1])
+        pitch = a[0] + t * (b[0] - a[0])
+        roll = a[2] + t * ((b[2] - a[2] + 180.0) % 360.0 - 180.0)
+        solution = ik.solve(point, pitch, None, roll, position_tol, heading_tol, roll_tol, start)
+        solutions.append(solution)
+        targets.append((pitch, None, roll))
+        if solution.ok:
+            start = solution.x
+    labels = [str(i + 1) for i in range(len(points))]
+    return _poses(
+        poses.arm, poses.capture, poses.width, list(points), labels, solutions, targets, poses.tolerances
+    )
 
 
 def _poses(
     arm: str,
     capture: Capture,
-    points: np.ndarray,
-    labels: tuple[str, ...],
-    solutions: Sequence[Solution],
-    pitch_deg: float | None,
     width: float,
-    across: np.ndarray | None,
-    **sweep: Any,
+    points: Sequence[np.ndarray],
+    labels: Sequence[str],
+    solutions: Sequence[Solution],
+    targets: Sequence[tuple[float, float | None, float | None]],
+    tolerances: tuple[float, float, float],
 ) -> Poses:
     return Poses(
         arm,
         capture,
-        points,
-        labels,
+        np.array(points, dtype=np.float64).reshape(-1, 3),
+        tuple(labels),
         np.array([s.frame for s in solutions]).reshape(-1, 4, 4),
         tuple(s.joints for s in solutions),
         np.array([s.position_error_m for s in solutions]),
         np.array([s.pitch_error_deg for s in solutions]),
-        np.array([s.jaw_error_deg for s in solutions]),
+        np.array([s.heading_error_deg for s in solutions]),
+        np.array([s.roll_error_deg for s in solutions]),
+        tuple(s.at_limit for s in solutions),
         np.array([s.ok for s in solutions], dtype=bool),
-        pitch_deg,
+        tuple(targets),
         width,
-        across,
-        **sweep,
+        tolerances,
     )
-
-
-def _sweep_grid(span: tuple[float, float], step: float) -> np.ndarray:
-    """From `span[0]` toward `span[1]` (inclusive) every `step`."""
-    first, last = span
-    n = int(np.floor(abs(last - first) / step + 1e-9))
-    return first + np.sign(last - first or 1.0) * step * np.arange(n + 1)
-
-
-PoseSet = list[tuple[np.ndarray, Solution]]  # (point, solution) for back, at, up
-
-
-def _sweep(
-    ik: ArmIK,
-    targets: np.ndarray,
-    pitches: np.ndarray,
-    back: float,
-    up: float,
-    across: np.ndarray | None,
-    rng: np.random.Generator,
-) -> list[list[PoseSet | None]]:
-    """Per pitch, per target: its three poses, or None. Each target's solves are seeded by its last success."""
-    # TODO: solve the pitches in parallel. They are independent apart from the warm start, which the random starts
-    # stand in for. Options: a process pool (each worker loads its own `XleRobotModel` from the URDF, rather than
-    # pickling one), or batched solves on all pitches x starts at once.
-    seeds = [ik.start] * len(targets)
-    first = [True] * len(targets)
-    found: list[list[PoseSet | None]] = []
-    for pitch in pitches:
-        row: list[PoseSet | None] = []
-        for k, target in enumerate(targets):
-            at = ik.solve(target, float(pitch), seeds[k], rng, STARTS, across, neutral=first[k])
-            poses: PoseSet | None = None
-            if at.ok:
-                tool = ik.tool(at.frame)
-                derived = (tool - back * at.frame[:3, 2], tool + np.array([0.0, 0.0, up]))
-                others = [ik.solve(point, float(pitch), at.x, rng, STARTS, across) for point in derived]
-                if all(s.ok for s in others):
-                    poses = [(derived[0], others[0]), (target, at), (derived[1], others[1])]
-                seeds[k], first[k] = at.x, False
-            row.append(poses)
-        found.append(row)
-    return found
-
-
-def _choose(reachable: Sequence[bool]) -> int | None:
-    """The first reachable index whose neighbors are reachable too (or lie outside the sweep); else the first one."""
-    n = len(reachable)
-    for i, ok in enumerate(reachable):
-        if ok and all(reachable[j] for j in (i - 1, i + 1) if 0 <= j < n):
-            return i
-    return next((i for i, ok in enumerate(reachable) if ok), None)
-
-
-def _runs(pitches: np.ndarray, reachable: Sequence[bool]) -> tuple[tuple[float, float], ...]:
-    return tuple(pitch_ranges(list(pitches), reachable))

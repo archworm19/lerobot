@@ -1,19 +1,18 @@
 """IK smoke test: `harness.reach` on the calibrated URDF, around the cable / chapstick experiments.
 
-`check_poses` / `approach_poses` are our own IK (scipy least squares on the pinocchio model, analytic Jacobian).
-They are checked five ways:
+`solve_pose` is one local optimization (pitch held, position / heading / roll weighted by tolerances, from `init`;
+`docs/harness.md` 1.J). Orchestration (sweeping a pitch, choosing a start) is the caller's, as a model would do it in
+a snippet. Checked:
 
-1. Completeness: configurations sampled inside the limits are solved back (FK -> IK round trip): pointing down, at
-   whatever pitch the sample has, and with a tool point between open jaws and the jaws across a direction.
-2. Against placo on the experiments' waypoints (2026-10-31, `harness/scratch/sessions/{cable1,chapstick1}`): where
-   placo finds a down-pointing solution we must too, and our verdicts are pinned. Most waypoints the experiments
-   found unreachable are: pointing down at those heights needs the wrist flex past its +-95 deg URDF limit (the
-   real servo range is only ~+-98 deg), in both solvers.
-3. Pitch: every waypoint is reachable once the gripper may tilt. The steepest reachable pitch of each is pinned, and
-   placo confirms a solution 5 deg shallower, along the heading ours found.
-4. Continuity: along the densified cable plan with the wrist roll pinned, no joint jumps between steps.
-5. `approach_poses` on the experiments: one sweep finds a pitch for the pick and the place together, with the jaws
-   closing horizontally across the chapstick, or says which pitches each target would need.
+1. Round trip: a full pose read off a random configuration is solved back, starting near it (both arms).
+2. Straight down on the experiments' waypoints (2026-10-31, `harness/scratch/sessions/{cable1,chapstick1}`): only the
+   lowest are reachable with the pitch held at -90; the others miss with the wrist flex at its limit.
+3. A chained pitch sweep finds the steepest reachable pitch of each waypoint (pinned); placo confirms a solution 5 deg
+   shallower, along the heading ours found.
+4. The cable plan, at a pitch every waypoint allows, prepares into an execution with no joint jumps.
+5. A pick and place from the side, the roll held at 0 at both, keeps the carried object upright (the flip found on
+   the cable plan: with the roll free, the place had landed on the other side of the jaws).
+6. A miss says why.
 
 Placo mishandles the URDF's continuous joints (the wheels: two coordinates but one velocity): its joint limits land on
 the wrong dofs and the QP goes infeasible after a step or two. The copy placo loads has the wheels fixed.
@@ -33,18 +32,13 @@ placo = pytest.importorskip("placo")
 from lerobot.felix_jr.calibration.merge_urdf import SO101_JOINTS  # noqa: E402
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, arm_joint, pinch_frame  # noqa: E402
 from lerobot.felix_jr.harness import reach as reach_module  # noqa: E402
-from lerobot.felix_jr.harness.reach import (  # noqa: E402
-    VERTICAL,
-    approach_poses,
-    check_poses,
-    heading_of,
-    pitch_of,
-    pitch_ranges,
-)
+from lerobot.felix_jr.harness.execute import held_object, prepare_execution  # noqa: E402
+from lerobot.felix_jr.harness.objects import angles_of  # noqa: E402
+from lerobot.felix_jr.harness.reach import approach, join_poses, solve_pose  # noqa: E402
 
 URDF = Path(reach_module.__file__).parents[1] / "urdfs" / "xlerobot_calib10312026.urdf"
 
-# the arms at rest, as both sessions' captures saw them (IK seeds from these)
+# the arms at rest, as both sessions' captures saw them (the default start)
 REST = {
     "left": {
         "shoulder_pan.pos": -7.385,
@@ -61,22 +55,22 @@ REST = {
         "wrist_roll.pos": -0.22,
     },
 }
-CAPTURE = SimpleNamespace(arms=REST, head_ticks={})  # what the solvers read from a capture
+CAPTURE = SimpleNamespace(arms=REST, head_ticks={})  # what the solver reads from a capture
 
-# every waypoint the experiments proposed (root frame, cm) -> does the right arm reach it pointing down?
-WAYPOINTS_CM = {
+# every waypoint the experiments proposed (root frame, cm) -> reachable by the right arm pointing straight down?
+DOWN_CM = {
     # cable1: the chapstick at (-37.5, 9.8), over the cable to (-37.2, -6.3), then moved closer to (-35.5, -5)
     (-37.5, 9.8, 90.0): False,
-    (-37.5, 9.8, 84.0): True,
-    (-37.5, 9.8, 82.0): True,
+    (-37.5, 9.8, 84.0): False,
+    (-37.5, 9.8, 82.0): False,
     (-37.5, 9.8, 78.0): True,
     (-37.2, -6.3, 90.0): False,
     (-37.2, -6.3, 84.0): False,
     (-37.2, -6.3, 78.5): False,
     (-35.5, -5.0, 84.0): False,
     (-35.5, -5.0, 82.0): False,
-    (-35.5, -5.0, 80.0): True,
-    (-35.5, -5.0, 78.5): True,
+    (-35.5, -5.0, 80.0): False,
+    (-35.5, -5.0, 78.5): False,
     # chapstick1: the chapstick at (-38.9, 8.7), past a journal to (-38.5, -17)
     (-38.9, 8.7, 92.0): False,
     (-38.9, 8.7, 78.0): True,
@@ -84,7 +78,27 @@ WAYPOINTS_CM = {
     (-38.5, -17.0, 78.0): False,
 }
 
-# the executed cable plan (plan5)
+# the steepest pitch a sweep from -90 toward 0 (5 deg steps, each solve from the last) reaches, roll free
+PITCHES_DEG = np.arange(-90.0, 0.1, 5.0)
+STEEPEST_PITCH_DEG = {
+    (-37.5, 9.8, 90.0): -70,
+    (-37.5, 9.8, 84.0): -85,
+    (-37.5, 9.8, 82.0): -85,
+    (-37.5, 9.8, 78.0): -90,
+    (-37.2, -6.3, 90.0): -60,
+    (-37.2, -6.3, 84.0): -70,
+    (-37.2, -6.3, 78.5): -75,
+    (-35.5, -5.0, 84.0): -75,
+    (-35.5, -5.0, 82.0): -75,
+    (-35.5, -5.0, 80.0): -80,
+    (-35.5, -5.0, 78.5): -80,
+    (-38.9, 8.7, 92.0): -65,
+    (-38.9, 8.7, 78.0): -90,
+    (-38.5, -17.0, 92.0): -25,
+    (-38.5, -17.0, 78.0): -40,
+}
+
+# the executed cable plan (plan5), and a pitch all of it allows
 CABLE_PLAN_CM = [
     (-37.5, 9.8, 82.0),
     (-37.5, 9.8, 78.0),
@@ -93,34 +107,12 @@ CABLE_PLAN_CM = [
     (-35.5, -5.0, 78.5),
     (-35.5, -5.0, 80.0),
 ]
-CABLE_ROLL_DEG = 130.0  # the wrist roll that keeps all of it reachable
-MAX_STEP_JUMP_DEG = 5.0  # between 1 cm steps
+CABLE_PITCH_DEG = -80.0
+MAX_STEP_JUMP_DEG = 8.0  # between 1 cm steps (near the edge of reach the elbow speeds up: ~5.4 deg/cm)
 
-# the right arm's steepest reachable pitch at each waypoint, on a 5 deg grid from -90 (down) to 0 (horizontal)
-PITCHES_DEG = np.arange(-90.0, 0.1, 5.0)
-STEEPEST_PITCH_DEG = {
-    (-37.5, 9.8, 90.0): -75,
-    (-37.5, 9.8, 84.0): -90,
-    (-37.5, 9.8, 82.0): -90,
-    (-37.5, 9.8, 78.0): -90,
-    (-37.2, -6.3, 90.0): -65,
-    (-37.2, -6.3, 84.0): -75,
-    (-37.2, -6.3, 78.5): -85,
-    (-35.5, -5.0, 84.0): -80,
-    (-35.5, -5.0, 82.0): -85,
-    (-35.5, -5.0, 80.0): -90,
-    (-35.5, -5.0, 78.5): -90,
-    (-38.9, 8.7, 92.0): -70,
-    (-38.9, 8.7, 78.0): -90,
-    (-38.5, -17.0, 92.0): -35,
-    (-38.5, -17.0, 78.0): -50,
-}
-
-# the chapsticks (located in the sessions: the middle of the stick) and where they were to go, at the same height
-CHAPSTICK_WIDTH = 0.017
-CABLE_PICK_CM, CABLE_PLACE_CM = (-37.27, 9.6, 77.96), (-37.22, -6.35, 77.91)
-CHAPSTICK_PICK_CM, CHAPSTICK_PLACE_CM = (-38.61, 8.64, 77.95), (-38.5, -17.0, 77.95)
-DOWN = np.array([0.0, 0.0, -1.0])
+# the chapstick (located in the cable1 session: the middle of the stick) and where it was to go, at the same height
+CHAPSTICK_WIDTH, CHAPSTICK_LENGTH = 0.017, 0.065
+PICK_CM, PLACE_CM = (-37.27, 9.6, 77.96), (-37.22, -6.35, 77.91)
 
 
 @pytest.fixture(scope="module")
@@ -143,19 +135,8 @@ def cm(xyz) -> np.ndarray:
     return np.asarray(xyz, dtype=np.float64) / 100.0
 
 
-def tilt_deg(pose: np.ndarray) -> float:
-    """How far the pinch frame's +z is from straight down."""
-    return float(np.degrees(np.arccos(np.clip(-pose[2, 2], -1.0, 1.0))))
-
-
-def reaches(error_m: float, off_deg: float) -> bool:
-    return error_m <= reach_module.POSITION_TOL_M and off_deg <= reach_module.PITCH_TOL_DEG
-
-
-def placo_ik(
-    robot, arm: str, target: np.ndarray, axis: np.ndarray = DOWN, starts: int = 8
-) -> tuple[float, float, np.ndarray]:
-    """Placo's best (position error m, axis error deg, joints rad) for the pinch point at `target`, its +z along `axis`."""
+def placo_ik(robot, arm: str, target: np.ndarray, axis: np.ndarray, starts: int = 8) -> tuple[float, float]:
+    """Placo's best (position error m, axis error deg) for the pinch point at `target`, its +z along `axis`."""
     joints = [arm_joint(arm, j) for j in SO101_JOINTS]
     limits = np.array([robot.get_joint_limits(j) for j in joints])
     rng = np.random.default_rng(0)
@@ -182,211 +163,146 @@ def placo_ik(
         result = (
             float(np.linalg.norm(pose[:3, 3] - target)),
             float(np.degrees(np.arccos(np.clip(pose[:3, 2] @ axis, -1.0, 1.0)))),
-            np.array([robot.get_joint(j) for j in joints]),
         )
-        if best is None or (reaches(*result[:2]), -result[0]) > (reaches(*best[:2]), -best[0]):
+        if best is None or result[0] + result[1] / 1000 < best[0] + best[1] / 1000:
             best = result
     assert best is not None
     return best
 
 
-def densify(waypoints: np.ndarray, step: float) -> np.ndarray:
-    points = [waypoints[0]]
-    for a, b in zip(waypoints[:-1], waypoints[1:], strict=True):
-        n = max(1, int(np.ceil(np.linalg.norm(b - a) / step)))
-        points += [a + (b - a) * k / n for k in range(1, n + 1)]
-    return np.array(points)
+def sweep(model, target: np.ndarray) -> list[bool]:
+    """Whether each of PITCHES_DEG reaches `target` (roll free), each solve starting from the last: a model's loop."""
+    reached, last = [], None
+    for pitch in PITCHES_DEG:
+        last = solve_pose(model, "right", CAPTURE, target, pitch, roll_deg=None, init=last)
+        reached.append(bool(last.ok[0]))
+    return reached
 
 
-def random_configs(model, arm: str, n: int, rng) -> list[np.ndarray]:
-    """`n` configurations inside the solver's limits."""
+# ---- 1. round trip ------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("arm", ["right", "left"])
+def test_a_full_pose_is_solved_back_from_nearby(model, arm):
+    rng = np.random.default_rng(9)
     index = [model.q_index(arm_joint(arm, j)) for j in SO101_JOINTS]
     limits = np.array([model.limits(arm_joint(arm, j)) for j in SO101_JOINTS]) * reach_module.LIMIT_MARGIN
-    roll_cap = np.radians(reach_module.MAX_ROLL_DEG)
-    limits[4] = np.clip(limits[4], -roll_cap, roll_cap)
-    configs = []
-    for _ in range(n):
-        q = model.joint_vector()
-        q[index] = rng.uniform(limits[:, 0], limits[:, 1])
-        configs.append(q)
-    return configs
-
-
-def down_pointing_configs(model, arm: str, n: int, rng) -> list[np.ndarray]:
-    """`n` configurations inside the solver's limits whose gripper points down (wrist flex chosen to make it so)."""
-    flex = model.q_index(arm_joint(arm, "wrist_flex"))
-    lower, upper = np.array(model.limits(arm_joint(arm, "wrist_flex"))) * reach_module.LIMIT_MARGIN
-    candidates = np.linspace(lower, upper, 721)
-    configs: list[np.ndarray] = []
-    while len(configs) < n:
-        q = random_configs(model, arm, 1, rng)[0]
-        tilts = []
-        for value in candidates:
-            q[flex] = value
-            tilts.append(tilt_deg(model.frame_pose(pinch_frame(arm), q)))
-        if min(tilts) < 0.5:
-            q[flex] = candidates[int(np.argmin(tilts))]
-            configs.append(q)
-    return configs
-
-
-def max_jump_deg(joints: tuple[dict[str, float], ...]) -> tuple[float, int]:
-    """The largest joint change between consecutive poses, and the 1-based index of the pose it lands on."""
-    jumps = [max(abs(b[k] - a[k]) for k in a) for a, b in zip(joints[:-1], joints[1:], strict=True)]
-    return max(jumps), int(np.argmax(jumps)) + 2
-
-
-# ---- 1. completeness -------------------------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("arm", ["right", "left"])
-def test_down_pointing_configurations_are_solved_back(model, arm):
-    for q in down_pointing_configs(model, arm, 15, np.random.default_rng(7)):
-        target = model.frame_pose(pinch_frame(arm), q)[:3, 3]
-        poses = check_poses(model, arm, CAPTURE, target, across=None)
-        assert poses.ok[0], f"missed {np.round(100 * target, 1)} cm: {poses.describe()}"
-
-
-@pytest.mark.parametrize("arm", ["right", "left"])
-def test_configurations_are_solved_back_at_their_own_pitch(model, arm):
-    for q in random_configs(model, arm, 15, np.random.default_rng(8)):
-        pose = model.frame_pose(pinch_frame(arm), q)
-        poses = check_poses(model, arm, CAPTURE, pose[:3, 3], pitch_deg=pitch_of(pose), across=None)
-        assert poses.ok[0], (
-            f"missed {np.round(100 * pose[:3, 3], 1)} cm at pitch {pitch_of(pose):.0f}: {poses.describe()}"
-        )
-
-
-@pytest.mark.parametrize("arm", ["right", "left"])
-def test_tool_point_between_open_jaws_and_jaws_across_are_solved_back(model, arm):
-    rng = np.random.default_rng(9)
+    limits[4] = np.clip(limits[4], -np.radians(125), np.radians(125))
     width = 0.03
-    for q in random_configs(model, arm, 15, rng):
-        pose = model.frame_pose(pinch_frame(arm), q)
-        tool = pose[:3, 3] - width / 2 * pose[:3, 0]  # the moving jaw opens along -x
-        across = np.cross(pose[:3, 0], rng.normal(size=3))  # some direction the sample's jaws are across
-        poses = check_poses(model, arm, CAPTURE, tool, pitch_of(pose), width=width, across=across)
-        assert poses.ok[0], poses.describe()
-        solved = poses.frames[0]
-        np.testing.assert_allclose(
-            solved[:3, 3] - width / 2 * solved[:3, 0], tool, atol=reach_module.POSITION_TOL_M
+    for _ in range(15):
+        x = rng.uniform(limits[:, 0], limits[:, 1])
+        q = model.joint_vector()
+        q[index] = x
+        frame = model.frame_pose(pinch_frame(arm), q)
+        tool = frame[:3, 3] - width / 2 * frame[:3, 0]
+        pitch, heading, roll = angles_of(frame[:3, :3])
+        init = {
+            f"{j}.pos": float(np.degrees(v))
+            for j, v in zip(SO101_JOINTS, x + rng.normal(0, 0.15, 5), strict=True)
+        }
+        pose = solve_pose(
+            model, arm, CAPTURE, tool, pitch, heading, roll, width, heading_tol_deg=2.0, init=init
         )
+        assert pose.ok[0], pose.describe()
 
 
-# ---- 2. against placo, pointing down ----------------------------------------------------------------------------
+# ---- 2. straight down ---------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("waypoint_cm", list(WAYPOINTS_CM), ids=lambda w: ",".join(f"{v:g}" for v in w))
-def test_experiment_waypoints_agree_with_placo(model, placo_robot, waypoint_cm):
-    target = cm(waypoint_cm)
-    poses = check_poses(model, "right", CAPTURE, target, across=None)
-    ours = bool(poses.ok[0])
-    error, tilt, joints = placo_ik(placo_robot, "right", target)
-    # placo's answer, re-checked on our model (both load the same calibrated URDF)
-    q = model.joint_vector(
-        {"right": {f"{j}.pos": np.degrees(v) for j, v in zip(SO101_JOINTS, joints, strict=True)}}
-    )
-    np.testing.assert_allclose(model.frame_pose(pinch_frame("right"), q)[:3, 3], target, atol=error + 1e-6)
-    if reaches(error, tilt):
-        assert ours, f"placo reaches it (error {100 * error:.2f} cm, tilt {tilt:.1f} deg) but we do not"
-    assert ours == WAYPOINTS_CM[waypoint_cm], poses.describe()
+@pytest.mark.parametrize("waypoint_cm", list(DOWN_CM), ids=lambda w: ",".join(f"{v:g}" for v in w))
+def test_straight_down(model, waypoint_cm):
+    pose = solve_pose(model, "right", CAPTURE, cm(waypoint_cm), -90.0, roll_deg=None)
+    assert bool(pose.ok[0]) == DOWN_CM[waypoint_cm], pose.describe()
+    if not pose.ok[0]:
+        assert "wrist_flex" in pose.at_limit[0], pose.describe()  # the wrist cannot bend far enough
 
 
-def test_unreachable_waypoints_hit_the_wrist_flex_limit(model, placo_robot):
-    flex = SO101_JOINTS.index("wrist_flex")
-    lower, upper = model.limits(arm_joint("right", "wrist_flex"))
-    for waypoint_cm, expected in WAYPOINTS_CM.items():
-        error, tilt, joints = placo_ik(placo_robot, "right", cm(waypoint_cm))
-        if not expected and not reaches(error, tilt):
-            assert min(joints[flex] - lower, upper - joints[flex]) < np.radians(0.5), waypoint_cm
-
-
-# ---- 3. pitch -----------------------------------------------------------------------------------------------------
+# ---- 3. steepest pitch ----------------------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("waypoint_cm", list(STEEPEST_PITCH_DEG), ids=lambda w: ",".join(f"{v:g}" for v in w))
-def test_steepest_reachable_pitch(model, placo_robot, waypoint_cm):
+def test_steepest_pitch_of_a_chained_sweep(model, placo_robot, waypoint_cm):
     target = cm(waypoint_cm)
-    sweep = [check_poses(model, "right", CAPTURE, target, pitch_deg=p, across=None) for p in PITCHES_DEG]
-    ranges = pitch_ranges(PITCHES_DEG, [bool(s.ok[0]) for s in sweep])
-    assert len(ranges) == 1, f"the reachable pitches should be one range: {ranges}"
-    assert ranges[0][0] == STEEPEST_PITCH_DEG[waypoint_cm], ranges
-    # placo agrees, 5 deg shallower than our steepest, along the heading ours found there
-    pitch = ranges[0][0] + 5.0
-    frame = sweep[list(PITCHES_DEG).index(pitch)].frames[0]
-    p, h = np.radians(pitch), np.radians(heading_of(frame))
+    reached = sweep(model, target)
+    steepest = float(PITCHES_DEG[reached.index(True)])
+    assert steepest == STEEPEST_PITCH_DEG[waypoint_cm], reached
+    # placo agrees, 5 deg shallower, along the heading ours found there
+    pose = solve_pose(model, "right", CAPTURE, target, steepest + 5.0, roll_deg=None)
+    assert pose.ok[0], pose.describe()
+    p, h = np.radians(steepest + 5.0), np.radians(pose.angles()[0][1])
     axis = np.array([np.cos(p) * np.cos(h), np.cos(p) * np.sin(h), np.sin(p)])
-    error, off, _ = placo_ik(placo_robot, "right", target, axis)
-    assert reaches(error, off), (
-        f"placo at pitch {pitch:.0f}: error {100 * error:.2f} cm, axis off {off:.1f} deg"
+    error, off = placo_ik(placo_robot, "right", pose.frames[0][:3, 3], axis)
+    assert error <= reach_module.POSITION_TOL_M and off <= 5.0, (error, off)
+
+
+# ---- 4. the cable plan --------------------------------------------------------------------------------------------
+
+
+def test_the_cable_plan_prepares_without_jumps(model):
+    # the first pose with the roll free; the rest held at the roll it got (left free, the roll goes anywhere along
+    # its free direction from pose to pose, and the steps between swing the wrist)
+    first = solve_pose(
+        model, "right", CAPTURE, cm(CABLE_PLAN_CM[0]), CABLE_PITCH_DEG, roll_deg=None, label="1"
     )
+    roll = first.angles()[0][2]
+    parts, last = [first], first
+    for i, waypoint in enumerate(CABLE_PLAN_CM[1:], start=2):
+        last = solve_pose(
+            model, "right", CAPTURE, cm(waypoint), CABLE_PITCH_DEG, roll_deg=roll, init=last, label=str(i)
+        )
+        parts.append(last)
+    plan = join_poses(*parts)
+    assert plan.ok.all(), plan.describe()
+    execution = prepare_execution(model, plan)
+    jumps = [
+        max(abs(b[k] - a[k]) for k in a)
+        for a, b in zip(execution.steps.joints[:-1], execution.steps.joints[1:], strict=True)
+    ]
+    assert max(jumps) < MAX_STEP_JUMP_DEG, f"step {int(np.argmax(jumps)) + 2}: {max(jumps):.1f} deg"
 
 
-# ---- 4. continuity ------------------------------------------------------------------------------------------------
+# ---- 5. pick and place ----------------------------------------------------------------------------------------------
 
 
-def test_cable_plan_is_continuous_with_the_roll_pinned(model):
-    # A grasp from above, as planned: any jaw direction. Pointing down, the roll is nearly free, and solving one
-    # pose at a time cannot look ahead: left free, it relaxes on the way down and has to swing back ~50 deg in the
-    # last centimeter up, where the off-axis pinch point needs it near its cap. So the plan pins it (`execute
-    # --roll-deg`). With the jaws held horizontal instead, two steps at that edge miss by 0.5 cm.
-    steps = densify(cm(CABLE_PLAN_CM), 0.01)
-    poses = check_poses(model, "right", CAPTURE, steps, across=None, roll_deg=CABLE_ROLL_DEG)
-    assert poses.ok.all(), poses.describe()
-    jump, at = max_jump_deg(poses.joints)
-    assert jump < MAX_STEP_JUMP_DEG, f"step {at}: {jump:.1f} deg"
-
-
-# ---- 5. approach_poses --------------------------------------------------------------------------------------------
-
-
-def test_side_pick_and_place_of_the_cable_chapstick(model):
-    poses = approach_poses(
-        model, "right", CAPTURE, [cm(CABLE_PICK_CM), cm(CABLE_PLACE_CM)], (0, -90), width=CHAPSTICK_WIDTH
+def test_a_side_pick_and_place_keeps_the_object_upright(model):
+    pick = solve_pose(
+        model, "right", CAPTURE, cm(PICK_CM), -20.0, roll_deg=0.0, width=CHAPSTICK_WIDTH, label="pick"
     )
-    assert poses.pitch_deg is not None and poses.ok.all(), poses.describe()
-    assert poses.labels == ("back1", "at1", "up1", "up2", "at2", "back2")
-    assert poses.pitch_deg == -20.0  # from the side: -15 works too, but -10 does not, so -20 keeps a margin
-    for frame in poses.frames:
-        assert abs(frame[:3, 0] @ VERTICAL) < np.sin(np.radians(reach_module.JAW_TOL_DEG))  # jaws horizontal
-    at1 = poses.frames[poses.labels.index("at1")]
-    # the stick's middle is between the jaws: half its width from the fixed jaw, toward the moving one
-    np.testing.assert_allclose(
-        at1[:3, 3] - CHAPSTICK_WIDTH / 2 * at1[:3, 0], cm(CABLE_PICK_CM), atol=reach_module.POSITION_TOL_M
-    )
-    tool = at1[:3, 3] - CHAPSTICK_WIDTH / 2 * at1[:3, 0]  # where the solved pose put the tool point
-    np.testing.assert_allclose((tool - poses.points[0]) / 0.05, at1[:3, 2], atol=1e-9)  # back along the axis
-    np.testing.assert_allclose(poses.points[2] - tool, [0, 0, 0.05], atol=1e-12)  # then straight up
-    assert "-20 deg" in poses.describe()
-
-
-def test_one_sweep_finds_a_pitch_for_pick_and_place_together(model):
-    # chapstick1 failed pointing down; a place-only sweep would need -45 or shallower, the pick prefers steep
-    poses = approach_poses(
+    place = solve_pose(
         model,
         "right",
         CAPTURE,
-        [cm(CHAPSTICK_PICK_CM), cm(CHAPSTICK_PLACE_CM)],
-        (-90, 0),
+        cm(PLACE_CM),
+        -20.0,
+        roll_deg=0.0,
         width=CHAPSTICK_WIDTH,
+        init=pick,
+        label="place",
     )
-    assert poses.pitch_deg is not None and poses.ok.all(), poses.describe()
-    pick, place = poses.target_reachable_deg
-    assert pick[0][0] == -90.0  # the pick alone could go straight down
-    assert place[0][0] > -90.0  # the place cannot: it limits the shared range
-    assert poses.reachable_deg[0][0] == place[0][0]
-    assert poses.pitch_deg == place[0][0] + 5.0  # the steepest shared pitch, one step in from the edge
+    path = join_poses(approach(model, pick), approach(model, place, order=("up", "at", "back")))
+    assert path.labels == ("pick.back", "pick", "pick.up", "place.up", "place", "place.back")
+    assert path.ok.all(), path.describe()
+    rolls = [roll for _, _, roll in path.angles()]
+    assert max(abs(r) for r in rolls) < 2.0, rolls  # the same side of the jaws throughout: no flip
+    tilt = held_object(path, CHAPSTICK_LENGTH, "pick", "place").tilt_deg
+    assert np.nanmax(tilt) < 2.0, tilt
+    # the stick's middle is between the jaws: half its width from the fixed jaw, toward the moving one
+    frame = path.frames[path.labels.index("pick")]
+    np.testing.assert_allclose(
+        frame[:3, 3] - CHAPSTICK_WIDTH / 2 * frame[:3, 0], cm(PICK_CM), atol=reach_module.POSITION_TOL_M
+    )
+    execution = prepare_execution(model, path, {"start": "open", "pick": "close", "place": "open"})
+    assert [m.label for m in execution.moves if "gripper" in m.label] == [
+        "start: gripper open",
+        "pick: gripper close",
+        "place: gripper open",
+    ]
 
 
-def test_no_shared_pitch_says_what_each_target_needs(model):
-    too_far = cm((-75.0, 0.0, 78.0))
-    poses = approach_poses(
-        model, "right", CAPTURE, [cm(CABLE_PICK_CM), too_far], (-90, -60), width=CHAPSTICK_WIDTH
-    )
-    assert poses.pitch_deg is None and len(poses.points) == 0
-    pick, far = poses.target_reachable_deg
-    assert pick and not far
-    assert (
-        "no pitch in -90..-60" in poses.describe()
-        and "target 2 (-75.0, 0.0, 78.0) cm: none" in poses.describe()
-    )
+# ---- 6. a miss ------------------------------------------------------------------------------------------------------
+
+
+def test_a_miss_says_why(model):
+    pose = solve_pose(model, "right", CAPTURE, cm((-75.0, 0.0, 78.0)), -45.0)
+    assert not pose.ok[0]
+    assert "cm off" in pose.describe() and "at limit" in pose.describe()

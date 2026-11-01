@@ -1,7 +1,7 @@
 """The harness's objects: what a reasoning chain makes and refers to (`docs/harness.md`, section 1.B).
 
 All are immutable. Geometry lives in the robot's **root frame** (the URDF root, meters, z up): `Grid`, `Points`,
-`Plan`, `TableEstimate.h`. Images live in `Capture` (the camera's pixels) and `View` (a crop of a capture, scaled).
+`Poses`, `TableEstimate.h`. Images live in `Capture` (the camera's pixels) and `View` (a crop of a capture, scaled).
 An object holds direct references to the objects it was made from (a `View` holds its `Capture`), so it is usable
 without a workspace; the workspace (`workspace.py`) records ids, parents and freshness on top.
 
@@ -21,12 +21,11 @@ from lerobot.felix_jr.calibration.xle_fit import load_session
 from lerobot.felix_jr.calibration.xle_robot_model import HEAD_JOINTS, XleRobotModel
 from lerobot.felix_jr.depth import with_matrices
 
-from .scene import BLOCKED, FREE, UNKNOWN, Scene, SegmentCheck, read_image
+from .scene import Scene, SegmentCheck, read_image
 
 if TYPE_CHECKING:
     from lerobot.felix_jr.server.client import Capture as Snapshot
 
-STATE_NAMES = {FREE: "free", UNKNOWN: "unknown", BLOCKED: "blocked"}
 CAPTURE_FILE = "capture.json"
 
 
@@ -310,10 +309,10 @@ class Points:
 
 @dataclass(frozen=True, eq=False)
 class Plan:
-    """A path through root-frame waypoints, checked against one capture's depth (`tools.check_path`).
+    """Legacy: a path checked against depth by the removed `check_path`.
 
-    `check` is `Scene.segment_check`'s result for each leg, with its points (`sample_xyz`, `point_first`) moved to
-    the root frame so the plan can be drawn in any view.
+    Kept so that sessions saved with it still load. Paths are now the order of a `Poses`' points, and judging whether
+    one is clear is the model's (`docs/harness.md`, 1.K).
     """
 
     waypoints: np.ndarray  # (M, 3)
@@ -322,16 +321,8 @@ class Plan:
     radius: float
 
     def describe(self) -> str:
-        """Each leg's length and state."""
-        rows = []
-        lengths = np.linalg.norm(np.diff(self.waypoints, axis=0), axis=1)
-        legs = zip(self.check.status, self.check.t_first, lengths, strict=True)
-        for i, (status, t, length) in enumerate(legs):
-            row = f"leg {i + 1}->{i + 2} ({_cm(length)} cm): {STATE_NAMES[int(status)]}"
-            if status != FREE:
-                row += f" from {100 * t:.0f}% along"
-            rows.append(row)
-        return f"path, {len(self.waypoints)} waypoints, radius {_cm(self.radius)} cm: " + "; ".join(rows)
+        """How many waypoints."""
+        return f"legacy path, {len(self.waypoints)} waypoints"
 
 
 @dataclass(frozen=True, eq=False)
@@ -392,6 +383,12 @@ class Reach:
         return f"{self.arm} arm {verdict}{how}: " + "; ".join(rows)
 
 
+def _deg(value: float) -> str:
+    """Signed whole degrees, without "-0"."""
+    text = f"{value:+.0f}"
+    return "+0" if text == "-0" else text
+
+
 def _xyz_cm(p: np.ndarray) -> str:
     return "(" + ", ".join(_cm(float(c)) for c in p) + ") cm"
 
@@ -400,83 +397,97 @@ def _ranges(runs: tuple[tuple[float, float], ...]) -> str:
     return ", ".join(f"{lo:+.0f}..{hi:+.0f}" for lo, hi in runs) if runs else "none"
 
 
+VERTICAL_COS = 0.05  # |cos(pitch)| below this: the axis is (nearly) vertical, heading and roll are one angle
+
+
+def orientation(pitch_deg: float, heading_deg: float, roll_deg: float) -> np.ndarray:
+    """The pinch frame's rotation (3, 3) for a pitch, heading and roll (`reach`'s module docstring)."""
+    p, h, r = np.radians([pitch_deg, heading_deg, roll_deg])
+    axis = np.array([np.cos(p) * np.cos(h), np.cos(p) * np.sin(h), np.sin(p)])
+    level = np.array([-np.sin(h), np.cos(h), 0.0])  # horizontal, across the heading: the jaws at roll 0
+    jaw = np.cos(r) * level + np.sin(r) * np.cross(axis, level)
+    return np.column_stack([jaw, np.cross(axis, jaw), axis])
+
+
+def angles_of(rotation: np.ndarray, heading_hint_deg: float = 0.0) -> tuple[float, float, float]:
+    """(pitch, heading, roll) in degrees of a pinch frame's rotation; `orientation`'s inverse.
+
+    With the axis vertical, heading and roll are one angle: the roll is reported for `heading_hint_deg`.
+    """
+    axis, jaw = rotation[:, 2], rotation[:, 0]
+    pitch = float(np.degrees(np.arctan2(axis[2], np.hypot(axis[0], axis[1]))))
+    if np.hypot(axis[0], axis[1]) > VERTICAL_COS:
+        heading = float(np.degrees(np.arctan2(axis[1], axis[0])))
+    else:
+        heading = heading_hint_deg
+    level = np.array([-np.sin(np.radians(heading)), np.cos(np.radians(heading)), 0.0])
+    roll = float(np.degrees(np.arctan2(jaw @ np.cross(axis, level), jaw @ level)))
+    return pitch, heading, roll
+
+
 @dataclass(frozen=True, eq=False)
 class Poses:
-    """Gripper poses solved for `arm` (`reach.check_poses`, `reach.approach_poses`).
+    """Gripper poses solved for `arm`, in path order (`reach.solve_pose`, `join_poses`, `approach`).
 
-    Each pose puts the tool point (the midpoint of jaws `width` apart; the pinch frame's origin is the fixed jaw) at
-    `points[i]`, the gripper axis at `pitch_deg`, the jaws across `across`. `approach_poses` also fills the sweep
-    fields; when no pitch reaches every target, it has no poses and `pitch_deg` is None, and the per-target ranges
-    say what would work.
+    Each pose aimed the tool point (the midpoint of jaws `width` apart; the pinch frame's origin is the fixed jaw) at
+    `points[i]` with the orientation `targets[i]` = (pitch, heading or None, roll or None), deg. The errors say how far
+    the solution is from each, and `ok` whether it is within the tolerances (position m, heading deg, roll deg) with
+    the pitch held.
     """
 
     arm: str
     capture: Capture
-    points: np.ndarray  # (M, 3) where each pose puts the tool point (root frame)
-    labels: tuple[str, ...]  # (M,) "1", "2", ... or "back1", "at1", "up1", ...
+    points: np.ndarray  # (M, 3) where each pose aims the tool point (root frame)
+    labels: tuple[str, ...]  # (M,)
     frames: np.ndarray  # (M, 4, 4) the solved X_root_pinch
     joints: tuple[dict[str, float], ...]  # (M,) the solved joints, LeRobot degrees
     position_error_m: np.ndarray  # (M,)
     pitch_error_deg: np.ndarray  # (M,)
-    jaw_error_deg: np.ndarray  # (M,)
+    heading_error_deg: np.ndarray  # (M,) NaN where the heading was free
+    roll_error_deg: np.ndarray  # (M,) NaN where the roll was free
+    at_limit: tuple[tuple[str, ...], ...]  # (M,) joints at a bound
     ok: np.ndarray  # (M,) bool
-    pitch_deg: float | None  # the pitch of every pose (None: any, or none found)
+    targets: tuple[tuple[float, float | None, float | None], ...]  # (M,) (pitch, heading, roll) asked for
     width: float  # m, between the jaws at the tool point
-    across: np.ndarray | None  # (3,) the jaws close across it (None: any)
-    targets: np.ndarray | None = None  # (K, 3) approach_poses: the targets
-    requested_deg: tuple[float, float] | None = None  # approach_poses: the range swept, preferred end first
-    reachable_deg: tuple[tuple[float, float], ...] = ()  # approach_poses: pitch runs that reach every target
-    target_reachable_deg: tuple[tuple[tuple[float, float], ...], ...] = ()  # approach_poses: runs per target
-    back: float = 0.0  # approach_poses: m along the gripper axis before / after each target
-    up: float = 0.0  # approach_poses: m above each target
+    tolerances: tuple[float, float, float]  # position (m), heading (deg), roll (deg)
+
+    def angles(self) -> list[tuple[float, float, float]]:
+        """The solved (pitch, heading, roll) of each pose, deg."""
+        return [
+            angles_of(f[:3, :3], t[1] if t[1] is not None else 0.0)
+            for f, t in zip(self.frames, self.targets, strict=True)
+        ]
 
     def describe(self) -> str:
-        """The pitch and which poses work; for a sweep, the reachable ranges and which target limits them."""
-        head = f"{self.arm} arm"
-        if self.pitch_deg is not None:
-            head += " pointing down" if self.pitch_deg == -90 else f" at pitch {self.pitch_deg:+.0f} deg"
-        if self.width:
-            head += f", jaws {_cm(self.width)} cm apart"
-        if self.across is not None:
-            head += (
-                ", jaws closing horizontally"
-                if abs(self.across[2]) > 0.999
-                else ", jaws across (" + ", ".join(f"{c:.2f}" for c in self.across) + ")"
-            )
-        text = head + ": " + self._poses_text()
-        if self.targets is None or self.requested_deg is None:
-            return text
-        lo, hi = self.requested_deg
-        per_target = "; ".join(
-            f"target {k + 1} {_xyz_cm(t)}: {_ranges(r)}"
-            for k, (t, r) in enumerate(zip(self.targets, self.target_reachable_deg, strict=True))
-        )
-        sweep = (
-            f"asked pitch {lo:+.0f}..{hi:+.0f}, preferred first; every target: {_ranges(self.reachable_deg)}"
-        )
-        sweep += f" ({per_target})"
-        if self.pitch_deg is None:
-            return f"no pitch in {lo:+.0f}..{hi:+.0f} reaches every target with the {self.arm} arm; {sweep}"
-        return f"{text}; {sweep}; back {_cm(self.back)} cm along the gripper, up {_cm(self.up)} cm"
-
-    def _poses_text(self) -> str:
+        """Per pose: whether it meets its target, the orientation it got, and what it missed by."""
         rows = []
-        for label, ok, error, pitch, jaw in zip(
-            self.labels, self.ok, self.position_error_m, self.pitch_error_deg, self.jaw_error_deg, strict=True
-        ):
-            if ok:
-                rows.append(f"{label} ok")
+        for i, label in enumerate(self.labels):
+            pitch, heading, roll = self.angles()[i]
+            got = f"pitch {_deg(pitch)}, heading {_deg(heading)}, roll {_deg(roll)}"
+            if self.ok[i]:
+                rows.append(f"{label} ok ({got})")
                 continue
             misses = [
-                f"{_cm(error)} cm short" if error > 0.005 else "",
-                f"pitch {pitch:.0f} deg off" if pitch > 5 else "",
-                f"jaws {jaw:.0f} deg off" if jaw > 5 else "",
+                f"{_cm(float(self.position_error_m[i]))} cm off"
+                if self.position_error_m[i] > self.tolerances[0]
+                else "",
+                f"pitch {self.pitch_error_deg[i]:.1f} deg off" if self.pitch_error_deg[i] > 0.5 else "",
+                f"heading {self.heading_error_deg[i]:.0f} deg off"
+                if self.heading_error_deg[i] > self.tolerances[1]
+                else "",
+                f"roll {self.roll_error_deg[i]:.0f} deg off"
+                if self.roll_error_deg[i] > self.tolerances[2]
+                else "",
+                f"at limit: {', '.join(self.at_limit[i])}" if self.at_limit[i] else "",
             ]
-            rows.append(f"{label} unreachable ({', '.join(m for m in misses if m)})")
-        if not rows:
-            return "no poses"
-        verdict = "all reachable" if self.ok.all() else f"{int(self.ok.sum())}/{len(self.ok)} reachable"
-        return f"{verdict}: " + "; ".join(rows)
+            rows.append(f"{label} misses ({', '.join(m for m in misses if m)}; got {got})")
+        verdict = (
+            "all meet their targets"
+            if self.ok.all()
+            else f"{int(self.ok.sum())}/{len(self.ok)} meet their targets"
+        )
+        jaws = f", jaws {_cm(self.width)} cm apart" if self.width else ""
+        return f"{self.arm} arm{jaws}: {verdict}: " + "; ".join(rows)
 
 
 @dataclass(frozen=True)
@@ -522,3 +533,56 @@ class Execution:
             f"{m.label}: " + ", ".join(f"{j.removesuffix('.pos')} {v:+.0f}" for j, v in m.targets.items())
             for m in self.moves
         ]
+
+
+@dataclass(frozen=True, eq=False)
+class ArmPath:
+    """The arm's body along an execution (`execute.arm_path`): skeletons, shoulder to pinch point, root frame.
+
+    Each skeleton is the origins of the arm's joints and the pinch point at one sample. `kinds` says where each comes
+    from: "first move" (the joint-space move from where the capture saw the arm to the first pose), "step" (between
+    poses), or a pose's label.
+    """
+
+    arm: str
+    skeletons: np.ndarray  # (S, K, 3)
+    kinds: tuple[str, ...]  # (S,)
+
+    def describe(self) -> str:
+        """How many skeletons of each kind."""
+        first = sum(k == "first move" for k in self.kinds)
+        steps = sum(k == "step" for k in self.kinds)
+        poses = [k for k in self.kinds if k not in ("first move", "step")]
+        return (
+            f"the {self.arm} arm: {first} skeletons along the first move (from where the capture saw it), "
+            f"{len(poses)} at the poses ({', '.join(poses)}), {steps} between them; the return home is not drawn"
+        )
+
+
+@dataclass(frozen=True, eq=False)
+class HeldObject:
+    """An object held in the jaws, carried rigidly through some of `poses` (`execute.held_object`); text only.
+
+    It is a segment `length` long through the tool point, along `axes` (the end that was "up" when grasped first),
+    at each pose it is held at; NaN at the others. `tilt_deg` is how far its axis has turned from how it was grasped.
+    """
+
+    poses: Poses
+    length: float
+    centers: np.ndarray  # (M, 3)
+    axes: np.ndarray  # (M, 3) unit
+    held: np.ndarray  # (M,) bool
+    tilt_deg: np.ndarray  # (M,) NaN where not held
+
+    def describe(self) -> str:
+        """Where it is held, and how far it tilts from how it was grasped at each of those poses."""
+        labels = [label for label, held in zip(self.poses.labels, self.held, strict=True) if held]
+        tilts = [
+            f"{label} {tilt:.0f}"
+            for label, tilt, held in zip(self.poses.labels, self.tilt_deg, self.held, strict=True)
+            if held
+        ]
+        return (
+            f"object {_cm(self.length)} cm long, held from {labels[0]} to {labels[-1]}; tilt from how it was grasped "
+            f"(deg): {', '.join(tilts)}"
+        )

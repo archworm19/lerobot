@@ -319,6 +319,9 @@ Sources:
 
 # 1. Harness design principles
 
+The first principle (K): **tools measure, the model judges.** Tools are simple mechanisms with as few assumptions
+as possible; the heuristics and judgments about the task belong to the VLM. The harness keeps only safety.
+
 ## A. Who controls what
 
 The VLM controls looking, drawing, measuring and replanning. In section 0, the systems that did well (VIA, Argon,
@@ -326,7 +329,7 @@ WAA, CaP-Agent0) let the agent zoom, re-render and re-check as it chooses. PIVOT
 that, did worst. The harness keeps three jobs:
 
 - **Tools are marked by what they can do to the world** (G): software tools compute from what is recorded; `capture`
-  reads the robot; `scan` moves the head; `execute` moves the arm; `end_session` sends the robot to rest. The
+  reads the robot; `scan`, `look_at` and `look_at_pixel` move the head; `execute` moves the arm; `end_session` sends the robot to rest. The
   model calls any of them, as often as it likes, but the harness runs every call (`api.Harness`, H).
 - **Gating motion.** A tool that moves the head or the arm runs only after a **person approves** it, seeing exactly
   what will run (for `execute`: every move, already checked for reach and joint jumps). Software tools never wait.
@@ -346,13 +349,12 @@ to an earlier view, compares two plans made from the same grid, and so on.
 | `View` | 2D | `capture_id` + crop rectangle + scale: only a mapping between view pixels and capture pixels, no data |
 | `Grid` | world | the plane `z = h` in the base frame (default `h` = table height), origin, cell size, extent |
 | `Points` | world | xyz + labels (e.g. from `locate`), and the pixels they came from |
-| `Plan` | world | a path through waypoints and its `segment_check` states per leg (free / unknown / blocked against depth) |
 | `TableEstimate` | world | table height `h` in the base frame, inlier count, spread, tilt, inlier mask (see below) |
 | `Focus` | 2D | the views the model chose to work in, and why |
 | `Poses` | world | gripper poses solved for one arm: tool point, pitch, jaw direction, the joints, reachable or by how much it misses; for a sweep, the pitch ranges per target (J) |
 | `Execution` | world | the exact moves `execute` would send through some `Poses`: joint targets every ~1 cm and gripper actions |
 
-Geometry lives in the world frame (`Grid`, `Points`, `Plan`, `Poses`). Images live in `Capture` / `View`. So drawing an
+Geometry lives in the world frame (`Grid`, `Points`, `Poses`; a path is the order of a `Poses`' points). Images live in `Capture` / `View`. So drawing an
 object in any view is projection plus the view's pixel mapping, and nothing is recomputed when the model zooms.
 
 The robot's model and its current state (`XleRobotModel`, `q`, gripper opening, holding) are *not* in the DAG: they
@@ -399,11 +401,17 @@ does not stale anything: the scan's captures all share one epoch, and a grid or 
 true in the others. A new `scan` also starts an epoch (the scene may have changed since the last one).
 `prepare_execution` and `execute` refuse stale inputs; `is_stale` and the history mark them.
 
-## D. Rendering is one pure function
+## D. Rendering is one pure function, and the model picks what it shows
 
-`render(view_id, overlays=[grid_id, points_id, plan_id, ...]) -> image`. Every image the model sees can be rebuilt
-from ids. Overlays are drawn in a fixed style (one legend for FREE / UNKNOWN / BLOCKED, one color per overlay type)
-so the model learns one visual language.
+`render(view, *overlays, labels=True) -> image`. Every image the model sees can be rebuilt from ids. The overlays
+passed are the choice of what to see: poses alone (the path and a gripper at each), poses with the arm's body
+(`arm_path`), a grid to read positions off, with or without text. The gripper's two fingers have different colors
+so a roll of the wrist shows, but the reliable signal is text (E): each pose's roll in `Poses`, and a carried
+object's tilt per pose from `held_object`. A gripper that flipped between pick and place, which would have put the
+object down upside down, was missed in an earlier glyph with identical fingers; drawing the carried object as a bar
+was tried and was harder to read than the number. One picture with everything is too cluttered in a
+close view and too small in a wide one, so the harness offers the pieces and the model composes them (K). Overlays are drawn in a fixed style (one color per overlay type) so the model learns one visual language,
+and only geometry is drawn: nothing in a render is a verdict on whether a path is clear (K).
 
 ## E. Returns: image for *where*, text for *how much*
 
@@ -422,7 +430,7 @@ model's context holds ids, small renders and summaries, never arrays. The DAG is
   trace Guava / WAA trained small models on.
 - The model's code moves the robot only through the hardware tools, which the runner gates (A). This is a guardrail,
   not a boundary: a snippet could import the robot client directly. Before unattended runs, the robot server must
-  enforce approval itself, and the model should act through tool calls only (`open_issues.md`, 15).
+  enforce approval itself, and the model should act through tool calls only (`open_issues.md`, 12).
 
 ## G. Types of tool calls
 
@@ -431,9 +439,9 @@ Every tool is in `harness/api.py`, registered with `@tool(effect=...)`; its docs
 
 | Effect | Tools | Asks a person? | Changes the world? |
 |---|---|---|---|
-| software | `full_view`, `zoom`, `focus`, `table_height`, `make_grid`, `locate_pixels`, `locate_grid`, `check_path`, `render`, `contact_sheet`, `check_poses`, `approach_poses`, `prepare_execution`; queries `history`, `lineage`, `is_stale` | no | no |
+| software | `full_view`, `zoom`, `focus`, `table_height`, `make_grid`, `locate_pixels`, `locate_grid`, `render`, `contact_sheet`, `solve_pose`, `join_poses`, `approach`, `prepare_execution`, `arm_path`, `held_object`; queries `history`, `lineage`, `is_stale` | no | no |
 | sense | `capture` (a new frame from where the head is) | no | no |
-| move head | `scan` | yes | no (a new scan starts an epoch: the scene may have changed) |
+| move head | `scan`; `look_at` (a root-frame point), `look_at_pixel` (what a view shows at a pixel): aim the camera there and capture | yes | no (a new scan starts an epoch: the scene may have changed) |
 | move arm | `execute` | yes, showing every move | yes → everything older is stale |
 | end | `end_session` (the robot goes to rest) | no | ends the session |
 
@@ -448,7 +456,7 @@ intermediate objects are what the VLM works with inside that loop.
    direct references to the objects they were made from (a `View` holds its `Capture`), so they are usable without
    a workspace.
 2. **Implementations (pure functions over objects):** `tools.py` (views, table, grids, points, paths), `render.py`,
-   `reach.py` (`check_poses`, `approach_poses`, J), `execute.py` (`prepare_execution`; `run_execution` drives the
+   `reach.py` (`solve_pose`, `join_poses`, `approach`, J), `execute.py` (`prepare_execution`; `run_execution` drives the
    robot client), `scan.py`. They know nothing about the DAG.
 3. **Workspace:** the DAG store. `ws.call(fn, *args)` runs any function (a tool or a scratch function the VLM
    wrote), finds which arguments are workspace objects (its parents), and records the result with an id (a tool
@@ -478,35 +486,99 @@ are the candidates for promotion to long-term tools (F).
 ## I. One workspace per episode, many captures
 
 A workspace holds every capture of an episode (one task attempt), not one image. Each capture has its own camera
-pose from FK, and the geometry (`Grid`, `Points`, `Plan`, the table height) is in the root frame, so anything made
+pose from FK, and the geometry (`Grid`, `Points`, `Poses`, the table height) is in the root frame, so anything made
 from one capture renders correctly in all the others: find the object in one capture, measure the target in another,
-draw one plan in both. Later: `check_path` against several captures at once (blocked if any sees a collision, free
-only if one sees the space empty), to shrink UNKNOWN.
+draw one plan in both, and judge clearance from two angles.
 
-## J. Reach: where the gripper can go, and at what pitch
+## J. Reach: one constrained optimization per pose
 
-Details in the `reach.py` docstring; the choices behind them:
+The primitive is `solve_pose`: the model gives a full target pose, the harness solves the joints once, and every
+other choice (which pitch, which start, the order of poses) is the model's. Details in the `reach.py` docstring.
 
-- **The tool point is the midpoint between the open jaws**, where the object's center goes. The pinch frame's origin
-  is the fixed jaw (the moving jaw opens along its -x), so with the jaws `width` apart the tool point is `width / 2`
-  from it. Aiming the pinch point at an object's center would land the fixed jaw on the object.
-- **Pitch, not full orientation.** The SO-101 bends in one vertical plane through the shoulder, so the heading of the
-  gripper follows from the shoulder pan. A pose asks for a position (3), a pitch (the axis' angle above horizontal:
-  -90 down, 0 horizontal) and the jaws across a direction (default vertical: they close horizontally): five
-  constraints on five joints. Asking for a full orientation (six) has no solution for most requests.
-- **Pointing straight down is often out of reach.** On the first experiments (cable1, chapstick1) most waypoints
-  failed only because the wrist cannot bend past +-95 deg at those heights; placo agrees (smoke test). Every one is
-  reachable at some tilt, and some only at -35..-50 deg. So the VLM gives a pitch *range*, preferred end first, and
-  the harness picks the pitch.
-- **`approach_poses` is the composite; `check_poses` the primitive.** `check_poses` solves given points at one pitch.
-  `approach_poses` sweeps the pitch from the preferred end and, at each pitch and for each target (an object to take,
-  where it goes), solves the target, derives the points `back` along the gripper axis and `up` from the *solved*
-  pose (the axis depends on the heading, which is known only after solving), and solves those. It keeps a pitch
-  that works for every target, one step in from the edge, or says which pitches each target would need. What the
-  poses mean (a pick, a place) stays with the model.
-- **One pose at a time has no lookahead.** Pointing down with the jaws free, the roll is nearly free and drifts from
-  pose to pose; `prepare_execution` pins it (`open_issues.md`, 7). Solving the whole path at once would fix it.
+**How we got here.** The first version picked the pitch itself: `approach_poses` swept a pitch range, kept a margin
+from the edge, solved derived approach points at each pitch, and `check_poses` restarted from random joints and
+pulled the solution toward the previous pose and a neutral one, with a polish pass. Each piece answered a real problem
+(pointing straight down is often out of reach; a local solve misses some poses; the roll drifts), but together they
+were orchestration hidden in the tools: choices the model could make itself in a few lines of a snippet, and could not
+see or override (1.K). They also hid a bug: with the jaw direction constrained only to "horizontal", the place pose of
+a pick and place landed on the other side of the jaws, which would have put the object down upside down. So the
+tools were cut back to one optimization, and the orchestration moved to the model.
 
+**The problem.** The target is the tool point's position and an orientation: pitch (the gripper axis above
+horizontal), heading (the axis about the vertical) and roll (the jaws about the axis). Six numbers; the arm has five
+joints. So not every pose is reachable, and the formulation says what to keep:
+
+$$
+\min_q\; \Big\|\tfrac{p(q)-p^*}{\tau_p}\Big\|^2 + \Big\|\tfrac{\text{heading}(q)-h^*}{\tau_h}\Big\|^2 +
+\Big\|\tfrac{\text{roll}(q)-r^*}{\tau_r}\Big\|^2 \quad\text{s.t.}\quad \text{pitch}(q) = \theta^*,\;
+q_{lo} \le q \le q_{hi}
+$$
+
+- **The pitch is held.** It decides reach on this arm (the wrist flex limit is what failed on cable1 / chapstick1),
+  and it is the main choice of an approach (from above, from the side). With it held, four degrees of freedom are left
+  for five soft targets: a weighted least squares whose compromise the tolerances set.
+- **Everything else is soft, weighted by tolerances the model gives:** position in m, heading and roll in degrees. An
+  error of one tolerance costs one unit, and a pose meets its target when every term is within its tolerance.
+  Tolerances are interpretable ("position to 3 mm, heading don't care") where raw weights are not.
+- **Joint limits are hard** (bounds). They are safety, not judgment.
+- **Heading is free by default.** The SO-101 keeps its gripper in the vertical plane through the shoulder, so the
+  heading mostly follows from the position. Asking for a heading the position does not allow trades position for it,
+  which is rarely what is wanted; the solved heading is reported instead.
+- **One local solve from `init`** (default: the arm's pose in the capture). The start decides the branch (elbow up or
+  down, the jaws on one side or the other). No restarts: a miss is reported with what missed and which joints are at a
+  limit, and the model tries another start, pitch or tolerance. Each solve takes ~10-20 ms.
+- **Holding the pitch is a stiff penalty (0.1 deg) checked afterwards (0.5 deg), not an equality constraint.**
+  Pointing straight down, an equality on the pitch pins both horizontal components of the axis and its gradient
+  vanishes there, which equality-constrained solvers (SLSQP) handle badly. The stiff penalty is the same constraint in
+  the limit and stays smooth. Heading and roll are measured in the frame of the achieved axis, so they do not count
+  twice; straight down, heading and roll are one angle (the jaw direction) and are read together.
+
+**What is built on it.** `join_poses` makes a path of solved poses, in order. `approach(pose, back, up, order)` adds
+the poses `back` m along the solved gripper axis and `up` m above it, at the same orientation, each solved from the
+pose's joints; it exists because the back point depends on the solved heading, which the model does not know before
+solving. `prepare_execution` solves the path in 1 cm steps, each from the last step's joints, its pitch and roll
+interpolated between the poses. Everything else is the model's code: sweeping pitches for the steepest reachable one
+(a loop, each solve from the last), keeping the roll the same at pick and place (the same `roll_deg` at both: the
+carried object keeps its orientation), choosing the order of a pick and a place.
+
+**What it found on the first experiments.** Straight down (pitch held at -90), only the lowest waypoints of cable1 /
+chapstick1 are reachable; the rest miss with the wrist flex at its limit (placo agrees). A pitch sweep finds the
+steepest reachable pitch of each, -25 to -90 deg. A pick and place from the side at -20 deg, roll 0 at both, keeps the
+chapstick upright (`tests/felix_jr/smoke_tests/test_ik_smoke.py`).
+
+**Free roll goes anywhere.** With `roll_deg=None` the solver may put the roll anywhere along its free direction, and it
+can differ a lot between neighboring poses (85 deg on the cable plan), which `prepare_execution` then interpolates as a
+swing of the wrist. For a path, solve the first pose with the roll free and hold the roll it got for the rest.
+
+
+## K. Tools measure; the model judges
+
+Tools are **mechanisms**: they compute and measure (projection, depth, the table, IK, reach) from explicit
+parameters, and report numbers and geometry. They do not judge the task: what the object is, how big it is, whether
+a surface next to a path is an obstacle or the thing about to be grasped, which pitch or approach is good. Those are
+the model's: it sees the images and knows the task, and a heuristic inside a tool cannot, and fails silently when its
+assumptions don't hold.
+
+- **Report, don't decide.** A tool returns what it measured (distances, ranges, which constraint failed and by how
+  much), not a verdict that bakes in an assumption. When a tool has to choose (the branch `solve_pose` lands on), the
+  model controls it (`init`) and the result reports what was chosen.
+- **Defaults are conventions, visible and overridable.** A default is fine when the docstring states it and an
+  argument changes it (`solve_pose`'s free heading and roll 0, `approach`'s pose order). A hidden policy is not.
+- **Orchestration is the model's.** Sweeping a pitch, retrying from another start, choosing the order of poses: a
+  few lines of a snippet, visible in the model's own code, not loops hidden in a tool (J).
+- **No guessing about the world.** No assumed object sizes, no exclusion zones around a target, no "probably the
+  object" filters. If the model knows an object's width, it passes it (`width`); if a measurement near the target is
+  the object itself, the model says so by how it reads the result.
+- **The harness keeps safety and presentation.** The approval gate, joint limits, IK tolerances and refusing stale
+  inputs are not the model's to reason around. Laying out labels so they stay readable is presentation, not
+  judgment.
+
+**No collision checking.** Following this, the harness does not check paths or the arm against the scene: no depth
+path check, no collision geometry, no motion planner. That is classic motion planning, and the bet here is the
+model's common sense instead: it sees where the obstacles are in the renders and routes around them, and the person
+approving `execute` is the check. (A depth path check was built and removed: it labeled every surface in the depth
+an obstacle, including the object being grasped and, while carrying, the object's old position.) Reach and joint
+limits stay: they are the robot's own limits, not judgments about the scene.
 
 # 2. Experiments
 
@@ -517,19 +589,20 @@ An episode runs in phases:
 0. **Scan (`scan`, approved by a person):** the head moves through fixed poses (3 tilts x 3 pans); each pose gives a
    capture with its `table_height`; the model gets one **contact sheet** of all captures.
 1. **Focus (model):** choose the captures that show the task (`focus`): no motion, a selection recorded in the DAG.
-2. **Analyze (model):** zoom, grids, locate, ... on those views.
-3. **Poses (model):** `approach_poses(arm, capture, [object, target], pitch range, width)` finds the pitch and the
-   poses (or `check_poses` for hand-picked points); `check_path` checks the path through them against depth;
-   `render` draws both. Repeated until the model is satisfied.
+2. **Analyze (model):** zoom, grids, locate, ... on those views; `look_at` / `look_at_pixel` (approved) when it
+   needs a better view of something.
+3. **Poses (model):** `solve_pose` for the pick and the place (a pitch, roll 0 at both, the object's width; a
+   pitch sweep in a snippet when the first try misses), `approach` on each, `join_poses` into a path; `render` draws
+   the path through them and a gripper at each, and
+   with `arm_path` the arm's body (including the first move), in as many views as the model wants. The model judges
+   clearance from those. Repeated until it is satisfied.
 4. **Execute:** `prepare_execution(poses)` gives the exact moves (checked every ~1 cm); `execute(execution)` runs
    them after a person approves, seeing every move. It starts a new epoch; the next round captures or scans again.
 
 Motion: straight lines in Cartesian space between the poses, cut into ~1 cm steps solved with the IK (J), so the
-joint-space moves stay close to the checked lines. No sampling planner yet: only the tool point is checked against
-depth, not the arm's links, and the move from home to the first pose is unchecked (`open_issues.md`, 3-6). The
-candidate for free-space moves is OMPL (wheels for macOS arm64 and Linux aarch64), once the arm has collision
-geometry. No VoxPoser-style cost maps (section 0: ReKep's optimizer was its smallest source of error; perception was
-the largest).
+joint-space moves stay close to the drawn lines. No collision checking and no planner (K): the model routes around
+what it sees, and the person approving `execute` checks the moves. `arm_path` draws the arm along all of it,
+including the first move (from where the arm is); the return home is not drawn yet (`open_issues.md`, 3).
 
 ## Development plan (bottom-up)
 
@@ -541,8 +614,8 @@ Each layer of 1.H is built and tested before the one above it, so nothing waits 
 3. **Evaluate the renders** against the checks fixed in advance. (Step 3)
 4. **Agent loop.** First version: Claude Code itself is the agent, working in the workspace (as VIA did with Claude
    Code / Codex), so no loop is built until the tools settle. Then `propose_plan` with a VLM API.
-5. **Poses + execute on the robot**, with a person approving each move: built (`check_poses`, `approach_poses`,
-   `prepare_execution`, `execute`, `api.Harness`), dry-run and tested against fake hardware; not yet run on the
+5. **Poses + execute on the robot**, with a person approving each move: built (`solve_pose`, `join_poses`,
+   `approach`, `prepare_execution`, `execute`, `api.Harness`), dry-run and tested against fake hardware; not yet run on the
    robot (`open_issues.md`, 1).
 
 ## Step 1: objects + render + workspace (offline)
@@ -613,7 +686,7 @@ per experiment (`harness/scratch/sessions/<name>/`, gitignored). Every command r
    pose, then back home; a contact sheet and the tilt per pose (desk vs calibration).
 2. `focus <name> capture4 [capture7]`: name the captures to work in (`view`, `view2`, ...): a 2 cm grid in each.
 3. `analyze <name> "<snippet>"`: Python run by `Harness.run_snippet` (`show(view, ...)` saves a PNG, assigned names
-   persist). Repeated until the renders answer what we need; `approach_poses` goes here.
+   persist). Repeated until the renders answer what we need; `solve_pose` / `approach` / `join_poses` go here.
 4. `propose <name> "x,y,z; ..." --pitch -90` or `propose <name> --poses pp`: solve (or take) the poses, check the
    path against depth, draw both in the full view and the named views. Nothing moves.
 5. `execute <name>`: the moves through the proposed poses (a dry run); `--go` runs them after approval, `--step`
@@ -627,7 +700,7 @@ the depth image), produce renders of the chain from the reasoning example:
 1. full view + 2 cm grid
 2. zoom on the object + 0.5 cm grid
 3. `locate` points on the object with their xyz
-4. a plan: one clean, one passing through an obstacle, one through a depth shadow (UNKNOWN)
+4. poses: one clear path, one passing through an obstacle (does the render make that obvious?)
 
 ## Step 3: is the rendered information valuable?
 
@@ -650,7 +723,7 @@ Decide what counts before looking at renders. Checks, roughly in order:
 - `segment(text)` / candidate keypoints (SAM3 or GroundedSAM, as in MOKA / ReKep) when grid + depth fails on object
   edges or grasp points.
 - Grasp yaw from depth (PCA of the object's depth blob), so the model doesn't estimate the angle.
-- Automatic gate replacing a person's approval, enforced by the robot server (`open_issues.md`, 15).
+- Automatic gate replacing a person's approval, enforced by the robot server (`open_issues.md`, 12).
 
 ## Results
 
@@ -659,6 +732,7 @@ of a cable (cable1) or past a journal (chapstick1). The scan, table height (72.5
 the desk) and grids worked; `locate_pixels` on a zoomed view gave usable points on the chapstick and the target.
 Planning failed on reach, not perception: every waypoint pointing straight down above ~82 cm, and chapstick1's
 place at any height, was out of reach. The cause is the wrist flex limit (+-95 deg), confirmed against placo
-(`tests/felix_jr/smoke_tests/test_ik_smoke.py`). With the pitch free, every waypoint is reachable; `approach_poses`
-finds -20 deg (from the side) for cable1's pick and place together, and the steepest shared pitch for chapstick1.
+(`tests/felix_jr/smoke_tests/test_ik_smoke.py`). At some tilt every waypoint is reachable (the steepest: -25 to -90
+deg); a pick and place from the side at -20 deg, roll 0 at both, reaches every pose of cable1's and keeps the
+chapstick upright. An earlier version, with the roll free, flipped the jaws between pick and place (J).
 Not yet run on the robot. Open issues from these runs: `open_issues.md`.

@@ -8,7 +8,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from .objects import Capture, Focus, Grid, Plan, Points, TableEstimate, View
+from .objects import Capture, Focus, Grid, Points, TableEstimate, View
 
 MAX_GRID_LINES = 150  # per axis: more is unreadable (and slow); zoom in and use a smaller extent instead
 
@@ -156,25 +156,3 @@ def locate_grid(grid: Grid, xy: np.ndarray, labels: Sequence[str] | None = None)
     xy = np.atleast_2d(np.asarray(xy, dtype=np.float64))
     names = tuple(labels) if labels is not None else tuple(f"P{i + 1}" for i in range(len(xy)))
     return Points(grid.point(xy), names)
-
-
-def check_path(
-    capture: Capture,
-    waypoints: np.ndarray,
-    radius: float = 0.02,
-    tolerance: float = 0.01,
-    step: float = 0.01,
-) -> Plan:
-    """Check the straight legs between root-frame `waypoints` (M, 3), M >= 2, against the capture's depth.
-
-    Each sample gets FREE / UNKNOWN / BLOCKED for a ball of `radius` (`Scene.segment_check`).
-    """
-    waypoints = np.asarray(waypoints, dtype=np.float64)
-    if waypoints.ndim != 2 or waypoints.shape[1] != 3 or len(waypoints) < 2:
-        raise ValueError(f"waypoints must have shape (M, 3) with M >= 2, got {waypoints.shape}")
-    cam = capture.to_camera(waypoints)
-    check = capture.scene.segment_check(cam[:-1], cam[1:], radius=radius, tolerance=tolerance, step=step)
-    check = check._replace(
-        sample_xyz=capture.to_root(check.sample_xyz), point_first=capture.to_root(check.point_first)
-    )
-    return Plan(waypoints, check, capture, radius)

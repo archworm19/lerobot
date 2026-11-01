@@ -20,54 +20,53 @@ Last updated 2026-11-01.
    tick range) has no known mapping to jaw opening. Closing to 1 on an object stalls the servo against it for as
    long as it holds (torque and heat). Measure opening vs `gripper.pos`, and close to "object width minus a bit"
    rather than to 1.
-3. **The first move is unchecked.** `execute` goes from wherever the arm is (home) to the first pose with one
-   joint-space move; nothing checks that sweep for collisions. `--step` lets a person watch it.
+3. **Not everything that moves is drawn.** `arm_path` draws the arm's skeleton along an execution, including the
+   first joint-space move from where the arm is (`held_object` describes the carried object in text). Still missing:
+   the return home at the end (the home pose is recorded on the robot; `get_homes` would give it) and the gripper
+   open / closed at each pose. And grippers are drawn over everything: a gripper behind an object (from the camera)
+   looks in front of it. TODO: hide or dim the parts the depth shows a surface in front of, as the grid does. A render is also flat: an arm segment drawn over an object may be well above it.
+   A top or side view drawn from the root-frame geometry (no camera) would show heights.
 
-## Collisions
+## Collisions (decided: not checked by the harness)
 
-4. **The held object counts as an obstacle.** `check_path` puts a 2 cm ball around the tool point and checks it
-   against the depth, so the object being grasped, and then carried, shows as "blocked" on the approach, lift and
-   carry legs. Fix: exclude the object's own points (those near the grasp target) from the check, and model the held
-   object as part of the gripper while carrying.
-5. **Only the tool point is checked, not the arm.** The wrist, forearm and elbow are never checked against the scene
-   or the robot's own body. Needs collision geometry for the arm links (the merged URDF has no meshes) and the depth
-   as obstacles (point cloud or voxels); pinocchio + coal can do the distance queries.
-6. **No motion planner.** Moves through free space follow hand-written straight lines (densified into 1 cm IK
-   steps). OMPL (`pip install ompl`, 2.0.1 has wheels for macOS arm64 and Linux aarch64; tried RRTConnect with a
-   Python validity callback) is the candidate for the transit moves (home to the first pose, lift to above the
-   place), once 5 exists. VAMP has no wheels and generates its collision code per robot; pybullet does not build.
+The harness does not check paths or the arm against the scene: no depth path check, no link collision geometry, no
+motion planner (`harness.md` 1.K). Avoiding obstacles is the model's job, from the renders, and the person approving
+`execute` is the check. The removed path check (`check_path`) also judged every surface in the depth as an obstacle,
+including the object being grasped. Revisit only if the model, given good renders, keeps planning into things.
 
 ## IK and pose choice
 
-7. **With the jaws free and pointing down, the roll drifts.** `check_poses` solves one pose at a time, and pointing
-   down the roll is nearly free, so it relaxes where it can and must swing back where it cannot (~50 deg in 1 cm on
-   the cable plan). `execute` pins the roll to the first pose's when the jaws are free (`--roll-deg` to choose).
-   Fix: solve the whole path at once (a trajectory-level objective with smoothness), not pose by pose.
-8. **Poses sit on joint limits.** The steepest reachable pitches have `wrist_flex` at its cap (+90.2 deg, the URDF's
-   95 x `LIMIT_MARGIN`) and often the roll at `MAX_ROLL_DEG` (130). `approach_poses` keeps a margin in pitch only
-   (one grid step). Add a cost for closeness to the joint limits, so the chosen pose is comfortable, not just
-   feasible.
-9. **The limits themselves are unverified.** `LIMIT_MARGIN` scales the limits toward zero (a fraction, not a fixed
+4. **A free roll can land anywhere.** `solve_pose` with `roll_deg=None` puts the roll anywhere along its free
+   direction; between neighboring poses it can differ a lot (85 deg on the cable plan), and `prepare_execution`
+   interpolates that as a swing of the wrist (its 20 deg / step check catches the worst). The model has to hold the
+   roll (solve the first pose free, keep its roll); the tool docs say so. Solving a whole path at once, with
+   smoothness, would make this automatic.
+5. **Poses sit on joint limits.** The steepest reachable pitches have `wrist_flex` at its cap (+90.2 deg, the URDF's
+   95 x `LIMIT_MARGIN`) and often the roll at `MAX_ROLL_DEG` (130). `solve_pose` reports the joints at a limit; the
+   model can back off the pitch. A cost for closeness to the limits would make the solution comfortable by itself.
+6. **The limits themselves are unverified.** `LIMIT_MARGIN` scales the limits toward zero (a fraction, not a fixed
    distance from each end). `MAX_ROLL_DEG = 130` protects the wrist camera's cable but was not measured. The URDF's
    wrist flex is +-95 deg where the right arm's calibrated range is ~+-97.7; the rest pose has `shoulder_lift` at
    -103 deg, outside the URDF's +-100. Compare the URDF limits with each arm's calibration file.
-10. **`approach_poses` is slow when it fails.** It sweeps the full range (-90..+30) to say which pitches would work:
-    ~9 s for two targets. TODO in `reach._sweep`: solve the pitches in parallel (a process pool, or batched solves).
-11. **Only the pitch and jaws are chosen, not the approach direction.** The heading follows from the shoulder pan,
+7. **A local solve depends on its start.** `solve_pose` runs once from `init`, without restarts: from the arm's rest
+    pose it finds the experiments' poses, from the neutral pose (all joints 0) it misses every one. The model chooses
+    the start (the previous pose, usually); offering a few named starts (rest, previous, elbow up / down) would help.
+8. **Only the pitch and jaws are chosen, not the approach direction.** The heading follows from the shoulder pan,
     so a side grasp always comes from the shoulder's side of the object. Reaching around an obstacle, or taking an
     object from a chosen side, would need the base to move (not planned) or the other arm.
 
 ## Tooling
 
-12. **The session CLI is a gitignored file.** `harness/scratch/` is ignored (`**/scratch/` in the root
+9. **The session CLI is a gitignored file.** `harness/scratch/` is ignored (`**/scratch/` in the root
     `.gitignore`). Execution now lives in tracked modules (`execute.py`, the `execute` tool in `api.py`), but the
     CLI that drives a session by hand (`session.py`) does not. Move it to a tracked module once its commands settle.
-13. **Legacy `Reach` objects.** `objects.Reach` is kept only so sessions pickled before `Poses` still load. Delete it
-    once those sessions (`cable1`, `chapstick1`, `desk1`) are no longer needed.
-14. **Placo needs a patched URDF.** Placo mishandles the URDF's continuous wheel joints (its joint limits land on the
+10. **Legacy objects.** `objects.Reach`, `objects.Plan` and `scene.SegmentCheck` are kept only so sessions pickled
+    before `Poses` (and before the path check was removed) still load; nothing makes them. Delete them once those
+    sessions (`cable1`, `chapstick1`, `desk1`) are no longer needed.
+11. **Placo needs a patched URDF.** Placo mishandles the URDF's continuous wheel joints (its joint limits land on the
     wrong dofs, and the QP turns infeasible). The IK smoke test loads a copy with the wheels fixed. Worth reporting
     upstream if placo is used for more than cross-checks.
-15. **Approval is enforced in Python only.** `api.Harness` asks a person before a tool moves the head or arm, but the
+12. **Approval is enforced in Python only.** `api.Harness` asks a person before a tool moves the head or arm, but the
     model's Python snippets run in-process (`Harness.run_snippet`) and could import the robot client and send
     motion commands directly. A guardrail while a person watches; before any unattended run, the robot server must
     enforce it (motion only with a short-lived approval token the person's "yes" hands out), and the model should

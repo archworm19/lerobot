@@ -1,7 +1,7 @@
 """`render(view, *overlays)`: the one function that draws (`docs/harness.md`, section 1.D).
 
 The view's crop of the capture is scaled first and the overlays are drawn after, in view pixels, so lines and text
-stay sharp when zoomed in. Root-frame objects (`Grid`, `Points`, `Plan`, `Poses`) can be drawn in any view; a
+stay sharp when zoomed in. Root-frame objects (`Grid`, `Points`, `Poses`) can be drawn in any view; a
 `TableEstimate`'s mask only in views of its own capture. One style per overlay type, so the VLM learns one visual
 language. Images are RGB `uint8`; the capture is never modified.
 """
@@ -13,64 +13,51 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .objects import STATE_NAMES, Grid, Plan, Points, Poses, TableEstimate, View
-from .scene import BLOCKED, FREE, UNKNOWN
+from .objects import ArmPath, Grid, Points, Poses, TableEstimate, View
 
-STATE_COLORS = {FREE: (0, 200, 0), UNKNOWN: (255, 190, 0), BLOCKED: (230, 30, 30)}
+REACHED_COLOR, MISSED_COLOR = (0, 200, 0), (230, 30, 30)
+PATH_COLOR = (255, 255, 255)
+ARM_COLOR = (90, 200, 255)
 GRID_COLOR = (255, 230, 0)
 POINT_COLOR = (0, 220, 255)
 TABLE_COLOR = (0, 160, 255)
-GRIPPER_COLOR = (255, 60, 220)
-GRIPPER_BODY_M = 0.04  # how much of the gripper axis is drawn, back from the pinch point
+FINGER_M = 0.03  # how long the fingers are drawn, back from their tips along the gripper axis
+WRIST_M = 0.03  # and the body behind them, toward the wrist
+FIXED_JAW_COLOR, MOVING_JAW_COLOR = (255, 60, 220), (0, 230, 255)  # pink, cyan
+GRIPPER_BODY_COLOR = (200, 200, 200)  # neutral, so only the fingers carry color
 JAW_CLEARANCE_M = 0.01  # how much wider than the object the open jaws are drawn
 
 
-def render(view: View, *overlays: Any, legend: bool = True) -> np.ndarray:
+def render(view: View, *overlays: Any, labels: bool = True) -> np.ndarray:
     """The view's image with `overlays` drawn in order.
 
-    Overlays: `Grid`, `Points`, `Plan`, `TableEstimate`, `Poses`. Text goes on last, laid out so labels don't cover
-    each other or the markers (`_Layout`). A `Plan` drawn with the `Poses` it goes through names its waypoints after
-    the poses (`up1 (x,y,z)`), and those poses add no second label.
+    Overlays: `Grid`, `Points`, `TableEstimate`, `Poses`, `ArmPath`.
+
+    Text goes on last, laid out so labels don't cover each other or the markers (`_Layout`); `labels=False` leaves
+    out all but the footers, for an uncluttered picture. Only geometry is drawn: nothing here judges whether a path
+    is clear (`docs/harness.md`, 1.K).
     """
     s = view.capture.scene
     crop = s.color[view.v0 : view.v0 + view.height, view.u0 : view.u0 + view.width]
     interpolation = cv2.INTER_CUBIC if view.scale > 1 else cv2.INTER_AREA
     out = cv2.resize(crop, view.size, interpolation=interpolation)
     layout = _Layout(out.shape)
-    all_poses = [o for o in overlays if isinstance(o, Poses)]
-    named_by = {id(o): _poses_of(o, all_poses) for o in overlays if isinstance(o, Plan)}
-    labeled_elsewhere = {id(m) for m in named_by.values() if m is not None}
-    plans = False
     for overlay in overlays:
         if isinstance(overlay, Grid):
             _draw_grid(out, view, overlay, layout)
         elif isinstance(overlay, Points):
-            labels = [_point_label(n, p) for n, p in _named(overlay)]
-            _draw_points(out, view.project(overlay.xyz), labels, layout)
-        elif isinstance(overlay, Plan):
-            poses = named_by[id(overlay)]
-            _draw_plan(out, view, overlay, layout, poses.labels if poses is not None else None)
-            plans = True
+            names = [_point_label(n, p) for n, p in _named(overlay)]
+            _draw_points(out, view.project(overlay.xyz), names, layout)
         elif isinstance(overlay, TableEstimate):
             _draw_table(out, view, overlay, layout)
         elif isinstance(overlay, Poses):
-            _draw_poses(out, view, overlay, layout, labeled=id(overlay) not in labeled_elsewhere)
+            _draw_poses(out, view, overlay, layout)
+        elif isinstance(overlay, ArmPath):
+            _draw_arm(out, view, overlay)
         else:
             raise TypeError(f"cannot render a {type(overlay).__name__}")
-    if legend and plans:
-        layout.reserve((0, 0, 90, 60))
-    layout.draw(out)
-    if legend and plans:
-        _draw_legend(out)
+    layout.draw(out, labels)
     return out
-
-
-def _poses_of(plan: Plan, poses: Sequence[Poses]) -> Poses | None:
-    """The poses whose points are `plan`'s waypoints, if any."""
-    for candidate in poses:
-        if candidate.points.shape == plan.waypoints.shape and np.allclose(candidate.points, plan.waypoints):
-            return candidate
-    return None
 
 
 def contact_sheet(
@@ -82,7 +69,7 @@ def contact_sheet(
 ) -> np.ndarray:
     """All `views` as labeled thumbnails `width` pixels wide, `columns` per row, with `overlays` drawn in each.
 
-    Overlays are drawn at thumbnail size (crisp), so only root-frame ones make sense here (`Grid`, `Points`, `Plan`):
+    Overlays are drawn at thumbnail size (crisp), so only root-frame ones make sense here (`Grid`, `Points`, `Poses`):
     the same grid in every thumbnail shows whether the captures agree where they overlap.
     """
     if not views:
@@ -90,7 +77,7 @@ def contact_sheet(
     thumbs = []
     for i, view in enumerate(views):
         small = View(view.capture, view.u0, view.v0, view.width, view.height, width / view.width)
-        image = render(small, *overlays, legend=False)
+        image = render(small, *overlays)
         _text(image, labels[i] if labels is not None else str(i + 1), (6, 18), 0.5)
         thumbs.append(image)
     h = max(t.shape[0] for t in thumbs)
@@ -118,7 +105,7 @@ class _Label:
     anchor: tuple[int, int]
     scale: float
     color: tuple[int, int, int]
-    priority: int  # placed in order: 0 fixed footers, 1 point labels, 2 grid labels, 3 leg lengths
+    priority: int  # placed in order: 0 fixed footers, 1 point labels, 2 grid labels
     required: bool  # placed even if it must overlap (else skipped)
     gap: int  # px from the anchor to the nearest spot
     fixed: bool  # at `anchor` exactly (a footer)
@@ -162,13 +149,15 @@ class _Layout:
         """Queue `text` near `anchor` (or exactly at it, with `fixed`)."""
         self.labels.append(_Label(text, anchor, scale, color, priority, required, gap, fixed, near_only))
 
-    def draw(self, img: np.ndarray) -> list[tuple[str, tuple[int, int, int, int]]]:
-        """Place every queued label and draw it; returns each placed label's text and box."""
+    def draw(self, img: np.ndarray, labels: bool = True) -> list[tuple[str, tuple[int, int, int, int]]]:
+        """Place every queued label (only the fixed footers, without `labels`) and draw it.
+
+        Returns each placed label's text and box.
+        """
         taken = list(self.taken)
         placed: list[tuple[_Label, tuple[int, int], bool]] = []
-        for label in sorted(
-            self.labels, key=lambda lab: lab.priority
-        ):  # stable: same priority keeps its order
+        queued = self.labels if labels else [lab for lab in self.labels if lab.fixed]
+        for label in sorted(queued, key=lambda lab: lab.priority):  # stable: same priority keeps its order
             (w, h), _ = cv2.getTextSize(label.text, cv2.FONT_HERSHEY_SIMPLEX, label.scale, 1)
             spots = self._spots(label, w, h)
             choice = next(((org, far) for org, far in spots if self._free(_box(org, w, h), taken)), None)
@@ -338,74 +327,55 @@ def _occluded(view: View, xyz: np.ndarray, margin: float) -> np.ndarray:
     return hidden
 
 
-def _draw_plan(
-    img: np.ndarray, view: View, plan: Plan, layout: "_Layout", names: Sequence[str] | None = None
-) -> None:
-    """The path, with each sample colored by its state.
+def _draw_poses(img: np.ndarray, view: View, poses: Poses, layout: "_Layout") -> None:
+    """The path through the poses and a gripper at each.
 
-    A thin white line joins the waypoints; the waypoints are labeled with their name (`names`, default 1, 2, ...) and
-    xyz in cm, and each leg shows its length in cm where there is room.
+    The path is a thin line through the tool points in order. A gripper is two fingers joined at their base, with a
+    short body behind toward the wrist: the fixed finger (its tip is the pinch point) in `FIXED_JAW_COLOR`, the moving
+    one in `MOVING_JAW_COLOR`, opened past `width`. So a roll of the wrist shows: the colors swap sides. A ring at the tool point is green if reached and red with an X if not, labeled with its name and
+    xyz in cm.
     """
-    uv_way = view.project(plan.waypoints)
-    _polyline(img, uv_way, (255, 255, 255))
-    uv_samples = view.project(plan.check.sample_xyz)
-    for leg_uv, leg_state in zip(uv_samples, plan.check.sample_state, strict=True):
-        for p, state in zip(leg_uv, leg_state, strict=True):
-            if _inside(img, p):
-                cv2.circle(img, _pixel(p), 2, STATE_COLORS[int(state)], -1, cv2.LINE_AA)
-    lengths = np.linalg.norm(np.diff(plan.waypoints, axis=0), axis=1)
-    for a, b, length in zip(uv_way[:-1], uv_way[1:], lengths, strict=True):
-        mid = (a + b) / 2
-        if _inside(img, mid):
-            layout.label(f"{100 * length:.1f} cm", _pixel(mid), 0.45, priority=3, required=False)
-    names = list(names) if names is not None else [str(i + 1) for i in range(len(plan.waypoints))]
-    # waypoints at the same place (down to a grasp and back up) share one marker: "1,3 (x,y,z)"
-    groups: list[list[int]] = []
-    for i, p in enumerate(plan.waypoints):
-        same = next((g for g in groups if np.linalg.norm(plan.waypoints[g[0]] - p) < 1e-3), None)
-        if same is None:
-            groups.append([i])
-        else:
-            same.append(i)
-    labels = [_point_label(",".join(names[i] for i in g), plan.waypoints[g[0]]) for g in groups]
-    _draw_points(img, uv_way[[g[0] for g in groups]], labels, layout, color=(255, 220, 0))
-
-
-def _draw_poses(img: np.ndarray, view: View, poses: Poses, layout: "_Layout", labeled: bool = True) -> None:
-    """Each pose as a gripper; without poses (no pitch found), an X on each target.
-
-    A gripper is the axis back from the pinch point, the open jaws (a square at the fixed jaw, the pinch point, and
-    one at the moving jaw, opened past `width`), and a ring at the tool point, green if reached and red with an X if
-    not, with its label (unless `labeled` is False: a plan drawn with them names its waypoints after them).
-    """
-    if not len(poses.points):
-        for target in poses.targets if poses.targets is not None else ():
-            p = view.project(target[None])[0]
-            if _inside(img, p):
-                _cross(img, _pixel(p), STATE_COLORS[BLOCKED])
-        layout.label(f"{poses.arm} arm: no pitch", (8, img.shape[0] - 30), priority=0, fixed=True)
-        return
+    # TODO: draw only what the camera could see: hide (or dim) the parts of a gripper the depth shows a surface in
+    # front of, as `_draw_grid` does with `_occluded` (`docs/open_issues.md`, 3).
+    _polyline(img, view.project(poses.points), PATH_COLOR)
     for frame, point, label, ok in zip(poses.frames, poses.points, poses.labels, poses.ok, strict=True):
         pinch, jaw, axis = frame[:3, 3], frame[:3, 0], frame[:3, 2]
         moving = pinch - (poses.width + JAW_CLEARANCE_M) * jaw  # the moving jaw opens along -x
-        uv = view.project(np.array([pinch - GRIPPER_BODY_M * axis, pinch, moving, point]))
-        _polyline(img, uv[[0, 1]], GRIPPER_COLOR, 2)
-        _polyline(img, uv[[1, 2]], GRIPPER_COLOR, 2)
-        for corner in uv[[1, 2]]:
-            if _inside(img, corner):
-                q = _pixel(corner)
-                cv2.rectangle(img, (q[0] - 3, q[1] - 3), (q[0] + 3, q[1] + 3), GRIPPER_COLOR, -1)
-        if _inside(img, uv[3]):
-            c = _pixel(uv[3])
-            color = STATE_COLORS[FREE] if ok else STATE_COLORS[BLOCKED]
+        fixed_base, moving_base = pinch - FINGER_M * axis, moving - FINGER_M * axis
+        wrist = (fixed_base + moving_base) / 2 - WRIST_M * axis
+        uv = view.project(
+            np.array([pinch, fixed_base, moving, moving_base, (fixed_base + moving_base) / 2, wrist, point])
+        )
+        _polyline(img, uv[[1, 3]], GRIPPER_BODY_COLOR, 2)  # the base
+        _polyline(img, uv[[4, 5]], GRIPPER_BODY_COLOR, 2)  # the body, toward the wrist
+        _polyline(img, uv[[0, 1]], FIXED_JAW_COLOR, 3)
+        _polyline(img, uv[[2, 3]], MOVING_JAW_COLOR, 3)
+        if _inside(img, uv[6]):
+            c = _pixel(uv[6])
+            color = REACHED_COLOR if ok else MISSED_COLOR
             cv2.circle(img, c, 9, color, 2, cv2.LINE_AA)
             if not ok:
                 _cross(img, c, color)
             layout.block(c, 11)
-            if labeled:
-                layout.label(label, c, 0.45, GRIPPER_COLOR, gap=13)
-    pitch = "any pitch" if poses.pitch_deg is None else f"pitch {poses.pitch_deg:+.0f} deg"
-    layout.label(f"{poses.arm} arm, {pitch}", (8, img.shape[0] - 30), priority=0, fixed=True)
+            layout.label(_point_label(label, point), c, gap=13)
+    pitches = {round(t[0]) for t in poses.targets}
+    footer = f"{poses.arm} arm" + (f", pitch {pitches.pop():+d} deg" if len(pitches) == 1 else "")
+    layout.label(footer, (8, img.shape[0] - 30), priority=0, fixed=True)
+
+
+def _draw_arm(img: np.ndarray, view: View, path: ArmPath) -> None:
+    """Each skeleton as lines between the joints: faint along the first move and between poses, solid at the poses."""
+    faint = img.copy()
+    for skeleton, kind in zip(path.skeletons, path.kinds, strict=True):
+        at_pose = kind not in ("first move", "step")
+        target = img if at_pose else faint
+        uv = view.project(skeleton)
+        _polyline(target, uv, ARM_COLOR, 3 if at_pose else 1)
+        if at_pose:
+            for p in uv:
+                if _inside(img, p):
+                    cv2.circle(img, _pixel(p), 4, ARM_COLOR, -1, cv2.LINE_AA)
+    cv2.addWeighted(faint, 0.5, img, 0.5, 0, dst=img)
 
 
 def _cross(img: np.ndarray, c: tuple[int, int], color) -> None:
@@ -424,10 +394,3 @@ def _draw_table(img: np.ndarray, view: View, table: TableEstimate, layout: "_Lay
     layout.label(
         f"table z = {100 * table.h:.1f} cm", (8, img.shape[0] - 10), color=TABLE_COLOR, priority=0, fixed=True
     )
-
-
-def _draw_legend(img: np.ndarray) -> None:
-    for row, state in enumerate((FREE, UNKNOWN, BLOCKED)):
-        y = 16 + 18 * row
-        cv2.circle(img, (14, y - 4), 5, STATE_COLORS[state], -1, cv2.LINE_AA)
-        _text(img, STATE_NAMES[state], (26, y), 0.5)

@@ -16,7 +16,7 @@ Serial ports for each arm are in [current_ports.md](current_ports.md). Findings 
 |---|---|
 | `home.py` | Shared: follower construction (`make_follower`), home pose files, the trapezoid-profile `move_all`. |
 | `depth.py` | Shared: align RealSense depth to the color image, depth-edge overlays and checks. |
-| `harness/` | The VLM harness: captures in the root frame, views, grids, table height, path checks, reach (`reach.py`), execution (`execute.py`), `render`, and the workspace DAG; every tool the VLM can call, with its effect (software / sense / move head / move arm / end) and the runner that asks a person before a move, is in `api.py`. Design in `harness.md`. |
+| `harness/` | The VLM harness: captures in the root frame, views, grids, table height, reach (`reach.py`), execution (`execute.py`), `render`, and the workspace DAG; every tool the VLM can call, with its effect (software / sense / move head / move arm / end) and the runner that asks a person before a move, is in `api.py`. Design in `harness.md`. |
 | `ports.py` | Shared: the saved arm-to-port cache (`setup.find_ports` writes it, `resolve(robot_id)` reads it). |
 | `urdfs/xlerobot.urdf`, `urdfs/so101_new_calib.urdf` | The XLeRobot URDF and the official SO-101 URDF (Apache 2.0), merged by `calibration/merge_urdf.py` into `urdfs/xlerobot_so101.urdf` (the head and base with two SO-101 arms), which the calibration uses. |
 | `base_follower.py` | Shared: `SO101FollowerWithBase` (per-joint P gains, optional wheel servos). |

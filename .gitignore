@@ -176,3 +176,6 @@ outputs/
 *.urdf
 *.xml
 *.part
+
+# Scratch work, anywhere in the repo
+**/scratch/
