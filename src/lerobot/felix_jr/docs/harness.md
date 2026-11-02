@@ -7,7 +7,7 @@ Research questions: what is the ideal harness / tool set to enable a vlm to acco
 This doc does 3 things:
 0. summarizes relevant research
 1. discusses design principles for the harness
-2. records results of experiments; TODO: maybe this should be in a separate file?
+2. records the experiments' plan; their results are in [sessions.md](sessions.md)
 
 
 # 0. Research summary
@@ -727,12 +727,9 @@ Decide what counts before looking at renders. Checks, roughly in order:
 
 ## Results
 
-**cable1 / chapstick1 (2026-10-31), driven by hand.** Task: pick an upright chapstick and put it on the other side
-of a cable (cable1) or past a journal (chapstick1). The scan, table height (72.5-74.2 cm over 9 poses, tilt ~2 deg:
-the desk) and grids worked; `locate_pixels` on a zoomed view gave usable points on the chapstick and the target.
-Planning failed on reach, not perception: every waypoint pointing straight down above ~82 cm, and chapstick1's
-place at any height, was out of reach. The cause is the wrist flex limit (+-95 deg), confirmed against placo
-(`tests/felix_jr/smoke_tests/test_ik_smoke.py`). At some tilt every waypoint is reachable (the steepest: -25 to -90
-deg); a pick and place from the side at -20 deg, roll 0 at both, reaches every pose of cable1's and keeps the
-chapstick upright. An earlier version, with the roll free, flipped the jaws between pick and place (J).
-Not yet run on the robot. Open issues from these runs: `open_issues.md`.
+Per session, with the numbers: [sessions.md](sessions.md). In short: cable1 / chapstick1 (2026-10-31) failed on reach,
+not perception, and led to choosing a pitch per pose and then to one optimization per pose (J). pen1 (2026-11-01)
+picked a pen on the second try but never placed it: the first grasp missed by ~1.4 cm across the jaws (small errors
+adding up in the one direction a thin object does not forgive), the head camera could not see the grasp well, both
+lift / back-out moves stopped on the 1.5 deg settle tolerance and went home, and the gripper turned out to be a
+claw, not the parallel gripper the tool point assumes.

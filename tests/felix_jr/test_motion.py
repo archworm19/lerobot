@@ -412,6 +412,15 @@ def test_ctrl_c_in_a_session_stops_the_motion_and_goes_home(slow_robot):
     assert client.motion_status()["kind"] == "home"
 
 
+def test_keep_holding_ends_a_home_session_where_it_is(robot):
+    fake, client = robot
+    with client.session():
+        client.move_joints(FAR)
+        client.keep_holding()
+    assert fake.arm_backend.pos["left_arm"][PAN] == 90.0
+    assert not fake.motion._session_home  # the server will not send it home either
+
+
 def test_a_hold_session_leaves_the_robot_where_it_is(robot):
     fake, client = robot
     with client.session(on_disconnect="hold"):

@@ -472,6 +472,8 @@ class TestPoses:
         json.dumps(loaded.log())
 
 
+# TODO: remove with the legacy objects (`docs/open_issues.md`, 10), as the legacy-plan check in TestRender.test_errors
+# and `assert isinstance(Plan, type)` in TestWorkspace.test_unknown_objects.
 def test_reach_pickled_before_pitches_still_loads(capture):
     arrays = (np.zeros(2), np.array([1.0, 9.0]), np.array([True, False]))
     reach = Reach(None, "right", ({}, {}), *arrays, -90.0)  # type: ignore[arg-type]
@@ -493,6 +495,7 @@ class FakeRobot:
 
     def __init__(self, arms: dict, head: dict | None = None):
         self.arms, self.sent, self.homed = arms, [], 0
+        self.tols, self.unsettled, self.holding, self.stopped = [], set(), False, False
         self.head, self.head_moves = head or {}, []
 
     def head_state(self):
@@ -506,12 +509,22 @@ class FakeRobot:
         return {f"{arm}_arm": dict(pose) for arm, pose in self.arms.items()}
 
     @contextlib.contextmanager
-    def session(self):
+    def session(self, on_disconnect="home"):
+        self.on_disconnect = on_disconnect
         yield self
+
+    def stop(self):
+        self.stopped = True
+        return {"was_moving": False}
 
     def move_joints(self, targets, **kwargs):
         self.sent.append(targets)
-        return {"state": "done", "result": {"reached": True}}
+        self.tols.append(kwargs.get("tol"))
+        reached = len(self.sent) not in self.unsettled
+        return {"state": "done", "result": {"reached": reached}}
+
+    def keep_holding(self):
+        self.holding = True
 
     def home(self):
         self.homed += 1
@@ -564,6 +577,7 @@ class TestApi:
             "look_at": api.Effect.MOVE_HEAD,
             "look_at_pixel": api.Effect.MOVE_HEAD,
             "execute": api.Effect.MOVE_ARM,
+            "home": api.Effect.MOVE_ARM,
             "end_session": api.Effect.END,
         }
         text = api.describe_tools()
@@ -742,3 +756,60 @@ class TestGripperAndHeldObject:
         assert (render(view, poses) != render(view, self.flipped(capture))).any()
         with pytest.raises(TypeError):  # a held object is described, not drawn
             render(view, poses, execute_module.held_object(poses, 0.06, "at1", "at2"))
+
+
+class TestHoldAndHome:
+    def robot_and_harness(self, monkeypatch, answers=(True,)):
+        monkeypatch.setattr(
+            api.Capture, "from_snapshot", classmethod(lambda cls, snap, model: make_capture())
+        )
+        robot = FakeRobot({"right": dict(REST_POSE)})
+        h = api.Harness(ask=lambda spec, preview: True, client=robot, model=object())
+        return robot, h
+
+    def test_hold_stays_at_the_last_pose(self, capture, monkeypatch):
+        robot, h = self.robot_and_harness(monkeypatch)
+        h.call("execute", h.ws.call(make_execution, capture), hold=True)
+        assert robot.homed == 0 and robot.holding and robot.on_disconnect == "home" and len(robot.sent) == 3
+        assert robot.tols == [1.5, 1.5, 1.5]  # each move's own tolerance goes to the server
+
+    def test_a_move_that_does_not_settle_stops_holds_and_looks(self, capture, monkeypatch):
+        robot, h = self.robot_and_harness(monkeypatch)
+        robot.unsettled = {2}  # the move to at1
+        robot.arms["right"]["shoulder_lift.pos"] = 3.0  # where the joint got stuck
+        execution = h.ws.call(make_execution, capture)
+        with pytest.raises(
+            execute_module.StoppedError, match=r"at1 .*shoulder_lift \+3\.0.*capture: capture2"
+        ) as stop:
+            h.call("execute", execution)
+        assert robot.stopped and robot.holding and robot.homed == 0 and len(robot.sent) == 2
+        assert stop.value.errors["shoulder_lift.pos"] == pytest.approx(3.0)
+        assert h.ws.id_of(stop.value.capture) == "capture2" and not h.ws.is_stale(
+            "capture2"
+        )  # fresh: re-plan from it
+        assert h.ws.is_stale(execution) and h.calls[-1]["result"] == ["capture2"]
+
+    def test_a_server_failure_is_not_held(self, capture, monkeypatch):
+        robot, h = self.robot_and_harness(monkeypatch)
+        robot.move_joints = lambda targets, **kwargs: {
+            "state": "failed",
+            "reason": "bus error",
+            "result": None,
+        }
+        with pytest.raises(RuntimeError, match="failed .bus error.; the robot goes home"):
+            h.call("execute", h.ws.call(make_execution, capture), hold=True)
+        assert not robot.holding  # the session goes home on the way out
+
+    def test_home_asks_and_captures(self, monkeypatch):
+        robot, h = self.robot_and_harness(monkeypatch)
+        h.call("home")
+        assert robot.homed == 1 and "capture1" in h.ws.nodes and h.calls[-1]["effect"] == "move arm"
+
+    def test_select_poses(self, capture):
+        from lerobot.felix_jr.harness.reach import select_poses
+
+        poses = make_poses(capture)
+        one = select_poses(poses, "at2")
+        assert one.labels == ("at2",) and not one.ok[0] and one.at_limit == (("wrist_flex",),)
+        with pytest.raises(ValueError):
+            select_poses(poses, "nope")

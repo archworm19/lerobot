@@ -28,6 +28,7 @@ def read_image(path: str | Path, flags: int = cv2.IMREAD_COLOR) -> np.ndarray:
     return image
 
 
+# TODO: remove with the old sessions (`docs/open_issues.md`, 10).
 class SegmentCheck(NamedTuple):
     """Legacy: the result of the removed path check (free / unknown / blocked samples along segments).
 

@@ -26,7 +26,7 @@ Serial ports for each arm are in [current_ports.md](current_ports.md). Findings 
 | `server/` | Robot server for the Raspberry Pi and its client (`FelixClient`); plan in `server_plan.md`. |
 | `teleop/` | `spacemouse_teleop`. |
 | `calibration/` | Camera-to-robot click calibration: the robot model (`xle_robot_model`, on pinocchio), the fit (`xle_fit`), choosing views (`views`), the interactive session (`collect`), the merged URDF (`merge_urdf`); design in `camera_calibration.md`. |
-| `docs/` | This file, `tuning_notes.md`, `realsense_m1.md`, `harness.md`, `head.md`, `camera_calibration.md`, `server_plan.md`, `current_ports.md`, `open_issues.md` (what is missing or wrong in reach, planning and execution). |
+| `docs/` | This file, `tuning_notes.md`, `realsense_m1.md`, `harness.md`, `head.md`, `camera_calibration.md`, `server_plan.md`, `current_ports.md`, `open_issues.md` (what is missing or wrong in reach, planning and execution), `sessions.md` (what each session on the robot did and taught). |
 
 ## First-time order
 

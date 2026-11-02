@@ -34,6 +34,7 @@ from .objects import (
     View,
 )
 
+# TODO: Plan and Reach are legacy, for old sessions only; remove with them (`docs/open_issues.md`, 10).
 OBJECT_TYPES = (
     Capture,
     View,

@@ -307,6 +307,7 @@ class Points:
         return "points: " + "; ".join(rows)
 
 
+# TODO: remove with the old sessions (`docs/open_issues.md`, 10).
 @dataclass(frozen=True, eq=False)
 class Plan:
     """Legacy: a path checked against depth by the removed `check_path`.
@@ -338,6 +339,7 @@ class Focus:
         return f"{text}: {self.reason}" if self.reason else text
 
 
+# TODO: remove with the old sessions (`docs/open_issues.md`, 10).
 @dataclass(frozen=True, eq=False)
 class Reach:
     """Legacy: whether `arm` reached each of `plan`'s waypoints.
@@ -498,6 +500,7 @@ class Move:
     targets: dict[str, float]
     timeout: float  # s, to settle
     settle: bool  # must it settle? (a gripper closing on an object stalls before its target)
+    tol: float = 1.5  # deg: settled when every joint is this close to its target
 
 
 @dataclass(frozen=True, eq=False)

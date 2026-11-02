@@ -14,6 +14,9 @@ a snippet. Checked:
    the cable plan: with the roll free, the place had landed on the other side of the jaws).
 6. A miss says why.
 
+TODO: the waypoints, the rest pose and the pinned verdicts come from the first sessions (cable1 / chapstick1); replace
+them with the new recordings (`docs/open_issues.md`, 10).
+
 Placo mishandles the URDF's continuous joints (the wheels: two coordinates but one velocity): its joint limits land on
 the wrong dofs and the QP goes infeasible after a step or two. The copy placo loads has the wheels fixed.
 """
@@ -254,6 +257,8 @@ def test_the_cable_plan_prepares_without_jumps(model):
     plan = join_poses(*parts)
     assert plan.ok.all(), plan.describe()
     execution = prepare_execution(model, plan)
+    tols = {m.label.split(" ")[0]: m.tol for m in execution.moves}
+    assert tols["1"] == 2.5 and tols["step"] == 4.0  # the labeled poses tighter than the steps between
     jumps = [
         max(abs(b[k] - a[k]) for k in a)
         for a, b in zip(execution.steps.joints[:-1], execution.steps.joints[1:], strict=True)

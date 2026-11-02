@@ -281,6 +281,31 @@ def join_poses(*parts: Poses) -> Poses:
     )
 
 
+def select_poses(poses: Poses, *labels: str) -> Poses:
+    """The poses with these labels, in the order given (e.g. one pose of a path, to go only there)."""
+    missing = [label for label in labels if label not in poses.labels]
+    if missing or not labels:
+        raise ValueError(f"no poses {missing or labels}; have {poses.labels}")
+    index = [poses.labels.index(label) for label in labels]
+    return Poses(
+        poses.arm,
+        poses.capture,
+        poses.points[index],
+        tuple(labels),
+        poses.frames[index],
+        tuple(poses.joints[i] for i in index),
+        poses.position_error_m[index],
+        poses.pitch_error_deg[index],
+        poses.heading_error_deg[index],
+        poses.roll_error_deg[index],
+        tuple(poses.at_limit[i] for i in index),
+        poses.ok[index],
+        tuple(poses.targets[i] for i in index),
+        poses.width,
+        poses.tolerances,
+    )
+
+
 def approach(
     model: XleRobotModel,
     pose: Poses,

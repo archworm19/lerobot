@@ -300,16 +300,18 @@ class FelixClient:
         the server goes to rest by itself after a few seconds. "hold" leaves the robot where it is.
 
         If going to rest is itself interrupted, the session is left open on purpose, so the server finishes
-        the job when the heartbeats stop.
+        the job when the heartbeats stop. `keep_holding()` inside the block ends a "home" session without going
+        to rest, for a run that is meant to end where it is.
         """
         self._call("session_open", on_disconnect=on_disconnect)
+        self._hold_on_exit = False
         heartbeat = _Heartbeat(self._context, self.endpoint, heartbeat_s)
         try:
             yield self
         finally:
             finished = False
             try:
-                if on_disconnect == "home":
+                if on_disconnect == "home" and not self._hold_on_exit:
                     self._go_to_rest()
                 finished = True
             except Exception:
@@ -319,6 +321,16 @@ class FelixClient:
                 if finished:
                     with contextlib.suppress(Exception):
                         self._call("session_close", timeout_s=2.0)
+
+    def keep_holding(self) -> None:
+        """Inside `session()`: when the block ends, leave the robot where it is (the server too), not at rest.
+
+        For a run that ends where it is on purpose (e.g. a step that did not settle: stop, look, re-plan). From here
+        on the server holds too: if the connection drops before the block ends, the robot stays where it is (the
+        watchdog still stops a running motion).
+        """
+        self._call("session_open", on_disconnect="hold")
+        self._hold_on_exit = True
 
     def _go_to_rest(self) -> None:
         """Stop whatever is moving, wait for it to end, then go home."""

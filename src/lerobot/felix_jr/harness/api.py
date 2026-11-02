@@ -182,6 +182,10 @@ class Harness:
             result = self.ws.call(run, *args, **kwargs) if spec.records else run(*args, **kwargs)
         except Exception as e:
             entry["outcome"] = f"error: {type(e).__name__}: {e}"
+            stopped_at = getattr(e, "capture", None)  # a move that did not settle: what the camera saw there
+            if isinstance(stopped_at, Capture):  # recorded after the arm moved, so it is the fresh one
+                entry["result"] = [self.ws.add(stopped_at, name)]
+                e.args = (f"{e} (capture: {entry['result'][0]})",)
             raise
         entry["outcome"] = "ok"
         ids = [self.ws.id_of(r) for r in (result if isinstance(result, (list, tuple)) else [result])]
@@ -240,6 +244,8 @@ class Harness:
 
     def restore(self, state: Mapping[str, Any]) -> None:
         """Load `state()` output (older sessions may lack the call log)."""
+        # TODO: the defaults for "calls" / "ended" are for sessions saved before the runner; remove with the old
+        # sessions (`docs/open_issues.md`, 10).
         self.ws, self.names = state["ws"], dict(state["names"])
         self.calls, self.ended = list(state.get("calls", [])), bool(state.get("ended", False))
 
@@ -392,6 +398,12 @@ def join_poses(h: Harness, *poses: Poses) -> Poses:
 
 
 @tool(Effect.SOFTWARE)
+def select_poses(h: Harness, poses: Poses, *labels: str) -> Poses:
+    """Some of `poses`, by label, in the order given: e.g. one pose of a path, to go only there."""
+    return _reach.select_poses(poses, *labels)
+
+
+@tool(Effect.SOFTWARE)
 def approach(
     h: Harness, pose: Poses, back: float = 0.05, up: float = 0.05, order: Sequence[str] = ("back", "at", "up")
 ) -> Poses:
@@ -533,15 +545,31 @@ def look_at_pixel(h: Harness, view: View, uv: Sequence[float], distance: float =
 
 
 @tool(Effect.MOVE_ARM)
-def execute(h: Harness, execution: Execution, max_vel: float = 20.0, step: bool = False) -> Capture:
+def execute(
+    h: Harness, execution: Execution, max_vel: float = 20.0, step: bool = False, hold: bool = False
+) -> Capture:
     """Run an execution (`prepare_execution`): every move in order at `max_vel` deg/s, then home.
 
-    Returns a capture taken after; everything seen before becomes stale. With `step`, a person confirms each move.
-    Moves the arm: a person approves first, seeing every move.
+    Returns a capture taken after; everything seen before becomes stale. With `hold`, the arm stays at the last pose
+    and the capture is taken there: render the planned poses on it to see where the gripper really is (then `home`).
+    If a move does not settle, the arm stops and holds there, and the error says which joints missed by how much and
+    names the capture taken there: look, and re-plan from it. With `step`, a person confirms each move. Moves the
+    arm: a person approves first, seeing every move.
     """
     if h.ws.is_stale(execution):
         raise ValueError("this execution comes from before the arm last moved: capture again and plan again")
-    return _execute.run_execution(h.client, h.model, execution, max_vel, confirm=h.confirm if step else None)
+    confirm = h.confirm if step else None
+    return _execute.run_execution(h.client, h.model, execution, max_vel, confirm=confirm, hold=hold)
+
+
+@tool(Effect.MOVE_ARM)
+def home(h: Harness) -> Capture:
+    """Send the arms to rest (their recorded home poses) and the head home, and take a capture there.
+
+    Everything seen before becomes stale. Moves the arm: a person approves first.
+    """
+    status = h.client.home()
+    return Capture.from_snapshot(h.client.capture(after=status.get("finished_at")), h.model)
 
 
 @tool(Effect.END, records=False)

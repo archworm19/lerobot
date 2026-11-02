@@ -23,9 +23,32 @@ Last updated 2026-11-01.
 3. **Not everything that moves is drawn.** `arm_path` draws the arm's skeleton along an execution, including the
    first joint-space move from where the arm is (`held_object` describes the carried object in text). Still missing:
    the return home at the end (the home pose is recorded on the robot; `get_homes` would give it) and the gripper
-   open / closed at each pose. And grippers are drawn over everything: a gripper behind an object (from the camera)
+   open / closed at each pose. The fallback when a run fails (stop, then `home`) is also an unplanned joint-space
+   move, and it can start right beside the objects: on pen1 a step backing away from the pen did not settle, and the
+   arm went home from next to both cups. And grippers are drawn over everything: a gripper behind an object (from the camera)
    looks in front of it. TODO: hide or dim the parts the depth shows a surface in front of, as the grid does. A render is also flat: an arm segment drawn over an object may be well above it.
    A top or side view drawn from the root-frame geometry (no camera) would show heights.
+
+## Seeing the grasp
+
+13. **Whether a grasp holds is hard to see.** On pen1 (a thin pen, ~0.8 cm) the gripper closed to `gripper.pos` 2,
+    which reads as "nothing between the jaws", and the close-up showed the pen at the very tips of the closed jaws,
+    yet the person watching saw that it was held. The head camera sees the jaws from above and behind, at ~40 cm:
+    a thin object between the jaw faces is mostly hidden by the jaws themselves, and depth on it is patchy. Ideas:
+    the wrist camera (it looks along the jaws); the gripper's load or current after closing; a capture after a small
+    lift (is the object still in the cup?). Also: the tool point is the closed fingertip, so aiming it at a thin
+    object puts the object at the tips; aim it a finger-depth (~1.5-2 cm) into the jaws instead.
+
+## Motion on the robot
+
+14. **The gripper is a claw; the tool point assumes a parallel gripper.** The moving jaw rotates about a pivot ~8 cm
+    behind the tips: the gap is a wedge, an object's grip center is not `width / 2` from the pinch point along the jaw
+    axis, and closing pushes the object along the jaws too. Model the moving face from the gripper joint (it is in
+    the URDF) and define a grasp as an object of width w at depth d into the jaws, centered in the gap there; measure
+    the `gripper.pos` -> jaw angle mapping (see 2).
+15. **No wrist camera in the loop.** The head camera cannot see whether a thin object is between the jaws
+    (`sessions.md`, pen1); the wrist cameras look along the jaws. Needs their extrinsics (the gripper frame) and their
+    frames in `Capture` (the person is setting them up).
 
 ## Collisions (decided: not checked by the harness)
 
@@ -60,9 +83,17 @@ including the object being grasped. Revisit only if the model, given good render
 9. **The session CLI is a gitignored file.** `harness/scratch/` is ignored (`**/scratch/` in the root
     `.gitignore`). Execution now lives in tracked modules (`execute.py`, the `execute` tool in `api.py`), but the
     CLI that drives a session by hand (`session.py`) does not. Move it to a tracked module once its commands settle.
-10. **Legacy objects.** `objects.Reach`, `objects.Plan` and `scene.SegmentCheck` are kept only so sessions pickled
-    before `Poses` (and before the path check was removed) still load; nothing makes them. Delete them once those
-    sessions (`cable1`, `chapstick1`, `desk1`) are no longer needed.
+10. **Legacy code and data from the first sessions.** Kept only so the sessions recorded before the current design
+    (`cable1`, `chapstick1`, `desk1`, gitignored under `harness/scratch/sessions/`) still load, and so the smoke test
+    has data. New recordings will replace them; then remove, each marked `TODO` in the code:
+    - `objects.Plan` and `scene.SegmentCheck` (the removed path check) and `objects.Reach` with its `__setstate__`
+      (renamed fields), in `harness/objects.py` and `harness/scene.py`;
+    - `Plan` and `Reach` in `OBJECT_TYPES` (`harness/workspace.py`) and in the package exports (`harness/__init__.py`);
+    - the defaults for a missing call log in `api.Harness.restore` (sessions saved before the runner);
+    - their tests in `tests/felix_jr/test_harness.py` (`test_reach_pickled_before_pitches_still_loads`, the legacy-plan
+      check in `TestRender.test_errors`, the `Plan` line in `TestWorkspace.test_unknown_objects`);
+    - the smoke test's data (`tests/felix_jr/smoke_tests/test_ik_smoke.py`: the waypoints, the rest pose and the
+      pinned verdicts come from `cable1` / `chapstick1`): replace with the new recordings, re-pinned.
 11. **Placo needs a patched URDF.** Placo mishandles the URDF's continuous wheel joints (its joint limits land on the
     wrong dofs, and the QP turns infeasible). The IK smoke test loads a copy with the wheels fixed. Worth reporting
     upstream if placo is used for more than cross-checks.

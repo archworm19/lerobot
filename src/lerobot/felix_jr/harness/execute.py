@@ -3,12 +3,22 @@
 `prepare_execution` turns `Poses` into an `Execution`, the exact moves to send: the path through the poses is cut
 into straight steps of at most `step` (so the joint-space moves between them stay close to the drawn lines), each
 solved from the last one's joints with its pitch and roll interpolated between the poses (`reach.solve_path`). It
-refuses if a step misses or a joint jumps more than `max_jump_deg` between steps. Gripper actions go at the poses
-`grip` names (and "start", before the first move); there are none by default.
+refuses if a step misses or a joint jumps more than `max_jump_deg` between steps. Each move settles within a
+tolerance: `pose_tol_deg` at the labeled poses, the looser `step_tol_deg` at the steps between them (they are there to
+stay near the drawn line, not to be exact; a loaded, extended arm does not get within 1.5 deg). Gripper actions go at
+the poses `grip` names (and "start", before the first move); there are none by default.
 
-`run_execution` sends the moves one by one inside `client.session()`, so any error or Ctrl+C sends the robot home;
-checks first that the arm is where the poses' capture saw it; goes home at the end; and returns a capture taken
-after. It does not ask anyone: the caller (`api.Harness`) does, before it runs.
+`run_execution` sends the moves one by one, after checking that the arm is where the poses' capture saw it. Two kinds
+of failure, two answers (`docs/sessions.md`, pen1):
+
+- **A move does not settle** (the client is alive and in control): the arm stops and holds where it is, a capture is
+  taken there, and `StoppedError` is raised with it and each joint's remaining error, for the model to look and re-plan.
+  Going home instead would be an unplanned move, starting next to whatever the arm was handling.
+- **Nobody is in control** (an error, Ctrl+C, a dropped connection, a crashed client): the moves run inside
+  `client.session()`, so the robot goes home, from the client or, when the heartbeats stop, from the server.
+
+At the end it goes home, or with `hold` stays at the last pose (to look at where the gripper really is), and returns a
+capture taken there. It does not ask anyone: the caller (`api.Harness`) does, before it runs.
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -54,6 +64,8 @@ def prepare_execution(
     gripper_closed: float = 1.0,
     step: float = 0.01,
     max_jump_deg: float = 20.0,
+    pose_tol_deg: float = 2.5,
+    step_tol_deg: float = 4.0,
 ) -> Execution:
     """The moves through `poses` (see the module docstring); raises ValueError if they cannot be run.
 
@@ -90,10 +102,27 @@ def prepare_execution(
     for i, joints in enumerate(steps.joints):
         label = poses.labels[marks.index(i)] if i in marks else None
         where = f"{label} {np.round(100 * dense[i], 1).tolist()} cm" if label else f"step {i + 1}"
-        moves.append(Move(where, dict(joints), 10.0, True))
+        moves.append(Move(where, dict(joints), 10.0, True, pose_tol_deg if label else step_tol_deg))
         if label in grip:
             moves.append(gripper(label, label))
     return Execution(poses, steps, tuple(moves))
+
+
+class StoppedError(RuntimeError):
+    """A move did not settle: the arm stopped and holds there.
+
+    `capture` was taken there; `errors` is each joint's measured minus target (deg) when it stopped, `at` the move's
+    label.
+    """
+
+    def __init__(self, at: str, errors: Mapping[str, float], capture: Capture, tol: float):
+        """Record where it stopped, by how much each joint missed, and the capture taken there."""
+        worst = ", ".join(f"{k.removesuffix('.pos')} {v:+.1f}" for k, v in errors.items() if abs(v) > tol)
+        super().__init__(
+            f"{at}: did not settle within {tol:g} deg ({worst or 'no joint over it now'}); the arm stopped and "
+            "holds there: look at the capture taken there and re-plan from it"
+        )
+        self.at, self.errors, self.capture = at, dict(errors), capture
 
 
 def run_execution(
@@ -103,10 +132,13 @@ def run_execution(
     max_vel: float = 20.0,
     max_drift_deg: float = 3.0,
     confirm: Callable[[str], bool] | None = None,
+    hold: bool = False,
 ) -> Capture:
-    """Send `execution`'s moves (see the module docstring) and return a capture taken after, at home.
+    """Send `execution`'s moves (see the module docstring) and return a capture taken after.
 
-    `confirm(label)` is asked before each move when given; False stops (and the robot goes home).
+    The capture is at home, or with `hold` at the last pose, which the arm then holds. A move that does not settle
+    raises `StoppedError` (the arm holds there). `confirm(label)` is asked before each move when given; False stops, and the
+    robot goes home.
     """
     arm, poses = execution.poses.arm, execution.poses
     key = f"{arm}_arm"
@@ -118,17 +150,32 @@ def run_execution(
         raise RuntimeError(
             f"the {arm} arm is {drift:.1f} deg from where the poses' capture saw it: capture again"
         )
-    with client.session():
+    with client.session():  # home if nobody is in control: an error, Ctrl+C, a lost connection
         for move in execution.moves:
             if confirm is not None and not confirm(move.label):
                 raise RuntimeError(f"stopped before {move.label!r}: the robot goes home")
             status = client.move_joints(
-                {key: move.targets}, max_vel=max_vel, max_accel=2 * max_vel, timeout=move.timeout
+                {key: move.targets},
+                max_vel=max_vel,
+                max_accel=2 * max_vel,
+                tol=move.tol,
+                timeout=move.timeout,
             )
-            reached = bool((status.get("result") or {}).get("reached"))
-            if status["state"] != "done" or (move.settle and not reached):
-                raise RuntimeError(f"{move.label}: {status['state']}, did not settle; the robot goes home")
-        status = client.home()
+            if status["state"] != "done":  # stopped or failed on the server: not ours to re-plan
+                raise RuntimeError(
+                    f"{move.label}: {status['state']} ({status.get('reason')}); the robot goes home"
+                )
+            if move.settle and not (status.get("result") or {}).get("reached"):
+                client.stop()
+                state = client.get_state()[key]
+                errors = {k: state[k] - v for k, v in move.targets.items() if k in state}
+                client.keep_holding()  # the session ends here without going home
+                capture = Capture.from_snapshot(client.capture(), model)
+                raise StoppedError(move.label, errors, capture, move.tol)
+        if hold:
+            client.keep_holding()
+        else:
+            status = client.home()
     return Capture.from_snapshot(client.capture(after=status.get("finished_at")), model)
 
 
