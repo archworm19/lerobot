@@ -243,11 +243,9 @@ class Harness:
         return {"ws": self.ws, "names": self.names, "calls": self.calls, "ended": self.ended}
 
     def restore(self, state: Mapping[str, Any]) -> None:
-        """Load `state()` output (older sessions may lack the call log)."""
-        # TODO: the defaults for "calls" / "ended" are for sessions saved before the runner; remove with the old
-        # sessions (`docs/open_issues.md`, 10).
+        """Load `state()` output."""
         self.ws, self.names = state["ws"], dict(state["names"])
-        self.calls, self.ended = list(state.get("calls", [])), bool(state.get("ended", False))
+        self.calls, self.ended = list(state["calls"]), bool(state["ended"])
 
 
 def describe_tools() -> str:

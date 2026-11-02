@@ -3,7 +3,9 @@
 What each session on the robot tried, what worked, what failed (with the numbers), and what it taught. Newest first.
 The design these sessions test is in [harness.md](harness.md); what is still missing or wrong is in
 [open_issues.md](open_issues.md). Session folders are `harness/scratch/sessions/<name>/` (gitignored): captures,
-renders and the workspace log; `session.py log <name>` prints the calls and objects.
+renders and the workspace log; `session.py log <name>` prints the calls and objects. The harness state
+(`workspace.pkl`) of the sessions before pen1 (`cable1`, `cable1_new`, `chapstick1`, `desk1`) no longer loads: it
+holds objects removed since (`Plan`, `Reach`) or lacks the call log. Their images and `log.jsonl` still read.
 
 ## pen1 (2026-11-01): pick a pen out of a glass cup, put it in the other cup
 

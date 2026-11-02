@@ -12,7 +12,7 @@ x to the right, y down, z forward (along the optical axis), meters. Pixels are (
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 import cv2
 import numpy as np
@@ -26,23 +26,6 @@ def read_image(path: str | Path, flags: int = cv2.IMREAD_COLOR) -> np.ndarray:
     if image is None:
         raise FileNotFoundError(f"cannot read image {path}")
     return image
-
-
-# TODO: remove with the old sessions (`docs/open_issues.md`, 10).
-class SegmentCheck(NamedTuple):
-    """Legacy: the result of the removed path check (free / unknown / blocked samples along segments).
-
-    Kept so that sessions saved with it (inside `Plan` objects) still load. Judging whether a path is clear is the
-    model's (`docs/harness.md`, 1.K).
-    """
-
-    status: np.ndarray  # (N,) int: FREE, UNKNOWN or BLOCKED (the worst sample on the segment)
-    # (N,) float: position along the segment (0 = start, 1 = end) of the first sample that is not FREE;
-    # NaN if the whole segment is FREE
-    t_first: np.ndarray
-    point_first: np.ndarray  # (N, 3) float: that sample's xyz; NaN if the segment is FREE
-    sample_xyz: np.ndarray  # (N, S, 3) float: the sample points
-    sample_state: np.ndarray  # (N, S) int: FREE, UNKNOWN or BLOCKED for each sample
 
 
 @dataclass(frozen=True)

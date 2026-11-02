@@ -15,7 +15,6 @@ from lerobot.felix_jr.harness import (
     Grid,
     Points,
     Poses,
-    Reach,
     Scene,
     TableEstimate,
     View,
@@ -33,7 +32,7 @@ from lerobot.felix_jr.harness import (
     table_height,
     zoom,
 )
-from lerobot.felix_jr.harness.objects import Execution, Move, Plan, angles_of, orientation
+from lerobot.felix_jr.harness.objects import Execution, Move, angles_of, orientation
 from lerobot.felix_jr.harness.render import _Layout
 
 H, W = 120, 160
@@ -249,8 +248,6 @@ class TestRender:
             render(full_view(capture), "grid")
         with pytest.raises(ValueError, match="own capture"):
             render(full_view(make_capture()), table_height(capture))
-        with pytest.raises(TypeError):  # legacy plans are not drawn
-            render(full_view(capture), Plan(np.zeros((2, 3)), None, capture, 0.02))  # type: ignore[arg-type]
 
 
 class TestDescribe:
@@ -330,7 +327,6 @@ class TestWorkspace:
         ws = Workspace()
         with pytest.raises(KeyError):
             ws.is_stale(TableEstimate(None, 0.3, 0, 0.0, 0.0, np.zeros((1, 1), bool)))  # type: ignore[arg-type]
-        assert isinstance(Plan, type)
 
 
 class TestContactSheetAndFocus:
@@ -470,21 +466,6 @@ class TestPoses:
         loaded = pickle.loads(pickle.dumps(ws))
         assert loaded["poses1"].capture is loaded["capture1"] and loaded["poses1"].labels == poses.labels
         json.dumps(loaded.log())
-
-
-# TODO: remove with the legacy objects (`docs/open_issues.md`, 10), as the legacy-plan check in TestRender.test_errors
-# and `assert isinstance(Plan, type)` in TestWorkspace.test_unknown_objects.
-def test_reach_pickled_before_pitches_still_loads(capture):
-    arrays = (np.zeros(2), np.array([1.0, 9.0]), np.array([True, False]))
-    reach = Reach(None, "right", ({}, {}), *arrays, -90.0)  # type: ignore[arg-type]
-    state = dict(reach.__dict__)
-    state["tilt_deg"] = state.pop("pitch_error_deg")
-    del state["pitch_deg"]
-    state["down"] = True
-    old = Reach.__new__(Reach)
-    old.__setstate__(state)
-    np.testing.assert_array_equal(old.pitch_error_deg, [1.0, 9.0])
-    assert old.pitch_deg == -90.0 and "pointing down" in old.describe()
 
 
 # ---- api: the tools, their effects, approval -------------------------------------------------------------------

@@ -1,21 +1,22 @@
-"""IK smoke test: `harness.reach` on the calibrated URDF, around the cable / chapstick experiments.
+"""IK smoke test: `harness.reach` on the calibrated URDF, around the pen1 session (`docs/sessions.md`).
 
-`solve_pose` is one local optimization (pitch held, position / heading / roll weighted by tolerances, from `init`;
-`docs/harness.md` 1.J). Orchestration (sweeping a pitch, choosing a start) is the caller's, as a model would do it in
-a snippet. Checked:
+pen1 (2026-11-01): the right arm picks a pen leaning in one glass cup and puts it in the other, from the side, the
+roll held at 0. `solve_pose` is one local optimization (pitch held, position / heading / roll weighted by tolerances,
+from `init`; `docs/harness.md` 1.J). Orchestration (sweeping a pitch, choosing a start) is the caller's, as a model
+would do it in a snippet. Checked:
 
 1. Round trip: a full pose read off a random configuration is solved back, starting near it (both arms).
-2. Straight down on the experiments' waypoints (2026-10-31, `harness/scratch/sessions/{cable1,chapstick1}`): only the
-   lowest are reachable with the pitch held at -90; the others miss with the wrist flex at its limit.
+2. Straight down, pen1's waypoints are all out of reach: the wrist flex is at its limit.
 3. A chained pitch sweep finds the steepest reachable pitch of each waypoint (pinned); placo confirms a solution 5 deg
    shallower, along the heading ours found.
-4. The cable plan, at a pitch every waypoint allows, prepares into an execution with no joint jumps.
-5. A pick and place from the side, the roll held at 0 at both, keeps the carried object upright (the flip found on
-   the cable plan: with the roll free, the place had landed on the other side of the jaws).
-6. A miss says why.
+4. The session's pitch window: perpendicular to the pen (-36) reaches the pick but not the lift or the place; the
+   pitches it used (-15, then -12) reach all three.
+5. The executed plan (attempt 1) is solved again as recorded and prepares into an execution with no joint jumps.
+6. The pen turns with the gripper: carried rigidly, its bottom lands on the empty cup's center (where the session
+   aimed it), clears the rim on the way, and would miss by centimeters had the place been aimed as if it did not turn.
+7. A miss says why.
 
-TODO: the waypoints, the rest pose and the pinned verdicts come from the first sessions (cable1 / chapstick1); replace
-them with the new recordings (`docs/open_issues.md`, 10).
+The numbers are pen1's recorded objects (`harness/scratch/sessions/pen1`, gitignored), copied here.
 
 Placo mishandles the URDF's continuous joints (the wheels: two coordinates but one velocity): its joint limits land on
 the wrong dofs and the QP goes infeasible after a step or two. The copy placo loads has the wheels fixed.
@@ -41,81 +42,58 @@ from lerobot.felix_jr.harness.reach import approach, join_poses, solve_pose  # n
 
 URDF = Path(reach_module.__file__).parents[1] / "urdfs" / "xlerobot_calib10312026.urdf"
 
-# the arms at rest, as both sessions' captures saw them (the default start)
+# the arms at rest, as pen1's capture4 saw them (the default start)
 REST = {
     "left": {
         "shoulder_pan.pos": -7.385,
         "shoulder_lift.pos": -102.725,
-        "elbow_flex.pos": 96.484,
+        "elbow_flex.pos": 96.571,
         "wrist_flex.pos": 67.253,
         "wrist_roll.pos": -1.626,
     },
     "right": {
-        "shoulder_pan.pos": -0.044,
+        "shoulder_pan.pos": 2.154,
         "shoulder_lift.pos": -102.989,
         "elbow_flex.pos": 96.527,
-        "wrist_flex.pos": 71.341,
+        "wrist_flex.pos": 71.429,
         "wrist_roll.pos": -0.22,
     },
 }
 CAPTURE = SimpleNamespace(arms=REST, head_ticks={})  # what the solver reads from a capture
 
-# every waypoint the experiments proposed (root frame, cm) -> reachable by the right arm pointing straight down?
-DOWN_CM = {
-    # cable1: the chapstick at (-37.5, 9.8), over the cable to (-37.2, -6.3), then moved closer to (-35.5, -5)
-    (-37.5, 9.8, 90.0): False,
-    (-37.5, 9.8, 84.0): False,
-    (-37.5, 9.8, 82.0): False,
-    (-37.5, 9.8, 78.0): True,
-    (-37.2, -6.3, 90.0): False,
-    (-37.2, -6.3, 84.0): False,
-    (-37.2, -6.3, 78.5): False,
-    (-35.5, -5.0, 84.0): False,
-    (-35.5, -5.0, 82.0): False,
-    (-35.5, -5.0, 80.0): False,
-    (-35.5, -5.0, 78.5): False,
-    # chapstick1: the chapstick at (-38.9, 8.7), past a journal to (-38.5, -17)
-    (-38.9, 8.7, 92.0): False,
-    (-38.9, 8.7, 78.0): True,
-    (-38.5, -17.0, 92.0): False,
-    (-38.5, -17.0, 78.0): False,
+# attempt 1 (root frame, cm): the grasp on the pen, a 14.2 cm lift (the pen's bottom over the higher rim), and the
+# place, aimed so the pen's bottom lands in the empty cup; jaws 1 cm, pitch -15, roll 0
+PICK_CM, PLACE_CM = (-45.38, 14.21, 86.32), (-45.98, -1.3, 97.22)
+LIFT_M, PLACE_DROP_M = 0.142, 0.033
+PITCH_DEG, WIDTH = -15.0, 0.01
+WAYPOINTS_CM = {
+    "pick": PICK_CM,
+    "pick.up": (PICK_CM[0], PICK_CM[1], PICK_CM[2] + LIFT_M * 100),
+    "place": PLACE_CM,
 }
+
+# the plan as executed (poses146)
+PLAN_CM = {
+    "pick.back": (-40.55, 14.02, 87.62),
+    "pick": PICK_CM,
+    "pick.up": (-45.38, 14.21, 100.52),
+    "place.up": (-45.98, -1.3, 100.52),
+    "place": PLACE_CM,
+    "place.back": (-41.53, 0.56, 98.52),
+}
+# a branch switch jumps tens of degrees; at place.up (the edge of reach) the elbow turns ~14 deg / cm of descent
+MAX_STEP_JUMP_DEG = 15.0
 
 # the steepest pitch a sweep from -90 toward 0 (5 deg steps, each solve from the last) reaches, roll free
 PITCHES_DEG = np.arange(-90.0, 0.1, 5.0)
-STEEPEST_PITCH_DEG = {
-    (-37.5, 9.8, 90.0): -70,
-    (-37.5, 9.8, 84.0): -85,
-    (-37.5, 9.8, 82.0): -85,
-    (-37.5, 9.8, 78.0): -90,
-    (-37.2, -6.3, 90.0): -60,
-    (-37.2, -6.3, 84.0): -70,
-    (-37.2, -6.3, 78.5): -75,
-    (-35.5, -5.0, 84.0): -75,
-    (-35.5, -5.0, 82.0): -75,
-    (-35.5, -5.0, 80.0): -80,
-    (-35.5, -5.0, 78.5): -80,
-    (-38.9, 8.7, 92.0): -65,
-    (-38.9, 8.7, 78.0): -90,
-    (-38.5, -17.0, 92.0): -25,
-    (-38.5, -17.0, 78.0): -40,
-}
+STEEPEST_PITCH_DEG = {"pick": -65, "pick.up": -30, "place": -30}
 
-# the executed cable plan (plan5), and a pitch all of it allows
-CABLE_PLAN_CM = [
-    (-37.5, 9.8, 82.0),
-    (-37.5, 9.8, 78.0),
-    (-37.5, 9.8, 82.0),
-    (-35.5, -5.0, 80.0),
-    (-35.5, -5.0, 78.5),
-    (-35.5, -5.0, 80.0),
-]
-CABLE_PITCH_DEG = -80.0
-MAX_STEP_JUMP_DEG = 8.0  # between 1 cm steps (near the edge of reach the elbow speeds up: ~5.4 deg/cm)
-
-# the chapstick (located in the cable1 session: the middle of the stick) and where it was to go, at the same height
-CHAPSTICK_WIDTH, CHAPSTICK_LENGTH = 0.017, 0.065
-PICK_CM, PLACE_CM = (-37.27, 9.6, 77.96), (-37.22, -6.35, 77.91)
+# the pen: its axis from a line fit through depth samples along it (the end up first, leaning ~35 deg away from the
+# robot), its bottom 15 cm below the grasp; the empty cup's center at the height the bottom was aimed, and its rim
+PEN_AXIS = (-0.551690610388469, 0.20228655714243862, 0.8091462285697545)
+PEN_BELOW_GRASP = 0.15
+CUP_CM = (-37.2, -0.57, 85.08)
+EMPTY_RIM_Z = 0.872
 
 
 @pytest.fixture(scope="module")
@@ -132,6 +110,29 @@ def placo_robot(tmp_path_factory):
     path = tmp_path_factory.mktemp("placo") / "robot.urdf"
     ET.ElementTree(root).write(path)
     return placo.RobotWrapper(str(path))
+
+
+@pytest.fixture(scope="module")
+def plan(model):
+    """pen1's attempt 1, solved as the session did: the pick, the place from it, and their approaches."""
+    pick = solve_pose(
+        model, "right", CAPTURE, cm(PICK_CM), PITCH_DEG, roll_deg=0.0, width=WIDTH, label="pick"
+    )
+    place = solve_pose(
+        model,
+        "right",
+        CAPTURE,
+        cm(PLACE_CM),
+        PITCH_DEG,
+        roll_deg=0.0,
+        width=WIDTH,
+        init=pick,
+        label="place",
+    )
+    return join_poses(
+        approach(model, pick, up=LIFT_M),
+        approach(model, place, up=PLACE_DROP_M, order=("up", "at", "back")),
+    )
 
 
 def cm(xyz) -> np.ndarray:
@@ -182,6 +183,13 @@ def sweep(model, target: np.ndarray) -> list[bool]:
     return reached
 
 
+def pen_bottom(plan, label: str) -> np.ndarray:
+    """Where the pen's bottom is at pose `label`, carried rigidly from the pick."""
+    pen = held_object(plan, PEN_BELOW_GRASP, "pick", "place", axis=PEN_AXIS)
+    i = plan.labels.index(label)
+    return pen.centers[i] - PEN_BELOW_GRASP * pen.axes[i]
+
+
 # ---- 1. round trip ------------------------------------------------------------------------------------------------
 
 
@@ -212,23 +220,22 @@ def test_a_full_pose_is_solved_back_from_nearby(model, arm):
 # ---- 2. straight down ---------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("waypoint_cm", list(DOWN_CM), ids=lambda w: ",".join(f"{v:g}" for v in w))
-def test_straight_down(model, waypoint_cm):
-    pose = solve_pose(model, "right", CAPTURE, cm(waypoint_cm), -90.0, roll_deg=None)
-    assert bool(pose.ok[0]) == DOWN_CM[waypoint_cm], pose.describe()
-    if not pose.ok[0]:
-        assert "wrist_flex" in pose.at_limit[0], pose.describe()  # the wrist cannot bend far enough
+@pytest.mark.parametrize("label", list(WAYPOINTS_CM))
+def test_straight_down_is_out_of_reach(model, label):
+    pose = solve_pose(model, "right", CAPTURE, cm(WAYPOINTS_CM[label]), -90.0, roll_deg=None)
+    assert not pose.ok[0], pose.describe()
+    assert "wrist_flex" in pose.at_limit[0], pose.describe()  # the wrist cannot bend far enough
 
 
 # ---- 3. steepest pitch ----------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("waypoint_cm", list(STEEPEST_PITCH_DEG), ids=lambda w: ",".join(f"{v:g}" for v in w))
-def test_steepest_pitch_of_a_chained_sweep(model, placo_robot, waypoint_cm):
-    target = cm(waypoint_cm)
+@pytest.mark.parametrize("label", list(STEEPEST_PITCH_DEG))
+def test_steepest_pitch_of_a_chained_sweep(model, placo_robot, label):
+    target = cm(WAYPOINTS_CM[label])
     reached = sweep(model, target)
     steepest = float(PITCHES_DEG[reached.index(True)])
-    assert steepest == STEEPEST_PITCH_DEG[waypoint_cm], reached
+    assert steepest == STEEPEST_PITCH_DEG[label], reached
     # placo agrees, 5 deg shallower, along the heading ours found there
     pose = solve_pose(model, "right", CAPTURE, target, steepest + 5.0, roll_deg=None)
     assert pose.ok[0], pose.describe()
@@ -238,65 +245,37 @@ def test_steepest_pitch_of_a_chained_sweep(model, placo_robot, waypoint_cm):
     assert error <= reach_module.POSITION_TOL_M and off <= 5.0, (error, off)
 
 
-# ---- 4. the cable plan --------------------------------------------------------------------------------------------
+# ---- 4. the pitch window, roll 0 ----------------------------------------------------------------------------------
 
 
-def test_the_cable_plan_prepares_without_jumps(model):
-    # the first pose with the roll free; the rest held at the roll it got (left free, the roll goes anywhere along
-    # its free direction from pose to pose, and the steps between swing the wrist)
-    first = solve_pose(
-        model, "right", CAPTURE, cm(CABLE_PLAN_CM[0]), CABLE_PITCH_DEG, roll_deg=None, label="1"
-    )
-    roll = first.angles()[0][2]
-    parts, last = [first], first
-    for i, waypoint in enumerate(CABLE_PLAN_CM[1:], start=2):
-        last = solve_pose(
-            model, "right", CAPTURE, cm(waypoint), CABLE_PITCH_DEG, roll_deg=roll, init=last, label=str(i)
-        )
-        parts.append(last)
-    plan = join_poses(*parts)
+@pytest.mark.parametrize(
+    ("pitch_deg", "reached"),
+    [(-36.0, {"pick"}), (-15.0, set(WAYPOINTS_CM)), (-12.0, set(WAYPOINTS_CM))],
+)
+def test_the_pitch_window_of_a_side_grasp(model, pitch_deg, reached):
+    found = {
+        label
+        for label, waypoint in WAYPOINTS_CM.items()
+        if solve_pose(model, "right", CAPTURE, cm(waypoint), pitch_deg, roll_deg=0.0, width=WIDTH).ok[0]
+    }
+    assert found == reached
+
+
+# ---- 5. the executed plan -------------------------------------------------------------------------------------------
+
+
+def test_the_plan_is_solved_as_recorded_and_prepares_without_jumps(model, plan):
+    assert plan.labels == tuple(PLAN_CM)
     assert plan.ok.all(), plan.describe()
-    execution = prepare_execution(model, plan)
+    np.testing.assert_allclose(plan.points, cm(list(PLAN_CM.values())), atol=0.001)
+    execution = prepare_execution(model, plan, {"start": "open", "pick": "close", "place": "open"})
     tols = {m.label.split(" ")[0]: m.tol for m in execution.moves}
-    assert tols["1"] == 2.5 and tols["step"] == 4.0  # the labeled poses tighter than the steps between
+    assert tols["pick"] == 2.5 and tols["step"] == 4.0  # the labeled poses tighter than the steps between
     jumps = [
         max(abs(b[k] - a[k]) for k in a)
         for a, b in zip(execution.steps.joints[:-1], execution.steps.joints[1:], strict=True)
     ]
     assert max(jumps) < MAX_STEP_JUMP_DEG, f"step {int(np.argmax(jumps)) + 2}: {max(jumps):.1f} deg"
-
-
-# ---- 5. pick and place ----------------------------------------------------------------------------------------------
-
-
-def test_a_side_pick_and_place_keeps_the_object_upright(model):
-    pick = solve_pose(
-        model, "right", CAPTURE, cm(PICK_CM), -20.0, roll_deg=0.0, width=CHAPSTICK_WIDTH, label="pick"
-    )
-    place = solve_pose(
-        model,
-        "right",
-        CAPTURE,
-        cm(PLACE_CM),
-        -20.0,
-        roll_deg=0.0,
-        width=CHAPSTICK_WIDTH,
-        init=pick,
-        label="place",
-    )
-    path = join_poses(approach(model, pick), approach(model, place, order=("up", "at", "back")))
-    assert path.labels == ("pick.back", "pick", "pick.up", "place.up", "place", "place.back")
-    assert path.ok.all(), path.describe()
-    rolls = [roll for _, _, roll in path.angles()]
-    assert max(abs(r) for r in rolls) < 2.0, rolls  # the same side of the jaws throughout: no flip
-    tilt = held_object(path, CHAPSTICK_LENGTH, "pick", "place").tilt_deg
-    assert np.nanmax(tilt) < 2.0, tilt
-    # the stick's middle is between the jaws: half its width from the fixed jaw, toward the moving one
-    frame = path.frames[path.labels.index("pick")]
-    np.testing.assert_allclose(
-        frame[:3, 3] - CHAPSTICK_WIDTH / 2 * frame[:3, 0], cm(PICK_CM), atol=reach_module.POSITION_TOL_M
-    )
-    execution = prepare_execution(model, path, {"start": "open", "pick": "close", "place": "open"})
     assert [m.label for m in execution.moves if "gripper" in m.label] == [
         "start: gripper open",
         "pick: gripper close",
@@ -304,7 +283,25 @@ def test_a_side_pick_and_place_keeps_the_object_upright(model):
     ]
 
 
-# ---- 6. a miss ------------------------------------------------------------------------------------------------------
+# ---- 6. carrying the pen --------------------------------------------------------------------------------------------
+
+
+def test_the_pen_turns_with_the_gripper_and_lands_in_the_cup(plan):
+    rolls = [roll for _, _, roll in plan.angles()]
+    assert max(abs(r) for r in rolls) < 2.0, rolls  # the same side of the jaws throughout: no flip
+    headings = dict(zip(plan.labels, (heading for _, heading, _ in plan.angles()), strict=True))
+    turn = (headings["place"] - headings["pick"] + 180.0) % 360.0 - 180.0
+    assert 20.0 < abs(turn) < 30.0, headings  # the heading follows the shoulder pan from cup to cup
+    # carried rigidly, the bottom lands on the cup's center; aimed as if the pen did not turn, it would miss
+    np.testing.assert_allclose(pen_bottom(plan, "place"), cm(CUP_CM), atol=0.005)
+    unturned = cm(PLACE_CM) - PEN_BELOW_GRASP * np.asarray(PEN_AXIS)
+    assert np.linalg.norm(unturned[:2] - cm(CUP_CM)[:2]) > 0.03
+    # the carry keeps the bottom over the empty cup's rim
+    for label in ("pick.up", "place.up"):
+        assert pen_bottom(plan, label)[2] > EMPTY_RIM_Z + 0.01, label
+
+
+# ---- 7. a miss ------------------------------------------------------------------------------------------------------
 
 
 def test_a_miss_says_why(model):

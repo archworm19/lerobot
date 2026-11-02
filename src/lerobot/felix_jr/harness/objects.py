@@ -21,7 +21,7 @@ from lerobot.felix_jr.calibration.xle_fit import load_session
 from lerobot.felix_jr.calibration.xle_robot_model import HEAD_JOINTS, XleRobotModel
 from lerobot.felix_jr.depth import with_matrices
 
-from .scene import Scene, SegmentCheck, read_image
+from .scene import Scene, read_image
 
 if TYPE_CHECKING:
     from lerobot.felix_jr.server.client import Capture as Snapshot
@@ -307,25 +307,6 @@ class Points:
         return "points: " + "; ".join(rows)
 
 
-# TODO: remove with the old sessions (`docs/open_issues.md`, 10).
-@dataclass(frozen=True, eq=False)
-class Plan:
-    """Legacy: a path checked against depth by the removed `check_path`.
-
-    Kept so that sessions saved with it still load. Paths are now the order of a `Poses`' points, and judging whether
-    one is clear is the model's (`docs/harness.md`, 1.K).
-    """
-
-    waypoints: np.ndarray  # (M, 3)
-    check: SegmentCheck
-    capture: Capture
-    radius: float
-
-    def describe(self) -> str:
-        """How many waypoints."""
-        return f"legacy path, {len(self.waypoints)} waypoints"
-
-
 @dataclass(frozen=True, eq=False)
 class Focus:
     """The views the model chose to work in, after the scan (a selection: nothing moves). `views[0]` is primary."""
@@ -337,52 +318,6 @@ class Focus:
         """How many views and why."""
         text = f"focus on {len(self.views)} view(s)"
         return f"{text}: {self.reason}" if self.reason else text
-
-
-# TODO: remove with the old sessions (`docs/open_issues.md`, 10).
-@dataclass(frozen=True, eq=False)
-class Reach:
-    """Legacy: whether `arm` reached each of `plan`'s waypoints.
-
-    Replaced by `Poses`; kept so that sessions saved before it still load.
-    """
-
-    plan: Plan
-    arm: str
-    poses: tuple[dict[str, float], ...]  # per waypoint, the solved joints in LeRobot degrees
-    position_error_m: np.ndarray  # (M,) how far the solution's pinch point is from the waypoint
-    pitch_error_deg: np.ndarray  # (M,) how far the gripper's pitch is from `pitch_deg`
-    ok: np.ndarray  # (M,) bool
-    pitch_deg: float | None  # the requested gripper pitch (-90 = straight down), None = any
-
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        """Unpickle, including a `Reach` saved before pitches (`tilt_deg` from straight down, `down`)."""
-        if "tilt_deg" in state:
-            state = dict(state)
-            state["pitch_error_deg"] = state.pop("tilt_deg")
-            state["pitch_deg"] = -90.0 if state.pop("down") else None
-        self.__dict__.update(state)
-
-    def describe(self) -> str:
-        """Which waypoints the arm reaches, and by how much it misses the others."""
-        rows = []
-        for i, (ok, error, off) in enumerate(
-            zip(self.ok, self.position_error_m, self.pitch_error_deg, strict=True)
-        ):
-            if ok:
-                rows.append(f"{i + 1} ok")
-            else:
-                miss = f"{_cm(error)} cm short" if error > 0.005 else ""
-                bent = f"pitch {off:.0f} deg off" if off > 5 else ""
-                rows.append(f"{i + 1} unreachable ({', '.join(r for r in (miss, bent) if r)})")
-        verdict = "reaches all waypoints" if self.ok.all() else f"reaches {int(self.ok.sum())}/{len(self.ok)}"
-        if self.pitch_deg is None:
-            how = ""
-        elif self.pitch_deg == -90:
-            how = " pointing down"
-        else:
-            how = f" at pitch {self.pitch_deg:+.0f} deg"
-        return f"{self.arm} arm {verdict}{how}: " + "; ".join(rows)
 
 
 def _deg(value: float) -> str:

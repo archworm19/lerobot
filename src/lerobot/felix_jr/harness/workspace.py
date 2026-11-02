@@ -26,15 +26,12 @@ from .objects import (
     Focus,
     Grid,
     HeldObject,
-    Plan,
     Points,
     Poses,
-    Reach,
     TableEstimate,
     View,
 )
 
-# TODO: Plan and Reach are legacy, for old sessions only; remove with them (`docs/open_issues.md`, 10).
 OBJECT_TYPES = (
     Capture,
     View,
@@ -46,8 +43,6 @@ OBJECT_TYPES = (
     Execution,
     ArmPath,
     HeldObject,
-    Plan,
-    Reach,
 )
 MAX_LOGGED_ELEMENTS = 64  # arrays with more elements are logged by shape only
 

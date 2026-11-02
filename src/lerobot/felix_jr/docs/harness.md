@@ -615,8 +615,8 @@ Each layer of 1.H is built and tested before the one above it, so nothing waits 
 4. **Agent loop.** First version: Claude Code itself is the agent, working in the workspace (as VIA did with Claude
    Code / Codex), so no loop is built until the tools settle. Then `propose_plan` with a VLM API.
 5. **Poses + execute on the robot**, with a person approving each move: built (`solve_pose`, `join_poses`,
-   `approach`, `prepare_execution`, `execute`, `api.Harness`), dry-run and tested against fake hardware; not yet run on the
-   robot (`open_issues.md`, 1).
+   `approach`, `prepare_execution`, `execute`, `api.Harness`), dry-run and tested against fake hardware, then run on the
+   robot (`pen1` in `sessions.md`).
 
 ## Step 1: objects + render + workspace (offline)
 
@@ -719,7 +719,6 @@ Decide what counts before looking at renders. Checks, roughly in order:
 
 ## Later
 
-- Run the full flow on the robot with a person approving each move (after the free-air test, `open_issues.md` 1).
 - `segment(text)` / candidate keypoints (SAM3 or GroundedSAM, as in MOKA / ReKep) when grid + depth fails on object
   edges or grasp points.
 - Grasp yaw from depth (PCA of the object's depth blob), so the model doesn't estimate the angle.

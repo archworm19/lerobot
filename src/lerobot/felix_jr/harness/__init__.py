@@ -6,10 +6,8 @@ from .objects import (
     Focus,
     Grid,
     HeldObject,
-    Plan,
     Points,
     Poses,
-    Reach,
     TableEstimate,
     View,
 )
@@ -18,7 +16,6 @@ from .scene import Scene
 from .tools import focus, full_view, locate_grid, locate_pixels, make_grid, table_height, zoom
 from .workspace import Node, Workspace
 
-# TODO: Plan and Reach are legacy, for old sessions only; remove with them (`docs/open_issues.md`, 10).
 __all__ = [
     "ArmPath",
     "Capture",
@@ -26,10 +23,8 @@ __all__ = [
     "Grid",
     "HeldObject",
     "Node",
-    "Plan",
     "Points",
     "Poses",
-    "Reach",
     "Scene",
     "TableEstimate",
     "View",
