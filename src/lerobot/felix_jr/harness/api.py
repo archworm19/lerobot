@@ -138,11 +138,17 @@ class Harness:
 
     @property
     def client(self) -> "FelixClient":
-        """The robot client (connected on first use)."""
+        """The robot client (connected on first use, and checked against the model: `XleRobotModel.check_robot`)."""
         if self._client is None:
             from lerobot.felix_jr.server.client import FelixClient
 
-            self._client = FelixClient(self.endpoint)
+            client = FelixClient(self.endpoint)
+            try:
+                self.model.check_robot(client)
+            except Exception:
+                client.close()
+                raise
+            self._client = client
         return self._client
 
     # ---- running tools -------------------------------------------------------------------------------------

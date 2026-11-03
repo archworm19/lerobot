@@ -51,6 +51,7 @@ from lerobot.felix_jr.calibration.xle_fit import (
     Click,
     FitConfig,
     Session,
+    arm_calibration_of,
     calibrate,
     check_compatible,
     fit,
@@ -65,6 +66,7 @@ from lerobot.felix_jr.calibration.xle_robot_model import (
     SIDES,
     TICKS_PER_TURN,
     XleRobotModel,
+    arm_record,
     default_parameters,
 )
 from lerobot.felix_jr.depth import with_matrices
@@ -161,6 +163,7 @@ class CollectSession:
         self.capture: Capture = client.capture(color_format=color_format)
         intrinsics = {k: self.capture.calibration["color_intrinsics"][k] for k in INTRINSICS_KEYS}
         self.model = self._build_model(start_from, client.head_state(), intrinsics)
+        record = arm_record(client.arm_calibration()[self.arm_id])  # what the clicks' joint angles mean
         if side is not None:
             if side not in SIDES:
                 raise ValueError(f"side must be one of {SIDES}")
@@ -173,9 +176,11 @@ class CollectSession:
                 raise ValueError(f"{out_dir} holds {self.session.arm} arm clicks, not {arm}")
             self.message = f"resumed with {len(self.session.clicks)} clicks"
         else:
-            self.session = Session(out_dir, arm, [], self.model.head_signs, self.model.head_refs, intrinsics)
+            self.session = Session(
+                out_dir, arm, [], self.model.head_signs, self.model.head_refs, intrinsics, record
+            )
         self.others = [load_session(path) for path in other_sessions]
-        here = Session(out_dir, arm, [], self.model.head_signs, self.model.head_refs, intrinsics)
+        here = Session(out_dir, arm, [], self.model.head_signs, self.model.head_refs, intrinsics, record)
         check_compatible([here, self.session, *self.others])
         if self.others:
             self._note(
@@ -414,6 +419,8 @@ class CollectSession:
             return None
         cfg = FitConfig()
         final, holdout = calibrate(self.model, clicks, cfg, holdout_every)
+        # the estimates hold under the arm calibrations the clicks were taken with, not a --start-from's
+        self.model.arm_calibration = arm_calibration_of([self.session, *self.others])
         path = self.out_dir / CALIBRATION_FILE
         self.model.save(path)
         path.with_suffix(".md").write_text(report(self.model, clicks, final, holdout, cfg))

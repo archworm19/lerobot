@@ -13,7 +13,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-PROTOCOL_VERSION = 3  # 3: motion commands, sessions; 2: capture(after=), head_* commands
+PROTOCOL_VERSION = 4  # 4: arm_calibration; 3: motion commands, sessions; 2: capture(after=), head_* commands
 DEFAULT_PORT = 5555
 
 

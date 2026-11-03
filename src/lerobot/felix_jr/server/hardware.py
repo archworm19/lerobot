@@ -12,7 +12,7 @@ import logging
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -54,6 +54,12 @@ class Hardware(Protocol):
 
     def state(self) -> dict[str, Any]:
         """Joint positions per arm (`{"left_arm": {"shoulder_pan.pos": deg, ...}}`) and `"moving": bool`."""
+
+    def arm_calibration(self) -> dict[str, dict[str, dict[str, int]]]:
+        """Each arm's LeRobot motor calibration, as loaded from its file on the robot. Reads no servo.
+
+        `{"right_arm": {"gripper": {"id", "drive_mode", "homing_offset", "range_min", "range_max"}, ...}}`.
+        """
 
     def capture(self, after: float | None = None) -> Snapshot:
         """The latest camera frames together with the current joint state.
@@ -167,6 +173,15 @@ class FakeArms:
     def arm_ids(self) -> list[str]:
         """See `ArmBackend.arm_ids`."""
         return list(self.ids)
+
+    def calibration(self) -> dict[str, dict[str, dict[str, int]]]:
+        """Every arm's motor calibration: the full tick range, the gripper's as the right arm's on the real robot."""
+        motors = {
+            name: {"id": i, "drive_mode": 0, "homing_offset": 0, "range_min": 0, "range_max": 4095}
+            for i, name in enumerate(j.removesuffix(".pos") for j in self.HOME)
+        }
+        motors["gripper"] |= {"range_min": 2046, "range_max": 3493}
+        return {robot_id: {name: dict(motor) for name, motor in motors.items()} for robot_id in self.ids}
 
     def observe(self) -> dict[str, dict[str, float]]:
         """See `ArmBackend.observe`."""
@@ -339,6 +354,10 @@ class FakeHardware:
     def state(self) -> dict[str, Any]:
         """See `Hardware.state`."""
         return self.motion.state()
+
+    def arm_calibration(self) -> dict[str, dict[str, dict[str, int]]]:
+        """See `Hardware.arm_calibration`."""
+        return self.arm_backend.calibration()
 
     def capture(self, after: float | None = None) -> Snapshot:
         """See `Hardware.capture` (a fake frame is always fresh, so `after` changes nothing)."""
@@ -527,6 +546,13 @@ class RealHardware:
     def state(self) -> dict[str, Any]:
         """See `Hardware.state`."""
         return self.motion.state()
+
+    def arm_calibration(self) -> dict[str, dict[str, dict[str, int]]]:
+        """See `Hardware.arm_calibration`."""
+        return {
+            robot_id: {name: asdict(motor) for name, motor in robot.calibration.items()}
+            for robot_id, robot in self.robots.items()
+        }
 
     def capture(self, after: float | None = None) -> Snapshot:
         """See `Hardware.capture`. Needs the camera."""

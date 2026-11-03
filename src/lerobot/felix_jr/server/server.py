@@ -206,6 +206,10 @@ class RobotServer:
         """Abort the running motion; the arms hold where they are."""
         return self.hardware.motion.stop(), []
 
+    def cmd_arm_calibration(self) -> tuple[dict[str, Any], list[dict]]:
+        """Each arm's LeRobot motor calibration (ranges in raw ticks)."""
+        return {"arms": self.hardware.arm_calibration()}, []
+
     def cmd_get_homes(self) -> tuple[dict[str, Any], list[dict]]:
         """The recorded home pose of every arm."""
         return {"homes": self.hardware.motion.arms.homes()}, []

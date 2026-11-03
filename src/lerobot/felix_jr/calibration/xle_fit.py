@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
+from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, arm_record
 from lerobot.utils.import_utils import _scipy_available, require_package
 
 if TYPE_CHECKING or _scipy_available:
@@ -62,7 +62,11 @@ class Click:
 
 @dataclass
 class Session:
-    """A folder of clicks of one arm, with the head servo map and intrinsics they were recorded with."""
+    """A folder of clicks of one arm, with the head servo map, intrinsics and arm calibration they were recorded with.
+
+    `arm_calibration` is the arm's LeRobot calibration on the robot (`arm_record`); None in sessions recorded before
+    it was kept.
+    """
 
     path: Path
     arm: str
@@ -70,6 +74,7 @@ class Session:
     head_signs: dict[str, int]
     head_refs: dict[str, int]
     intrinsics: dict[str, float]
+    arm_calibration: dict[str, dict[str, int]] | None = None
 
 
 SESSION_FILE = "observations.json"
@@ -102,6 +107,7 @@ def load_session(directory: str | Path) -> Session:
         {k: int(v) for k, v in settings["head_signs"].items()},
         {k: int(v) for k, v in settings["head_refs"].items()},
         dict(settings["intrinsics"]),
+        arm_record(settings["arm_calibration"]) if settings.get("arm_calibration") else None,
     )
 
 
@@ -114,6 +120,7 @@ def save_session(session: Session) -> None:
             "intrinsics": session.intrinsics,
             "head_signs": session.head_signs,
             "head_refs": session.head_refs,
+            "arm_calibration": session.arm_calibration,
         },
         "observations": [
             {
@@ -133,7 +140,11 @@ def save_session(session: Session) -> None:
 
 
 def check_compatible(sessions: Sequence[Session]) -> None:
-    """Raise unless all sessions share the head's servo map and the intrinsics (their clicks store raw ticks)."""
+    """Raise unless the sessions can be fitted together.
+
+    All must share the head's servo map and the intrinsics (their clicks store raw ticks), and the sessions of each
+    arm its LeRobot calibration (their clicks store joint angles, which it defines).
+    """
     first = sessions[0]
     for s in sessions[1:]:
         for name in ("head_signs", "head_refs", "intrinsics"):
@@ -142,14 +153,40 @@ def check_compatible(sessions: Sequence[Session]) -> None:
                     f"{s.path} and {first.path} have different {name} ({getattr(s, name)} vs {getattr(first, name)}): "
                     "their clicks cannot be fitted together"
                 )
+    for a in sessions:
+        for b in sessions:
+            known = None not in (a.arm_calibration, b.arm_calibration)
+            if a.arm == b.arm and known and a.arm_calibration != b.arm_calibration:
+                raise ValueError(
+                    f"{a.path} and {b.path} were recorded under different LeRobot calibrations of the {a.arm} "
+                    "arm (it was recalibrated in between): their clicks cannot be fitted together"
+                )
+
+
+def arm_calibration_of(sessions: Sequence[Session]) -> dict[str, dict[str, dict[str, int]]]:
+    """Per arm, the LeRobot calibration its sessions were recorded under.
+
+    An arm with a session from before these were kept is left out: its calibration is unknown.
+    """
+    out = {}
+    for arm in sorted({s.arm for s in sessions}):
+        records = [s.arm_calibration for s in sessions if s.arm == arm]
+        known = [r for r in records if r is not None]
+        if len(known) == len(records):
+            out[arm] = known[0]
+    return out
 
 
 def model_for_sessions(sessions: Sequence[Session], **kwargs: Any) -> XleRobotModel:
-    """An uncalibrated `XleRobotModel` with the sessions' servo map and intrinsics (which must all agree)."""
+    """An uncalibrated `XleRobotModel` with the sessions' servo map, intrinsics and arm calibrations (must agree)."""
     check_compatible(sessions)
     first = sessions[0]
     return XleRobotModel.from_urdf(
-        head_signs=first.head_signs, head_refs=first.head_refs, intrinsics=first.intrinsics, **kwargs
+        head_signs=first.head_signs,
+        head_refs=first.head_refs,
+        intrinsics=first.intrinsics,
+        arm_calibration=arm_calibration_of(sessions),
+        **kwargs,
     )
 
 
@@ -433,7 +470,11 @@ def main() -> None:
     parser.add_argument(
         "--holdout-every", type=int, default=5, help="hold out every N-th click (5; 0 = none)"
     )
-    parser.add_argument("--start-from", type=Path, help="a calibrated URDF whose estimates start the fit")
+    parser.add_argument(
+        "--start-from",
+        type=Path,
+        help="a calibrated URDF whose estimates start the fit (its gripper maps carry over)",
+    )
     args = parser.parse_args()
 
     sessions = [load_session(path) for path in args.sessions]
@@ -442,6 +483,9 @@ def main() -> None:
     if args.start_from:
         previous = XleRobotModel.load(args.start_from)
         theta0 = np.array([previous.estimate_dict().get(p.name, 0.0) for p in model.parameters])
+        model.gripper_maps = dict(
+            previous.gripper_maps
+        )  # measured on the gripper, not fit here: carried over
     clicks = [c for s in sessions for c in s.clicks]
     cfg = FitConfig(args.sigma_px, args.huber)
     final, holdout = calibrate(model, clicks, cfg, args.holdout_every, theta0)

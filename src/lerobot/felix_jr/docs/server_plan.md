@@ -129,7 +129,8 @@ ticks with recorded limits and home), `server.py` and `client.py` (`FelixClient`
 Commands so far: `hello`, `get_state` (arms and head), `capture` (with `after=<time>` to wait for a frame taken
 after a move finished, since the camera lags), the head commands (`head_move`, `head_wiggle`, `head_record`,
 `head_torque_limit`), and the motion commands (`move_joints`, `home`, `base_velocity`, `motion_status`, `stop`,
-`get_homes`, `heartbeat`, `session_open` / `session_close`). Protocol version 3. Tried on the Pi: `hello`,
+`get_homes`, `heartbeat`, `session_open` / `session_close`), and `arm_calibration` (each arm's LeRobot motor
+calibration, read-only: what calibrated URDFs are checked against). Protocol version 4. Tried on the Pi: `hello`,
 `get_state`, `capture`, and the head range tool. Not yet on the real hardware: the motion commands.
 `setup/head_range.py` and `checks/server_wiggle.py` are the tools built on them.
 

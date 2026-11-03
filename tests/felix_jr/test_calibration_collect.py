@@ -12,7 +12,7 @@ pytest.importorskip("scipy")
 from lerobot.felix_jr.calibration import collect as collect_module  # noqa: E402
 from lerobot.felix_jr.calibration.collect import CollectSession, decode_key, head_limits, parse_seed  # noqa: E402
 from lerobot.felix_jr.calibration.xle_fit import Session, load_session, save_session  # noqa: E402
-from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel  # noqa: E402
+from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, arm_record  # noqa: E402
 from lerobot.felix_jr.server.client import FelixClient  # noqa: E402
 from lerobot.felix_jr.server.hardware import FakeHardware  # noqa: E402
 from lerobot.felix_jr.server.server import RobotServer  # noqa: E402
@@ -150,6 +150,8 @@ def test_other_sessions_join_the_fit_and_finish_writes_one_calibration(robot, tm
         path = joined.finish(holdout_every=0)
     loaded = XleRobotModel.load(path)
     assert loaded.fit_info["clicks"] == 4 and sorted(loaded.fit_info["sessions"]) == ["cal", "cal_right"]
+    # the left arm's calibration as the robot reported it; the right session predates snapshots: unknown
+    assert loaded.arm_calibration == {"left": arm_record(client.arm_calibration()["left_arm"])}
     assert path.with_suffix(".md").is_file()
 
 
@@ -159,6 +161,16 @@ def test_sessions_with_another_head_reference_are_refused(robot, tmp_path):
     save_session(elsewhere)
     with client.session(), pytest.raises(ValueError, match="head_refs"):
         make_session(client, tmp_path, other_sessions=[elsewhere.path])
+
+
+def test_sessions_from_before_the_arm_was_recalibrated_are_refused(robot, tmp_path):
+    fake, client = robot
+    record = arm_record(client.arm_calibration()["left_arm"])
+    record["shoulder_lift"]["homing_offset"] += 40
+    earlier = Session(tmp_path / "earlier", "left", [], SIGNS, REFS, FAKE_INTRINSICS, record)
+    save_session(earlier)
+    with client.session(), pytest.raises(ValueError, match="recalibrated in between"):
+        make_session(client, tmp_path, other_sessions=[earlier.path])
 
 
 def test_a_calibration_made_with_other_head_directions_is_refused(robot, tmp_path):

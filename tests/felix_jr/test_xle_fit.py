@@ -147,6 +147,25 @@ def test_sessions_with_different_head_references_are_refused(tmp_path):
         xle_fit.model_for_sessions([a, b])
 
 
+def test_sessions_carry_the_arm_calibration_they_were_recorded_under(tmp_path):
+    record = {"elbow_flex": {"drive_mode": 0, "homing_offset": 12, "range_min": 900, "range_max": 3100}}
+    recalibrated = {"elbow_flex": record["elbow_flex"] | {"homing_offset": 15}}
+    a = Session(tmp_path / "a", "left", [], SIGNS, REFS, INTRINSICS, record)
+    xle_fit.save_session(a)
+    assert xle_fit.load_session(a.path).arm_calibration == record
+    older = Session(tmp_path / "older", "left", [], SIGNS, REFS, INTRINSICS)  # before snapshots: unknown
+    right = Session(tmp_path / "r", "right", [], SIGNS, REFS, INTRINSICS, recalibrated)
+    assert xle_fit.model_for_sessions([a, a, right]).arm_calibration == {
+        "left": record,
+        "right": recalibrated,
+    }
+    assert xle_fit.model_for_sessions([a, older, right]).arm_calibration == {"right": recalibrated}
+    with pytest.raises(ValueError, match="different LeRobot calibrations of the left arm"):
+        xle_fit.model_for_sessions(
+            [a, Session(tmp_path / "b", "left", [], SIGNS, REFS, INTRINSICS, recalibrated)]
+        )
+
+
 def test_a_version_1_session_folder_is_read_as_clicks(tmp_path):
     """The first sessions (~/cal_left, ~/cal_right) were written by version 1's `collect`, in this format."""
     pose = {f"{j}.pos": 5.0 for j in ARM_JOINTS}

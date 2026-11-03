@@ -286,6 +286,14 @@ class FelixClient:
         """Abort the running motion. The arms hold where they are. Returns `{was_moving}`."""
         return self._call("stop")[0]
 
+    def arm_calibration(self) -> dict[str, dict[str, dict[str, int]]]:
+        """Each arm's LeRobot motor calibration on the robot: `{"right_arm": {"gripper": {"range_min": ticks, ...}}}`.
+
+        The robot's own copy, which is what its servo readings mean; compare a calibration against it with
+        `XleRobotModel.check_robot`.
+        """
+        return self._call("arm_calibration")[0]["arms"]
+
     def get_homes(self) -> dict[str, dict[str, float]]:
         """The recorded home pose of every arm (they are recorded on the robot, with `setup.record_home`)."""
         return self._call("get_homes")[0]["homes"]

@@ -9,9 +9,12 @@ still applies; this file covers how we work in this directory.
 `docs/` is the source of truth for setup, design and what has been tried. Check it before changing code or
 running anything on the robot, and update it when what you do changes what it says.
 
+- **Start with `docs/layout.md`**: what each folder is, which computer it runs on (the Pi or your computer), and
+  where each kind of state lives: robot settings on the robot (`setup/`), the calibrated URDF on your computer
+  (`calibration/`), recordings in `scratch/`.
 - **Run books** (how to set up and run things):
-  - `docs/README.md`: layout of this directory, first-time setup (new arm, new computer), the server, head range,
-    calibration, checks, teleop, troubleshooting, tests.
+  - `docs/README.md`: first-time setup (new arm, new computer), the server, head range, calibration, the gripper,
+    checks, teleop, troubleshooting, tests.
   - `docs/current_ports.md`: serial ports of each arm on each computer.
   - `docs/realsense_m1.md`: the RealSense on the Mac (pitfalls, what is verified).
 - **Design documents** (why things are the way they are):
@@ -36,6 +39,11 @@ uv run python -m lerobot.felix_jr.<folder>.<script> ...
 Extras: `--extra feetech` (servos), `--extra pyzmq-dep` (the server), `--extra felix_jr` (pinocchio, placo,
 scipy: calibration and reach). Anything that moves the robot needs a person watching; scripts that move it ask
 first (`api.SAFE`) and go to rest on exit. Rehearse against the fake robot (`server.server --fake`) when you can.
+
+New scripts go in `setup/` if what they write is a robot setting, and in `calibration/` if it goes into the calibrated
+URDF (`docs/layout.md`, "setup/ and calibration/"). The URDF records the robot settings it was made under, and
+`XleRobotModel.check_robot` refuses a robot whose settings changed since; when something new depends on a robot
+setting, record it in the URDF and check it the same way.
 
 ## Testing
 

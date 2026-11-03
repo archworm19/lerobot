@@ -19,12 +19,17 @@ The design is in `docs/camera_calibration.md`. In short:
   SO-101's tool center point (`<arm>_gripper_frame_link`), and the camera sees it when the gripper's hinge axis
   (`<arm>_gripper` joint) points along the line of sight, from the arm's visible side (the wrist camera blocks
   the other one).
+- **The gripper** is a claw: the moving jaw turns about the hinge (`<arm>_gripper`) and its tip meets the fixed jaw's
+  at the pinch point. Its opening is measured from there (`GripperMap`, recorded by `calibration.gripper_step`), not as
+  the URDF's joint angle: in the SO-101 URDF the jaws meet at about -11.4 deg (from the moving jaw's mesh), past the
+  joint's -10 deg limit. The moving tip turns on a circle of `jaw_radius` about the hinge axis.
 
 Joint configurations `q` are pinocchio configuration vectors of measured angles (`joint_vector` builds one from
 servo readings); `zero:` corrections are added inside, so the same `q` serves every `theta`.
 """
 
 import json
+import logging
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -46,6 +51,8 @@ from lerobot.utils.import_utils import _pinocchio_available, require_package
 if TYPE_CHECKING or _pinocchio_available:
     import pinocchio as pin
 
+log = logging.getLogger(__name__)
+
 HEAD_JOINTS = {"head_neck": "head_pan_joint", "head_eyes": "head_tilt_joint"}  # servo -> URDF joint
 CAMERA_MOUNT = "fixed_head_camera_link"
 ARM_MOUNTS = {"left": "fixed_Base", "right": "fixed_Base_2"}
@@ -53,6 +60,8 @@ TICKS_PER_TURN = 4096
 AXES = ("x", "y", "z")
 SIDES = ("positive", "negative")
 CALIBRATION_TAG = "felix_calibration"  # the element `save` adds to the calibrated URDF
+# The fields of a LeRobot motor calibration that decide what its readings mean (not `id`, the bus address)
+MOTOR_CALIBRATION_FIELDS = ("drive_mode", "homing_offset", "range_min", "range_max")
 # The D415's factory color intrinsics at 640x480 (diagnostics/realsense_check.py); a capture carries its own.
 DEFAULT_INTRINSICS = {"fx": 610.97, "fy": 610.01, "ppx": 315.95, "ppy": 247.03, "width": 640, "height": 480}
 
@@ -178,6 +187,46 @@ class Prediction:
     visibility: float
 
 
+def motor_record(motor: Mapping[str, int]) -> dict[str, int]:
+    """The fields of one motor's LeRobot calibration that decide what its readings mean (`MOTOR_CALIBRATION_FIELDS`)."""
+    return {k: int(motor[k]) for k in MOTOR_CALIBRATION_FIELDS}
+
+
+def arm_record(motors: Mapping[str, Mapping[str, int]]) -> dict[str, dict[str, int]]:
+    """`motor_record` of every motor of an arm, from `FelixClient.arm_calibration()[<arm>_arm]`."""
+    return {name: motor_record(motor) for name, motor in motors.items()}
+
+
+@dataclass(frozen=True)
+class GripperMap:
+    """How far an arm's `gripper.pos` opens the jaws (`calibration.gripper_step`).
+
+    The opening is the moving jaw's angle about the hinge from where the tips meet:
+    `deg_per_unit * (gripper.pos - pos_closed)`, negative below `pos_closed` (the servo squeezes closed jaws).
+    `gripper.pos` is LeRobot's 0-100 over the gripper's calibrated tick range, so the map holds only under the
+    gripper's LeRobot calibration it was measured with (`calibration`, a `motor_record` as the robot reported it):
+    recalibrating the arm with `lerobot-calibrate` invalidates it (`XleRobotModel.check_robot`). `measurements` are
+    the `(gripper.pos, gap m)` pairs it was fit to.
+    """
+
+    pos_closed: float
+    deg_per_unit: float
+    calibration: dict[str, int]
+    measurements: tuple[tuple[float, float], ...] = ()
+
+    def opening_deg(self, pos: float) -> float:
+        """The jaws' opening angle (degrees) at `gripper.pos` `pos`."""
+        return self.deg_per_unit * (pos - self.pos_closed)
+
+    def pos_for(self, opening_deg: float) -> float:
+        """The `gripper.pos` that opens the jaws `opening_deg` degrees; `opening_deg`'s inverse."""
+        return self.pos_closed + opening_deg / self.deg_per_unit
+
+
+class RobotMismatchError(RuntimeError):
+    """A calibration's copy of the robot's settings no longer matches the robot (`XleRobotModel.check_robot`)."""
+
+
 @dataclass(frozen=True)
 class _UrdfJoint:
     name: str
@@ -204,6 +253,8 @@ class XleRobotModel:
         parameters: Sequence[Param] | None = None,
         floor_z: float | None = None,
         visible_side: Mapping[str, str] | None = None,
+        gripper_maps: Mapping[str, GripperMap] | None = None,
+        arm_calibration: Mapping[str, Mapping[str, Mapping[str, int]]] | None = None,
     ):
         """Build the model from URDF text (`from_urdf` reads a file).
 
@@ -212,6 +263,9 @@ class XleRobotModel:
         `fx, fy, ppx, ppy, width, height`. `parameters`: the rows to calibrate (default `default_parameters()`).
         `floor_z`: the table's height in the root frame, if known. `visible_side`: per arm, the side of the
         gripper the camera must see ("positive" by default: the wrist camera is on the negative side).
+        `gripper_maps`: per arm, how `gripper.pos` opens the jaws, where measured. `arm_calibration`: per arm, the
+        LeRobot calibration (`arm_record`) its clicks were taken under, where known: the arm's estimates hold only
+        under it.
         """
         require_package("pin", extra="kinematics", import_name="pinocchio")
         self.urdf = urdf
@@ -224,6 +278,8 @@ class XleRobotModel:
         self.parameters = list(parameters if parameters is not None else default_parameters())
         self.floor_z = floor_z
         self.visible_side = dict.fromkeys(ARMS, "positive") | dict(visible_side or {})
+        self.gripper_maps = dict(gripper_maps or {})
+        self.arm_calibration = {arm: arm_record(motors) for arm, motors in (arm_calibration or {}).items()}
         if not set(self.visible_side.values()) <= set(SIDES):
             raise ValueError(f"visible_side must be one of {SIDES}: {self.visible_side}")
         self.covariance: np.ndarray | None = None  # of the estimates, from the last fit
@@ -664,6 +720,18 @@ class XleRobotModel:
         sight = self._pose(OPTICAL_FRAME)[:3, 3] - self._pose(pinch_frame(arm))[:3, 3]
         return float(axis @ sight) / float(np.linalg.norm(sight))
 
+    def jaw_radius(self, arm: str, theta: np.ndarray | Mapping[str, float] | None = None) -> float:
+        """Distance (m) from `arm`'s pinch point to its gripper's hinge axis: the circle the moving jaw's tip turns on.
+
+        Both are fixed to the gripper body, so it does not depend on the joints.
+        """
+        self._evaluate(self.joint_vector(), theta)
+        hinge = self._joints[arm_joint(arm, "gripper")]
+        frame = self._pose(hinge.child)  # its origin is on the axis
+        axis = frame[:3, :3] @ (hinge.axis / np.linalg.norm(hinge.axis))
+        offset = self._pose(pinch_frame(arm))[:3, 3] - frame[:3, 3]
+        return float(np.linalg.norm(np.cross(offset, axis)))
+
     def in_view(self, uv: np.ndarray, margin: float = 0.0) -> bool:
         """True if pixel `uv` is inside the image, at least `margin` pixels from the border."""
         return bool(
@@ -686,6 +754,62 @@ class XleRobotModel:
             axis=1,
         )
         return uv, z
+
+    # ---- the robot it was made for -----------------------------------------------------------------------
+
+    def check_robot(self, client: Any) -> None:
+        """Raise `RobotMismatchError` unless the robot behind `client` still has the settings this model copied.
+
+        A calibration is made under settings that live on the robot and change only there: the head's servo map
+        (`head_signs`, and `head_refs`: each head servo's home, recorded with `setup.head_range`), which turns head
+        readings into the camera's pose; each arm's LeRobot calibration (`arm_calibration`), which turns servo ticks
+        into the joint angles the estimates correct; and the gripper's, for each gripper map. After any of them
+        changes, the model's geometry is silently wrong. Parts the robot does not report (no head servos, an arm
+        that is not connected) are not checked; nor are arms the model has no snapshot of (calibrations made before
+        snapshots), which is logged.
+        """
+        problems = []
+        head = client.get_state().get("head") or {}
+        for servo in HEAD_JOINTS:
+            if servo not in head:
+                continue
+            home, ref = head[servo]["home"], self.head_refs[servo]
+            record = "setup.head_range" + (" --name head_neck" if servo == "head_neck" else "")
+            if home is None:
+                problems.append(
+                    f"{servo}: no home recorded on the robot; the calibration's is {ref} ticks ({record})"
+                )
+            elif home != ref:
+                problems.append(
+                    f"{servo}: home {home} ticks on the robot, {ref} in the calibration (re-recorded? recalibrate "
+                    "the camera, docs/README.md section 6)"
+                )
+            if head[servo]["sign"] != self.head_signs[servo]:
+                problems.append(
+                    f"{servo}: sign {head[servo]['sign']} on the robot, {self.head_signs[servo]} in the calibration"
+                )
+        robot = {arm_id.removesuffix("_arm"): arm_record(m) for arm_id, m in client.arm_calibration().items()}
+        for arm, motors in robot.items():
+            if arm in self.arm_calibration:
+                problems += _record_differences(
+                    f"{arm} arm",
+                    self.arm_calibration[arm],
+                    motors,
+                    "recalibrate the camera, docs/README.md section 6",
+                )
+            elif any(p.arm == arm and v for p, v in zip(self.parameters, self._estimates, strict=True)):
+                log.warning(
+                    "the calibration has no snapshot of the %s arm's LeRobot calibration: not checked", arm
+                )
+            if arm in self.gripper_maps:
+                problems += _record_differences(
+                    f"{arm} gripper map",
+                    {"gripper": self.gripper_maps[arm].calibration},
+                    motors,
+                    "rerun calibration.gripper_step, docs/README.md section 7",
+                )
+        if problems:
+            raise RobotMismatchError("the calibration does not match the robot:\n  " + "\n  ".join(problems))
 
     # ---- export and persistence -----------------------------------------------------------------------------
 
@@ -725,9 +849,9 @@ class XleRobotModel:
         """Write the calibrated URDF: `to_urdf()` plus a `<felix_calibration>` element holding everything else.
 
         Any URDF reader (pinocchio, placo, a viewer) uses the file as it is and ignores the element. `load` reads
-        the element back: the servo map, intrinsics, visible sides, floor, the parameter table, the estimates,
-        their covariance, `fit_info`, and the URDF's original origins of every joint a parameter corrects, so the
-        nominal model, and with it the priors, come back exactly.
+        the element back: the servo map, intrinsics, visible sides, floor, the gripper maps, the arms' LeRobot
+        calibrations, the parameter table, the estimates, their covariance, `fit_info`, and the URDF's original origins of every joint a parameter corrects,
+        so the nominal model, and with it the priors, come back exactly.
         """
         root = ET.fromstring(self.to_urdf())
         nominal_root = ET.fromstring(self.urdf)
@@ -744,6 +868,8 @@ class XleRobotModel:
             "intrinsics": self.intrinsics,
             "floor_z": self.floor_z,
             "visible_side": self.visible_side,
+            "gripper_maps": {arm: asdict(m) for arm, m in self.gripper_maps.items()},
+            "arm_calibration": self.arm_calibration,
             "parameters": [asdict(p) for p in self.parameters],
             "estimates": self._estimates.tolist(),
             "covariance": None if self.covariance is None else np.asarray(self.covariance).tolist(),
@@ -782,12 +908,32 @@ class XleRobotModel:
             [Param(**p) for p in data["parameters"]],
             data["floor_z"],
             data["visible_side"],
+            {  # a calibration may have none (none measured yet)
+                arm: GripperMap(**m | {"measurements": tuple(map(tuple, m["measurements"]))})
+                for arm, m in data.get("gripper_maps", {}).items()
+            },
+            data.get("arm_calibration", {}),  # none in calibrations made before snapshots
         )
         model.set_estimates(np.array(data["estimates"], dtype=float))
         if data["covariance"] is not None:
             model.covariance = np.array(data["covariance"], dtype=float)
         model.fit_info = data["fit_info"]
         return model
+
+
+def _record_differences(
+    what: str, ours: Mapping[str, Mapping[str, int]], robot: Mapping[str, Mapping[str, int]], fix: str
+) -> list[str]:
+    """One line per motor whose LeRobot calibration on the robot differs from `ours` (the fields that differ)."""
+    lines = []
+    for motor, fields in ours.items():
+        if motor not in robot:
+            lines.append(f"{what}: no {motor} on the robot ({fix})")
+            continue
+        changed = [f"{k} {robot[motor][k]} (was {v})" for k, v in fields.items() if robot[motor][k] != v]
+        if changed:
+            lines.append(f"{what}: {motor} recalibrated on the robot: {', '.join(changed)} ({fix})")
+    return lines
 
 
 def _floats(

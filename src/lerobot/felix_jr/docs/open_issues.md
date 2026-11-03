@@ -35,16 +35,17 @@ Last updated 2026-11-02 (10 closed: the legacy objects are gone; the IK smoke te
     w is held: centered in the gap at depth d into the jaws. With the moving jaw opened by theta, the gap's
     bisector is at theta / 2 from the fixed jaw, so roughly `r * (cos(theta / 2), sin(theta / 2))` in the jaw plane,
     offset from the **gripper hinge** (the `<arm>_gripper` joint's origin, the pivot), not from the pinch point. The
-    URDF already has that joint (the moving jaw link, limits -10..100 deg), so the model can compute the moving jaw's
-    tip and the gap from forward kinematics instead of a hand formula; what it lacks is the gripper's angle
-    (`joint_vector` leaves the gripper at 0) and the mapping in b.
+    moving tip is the pinch point turned about the hinge axis by the opening: `jaw_radius` gives the circle (~8.1 cm
+    on the right arm) and the map from b the opening. Do not use the URDF's joint angle for it: in the SO-101 URDF
+    the jaws meet at about -11.4 deg (from the moving jaw's mesh), past the joint's -10 deg limit, so angle 0 is
+    already ~16 mm open. `joint_vector` still leaves the gripper joint at 0.
 
-    **b. Measure the gripper's range of motion: `gripper.pos` -> jaw angle.** `gripper.pos` is 0-100 over the
-    calibrated tick range, with no known mapping to the jaw's angle or opening; `execute --open 60` is a guess.
-    Open questions: does this need its own script (open in steps, measure the gap or click the moving tip), or can
-    it ride on the click calibration (click the moving jaw's tip too)? Should the result be saved in the calibrated
-    URDF? Suggestion: yes, as a `zero:` (and if needed scale) correction on the `<arm>_gripper` joint, like the other
-    joints, so `calibration.urdf` stays the one file that carries the robot's geometry.
+    **b. Measure the gripper's range of motion: `gripper.pos` -> jaw opening.** Built: `calibration.gripper_step`
+    (`README.md` section 7) steps the gripper, takes caliper gaps, and writes a `GripperMap` (where the tips meet,
+    degrees per unit, the calibrated range it holds for, the raw measurements) into the calibrated URDF's
+    `<felix_calibration>` element; `XleRobotModel.gripper_maps` reads it. The harness refuses a map whose range no
+    longer matches the robot's (`XleRobotModel.check_robot`, when it connects). Not yet done: running it on the robot
+    (both arms), and committing the resulting URDF.
 
     **c. Decide how the pinch point helpers coexist with the grasp point.** `XleRobotModel`'s pinch point methods
     (`pinch_point`, the projection and its derivatives, `pinch_frame`, `pinch_joint`, visibility) are what the

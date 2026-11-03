@@ -12,21 +12,8 @@ Serial ports for each arm are in [current_ports.md](current_ports.md). Findings 
 
 ## Layout
 
-| Path | What it is |
-|---|---|
-| `home.py` | Shared: follower construction (`make_follower`), home pose files, the trapezoid-profile `move_all`. |
-| `depth.py` | Shared: align RealSense depth to the color image, depth-edge overlays and checks. |
-| `harness/` | The VLM harness: captures in the root frame, views, grids, table height, reach (`reach.py`), execution (`execute.py`), `render`, and the workspace DAG; every tool the VLM can call, with its effect (software / sense / move head / move arm / end) and the runner that asks a person before a move, is in `api.py`. Design in `harness.md`. |
-| `ports.py` | Shared: the saved arm-to-port cache (`setup.find_ports` writes it, `resolve(robot_id)` reads it). |
-| `urdfs/xlerobot.urdf`, `urdfs/so101_new_calib.urdf` | The XLeRobot URDF and the official SO-101 URDF (Apache 2.0), merged by `calibration/merge_urdf.py` into `urdfs/xlerobot_so101.urdf` (the head and base with two SO-101 arms), which the calibration uses. |
-| `base_follower.py` | Shared: `SO101FollowerWithBase` (per-joint P gains, optional wheel servos). |
-| `setup/` | One-time, per-robot: `find_ports`, `record_home`, `wheels`, `head`. |
-| `checks/` | Hardware sign-of-life tests: `wiggle_test`, `wheel_test`. |
-| `diagnostics/` | Tuning and debugging: `lift_test`, `dump_servo_config`, `set_servo_id`, `realsense_check`, `alignment_from_saved`. |
-| `server/` | Robot server for the Raspberry Pi and its client (`FelixClient`); plan in `server_plan.md`. |
-| `teleop/` | `spacemouse_teleop`. |
-| `calibration/` | Camera-to-robot click calibration: the robot model (`xle_robot_model`, on pinocchio), the fit (`xle_fit`), choosing views (`views`), the interactive session (`collect`), the merged URDF (`merge_urdf`); design in `camera_calibration.md`. |
-| `docs/` | This file, `tuning_notes.md`, `realsense_m1.md`, `harness.md`, `head.md`, `camera_calibration.md`, `server_plan.md`, `current_ports.md`, `open_issues.md` (what is missing or wrong in reach, planning and execution), `sessions.md` (what each session on the robot did and taught). |
+What is in each folder, which computer it runs on, and where the state it keeps lives (robot settings on the robot,
+the calibrated URDF on your computer, recordings in `scratch/`) are in [layout.md](layout.md).
 
 ## First-time order
 
@@ -218,6 +205,29 @@ Rolls stay within `--max-roll` (130 degrees): keep an eye on the wrist camera's 
 `collect --resume` continues an earlier folder. Folders from the first version of `collect` (with
 `kinematic_calibration.json`) are read by `xle_fit` and `--with` as they are.
 
+### 7. Measure the gripper's opening (calipers, needs the server)
+
+Finds how far `gripper.pos` opens each arm's jaws, so plans can open the gripper to a width instead of guessing. The
+gripper is a claw (the moving jaw turns about a hinge ~8 cm behind the tips), so the script turns each gap you
+measure into an opening angle and fits a line through them. It needs a calibrated URDF from section 6 (the jaw's
+radius comes from it).
+
+1. Server on the Pi with the arm: `server.server --right-port <PORT>` (or `--left-port`).
+2. On your computer, with calipers at hand:
+   `uv run python -m lerobot.felix_jr.calibration.gripper_step tcp://<pi>:5555 --arm right
+   --start-from <calibration.urdf> --out <new calibration.urdf>`
+   The gripper steps through `--positions` (default 10, 25, ..., 85). At each, measure the gap between the
+   fingertips, inner faces at the very tips, and type it in mm (Enter skips, q stops).
+3. It prints each measurement against the fit, where the tips meet (`gripper.pos`, about 1 if the arm was calibrated
+   with the jaws closed) and degrees per unit, which should be close to the servo's own (about 1.27). A warning means
+   a gap was misread or the jaws slip; measure again.
+4. `--out` is the `--start-from` calibration plus the arm's map; `--start-from` is never overwritten. Do the other arm
+   with `--start-from` the file just written. Redo it after `lerobot-calibrate` on that arm: the map is tied to the
+   gripper's LeRobot calibration (as the robot reports it), and the file records which one. The script refuses a
+   `--start-from` made under an older calibration of the arm (recalibrate the camera first). `--refit` refits the
+   stored measurements with no robot. A camera calibration started from this file (`collect` /
+   `xle_fit --start-from`) keeps the maps.
+
 ## Checks and teleop (after either setup)
 
 1. **Check the arms move.** `uv run python -m lerobot.felix_jr.checks.wiggle_test --left <PORT> --right <PORT>`
@@ -236,6 +246,18 @@ Rolls stay within `--max-roll` (130 degrees): keep an eye on the wrist camera's 
   because it goes to rest first) still holds the port; wait for it or stop it. Two programs on one bus corrupt each
   other's packets, so every follower locks its serial port while connected (`port_lock.py`; LeRobot's own tools do
   not take the lock).
+
+- `RobotMismatchError: the calibration does not match the robot` when the harness connects: the calibrated URDF
+  was made under settings that have changed on the robot since. The message lists each mismatch and its fix:
+  - a head home re-recorded with `setup.head_range` (or never recorded): the camera's pose is computed from the wrong
+    reference; recalibrate the camera (section 6).
+  - `<arm> arm: <motor> recalibrated on the robot`: the arm was recalibrated with `lerobot-calibrate`, so its joint
+    angles mean something else than when you clicked; recalibrate the camera (section 6).
+  - `<arm> gripper map: gripper recalibrated`: rerun `calibration.gripper_step` (section 7).
+
+  Calibrations made before the URDF kept a snapshot of the arms' LeRobot calibration cannot be checked for the arms
+  (a warning is logged); recalibrating the camera adds one. Older servers (protocol 3) lack the `arm_calibration`
+  command the check uses: update the Pi's checkout.
 
 - `diagnostics.lift_test` drives only `shoulder_lift` and prints the servo's load, current and voltage per
   phase. `--p-lift N` and `--max-step DEG` override the P gain and the per-command cap for one run.

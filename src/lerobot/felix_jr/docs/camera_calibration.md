@@ -168,10 +168,12 @@ solved by `least_squares` (trust region) with the analytic Jacobian.
   the head and camera get one estimate from both arms' clicks, and each arm's parameters are fitted only when that
   arm has clicks. An earlier calibration is only a starting point, never a prior, so no click counts twice (version 1
   fed the left fit's head posteriors to the right arm as independent priors, which also gave two head estimates).
-  All sessions must share the head's servo map and the intrinsics, since clicks store raw head ticks;
-  `check_compatible` refuses sessions that do not.
+  All sessions must share the head's servo map and the intrinsics, since clicks store raw head ticks, and the
+  sessions of one arm its LeRobot calibration, since clicks store its joint angles (which `lerobot-calibrate`
+  defines); `check_compatible` refuses sessions that do not.
 - **Sessions** are folders: `observations.json` (the clicks, with measured joints, head ticks, pixel, depth at the
-  click) and `images/`. `load_session` also reads version 1's folders.
+  click, and the arm's LeRobot calibration as the robot reported it) and `images/`. `load_session` also reads
+  version 1's folders, and sessions from before the arm's calibration was kept.
 
 ## Choosing views (`views.py`)
 
@@ -221,8 +223,10 @@ the final fit with held-out validation and writes `calibration.urdf` and `calibr
 `model.save(path)` writes `to_urdf()`, the merged URDF with the estimates written into the joint origins (zero
 offsets folded in as a rotation about the joint's axis, so a model of the file with no corrections predicts the same
 pixels), plus a `<felix_calibration>` element with what a URDF cannot hold: the servo map, intrinsics, visible sides,
-floor, the parameter table with its priors, the estimates and their covariance, `fit_info` (sessions, pixel errors,
-held-out errors) and the URDF's original origins of the corrected joints. Pinocchio and placo ignore the element, and
+floor, the gripper maps, a snapshot of each clicked arm's LeRobot calibration, the parameter table with its priors,
+the estimates and their covariance, `fit_info` (sessions, pixel errors, held-out errors) and the URDF's original
+origins of the corrected joints. The snapshot and the head's servo map are what `check_robot` compares with the
+robot when the harness connects: the estimates hold only under the settings they were fit with. Pinocchio and placo ignore the element, and
 placo's view of the exported URDF is tested against the model, so any URDF reader gets the calibrated robot.
 `XleRobotModel.load` restores the original origins and gives back the exact model, ready to refit.
 
