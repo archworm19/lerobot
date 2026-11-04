@@ -11,7 +11,7 @@ holds objects removed since (`Plan`, `Reach`) or lacks the call log. Their image
 
 **Setup.** Two clear glass mugs about 14 cm apart on the desk; a pen (~0.8 cm thick, ~15 cm below the grasp point)
 standing in one of them, leaning ~35 deg away from the robot against the far rim. Right arm, the 10/31 calibration
-(`urdfs/xlerobot_calib10312026.urdf`), the harness of `api.py` driven through `session.py`, Claude Code in the
+(`urdfs/xlerobot_calib10312026.urdf` then; kept as `tests/felix_jr/reference/pen1_calibration_10312026.urdf`), the harness of `api.py` driven through `session.py`, Claude Code in the
 model's seat, every head and arm move approved by the person watching.
 
 **Outcome.** The pen was picked on the second attempt (the person saw it held), but the lift stopped after 1 cm and

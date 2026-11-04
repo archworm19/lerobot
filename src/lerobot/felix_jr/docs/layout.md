@@ -54,7 +54,7 @@ The calibration is built on top of the robot settings:
 
 ```
 servo encoder ticks
-   │  robot settings (LeRobot calibration, head home), on the robot's computer
+   │  robot settings (LeRobot calibration, head directions), on the robot's computer
    ▼
 joint angles, gripper.pos, head angles                 ← what the server reports
    │  calibration (the URDF's corrections, the gripper map), on your computer
@@ -63,11 +63,16 @@ geometry: where the gripper is, how wide the jaws open ← what the planner uses
 ```
 
 So changing a robot setting silently invalidates the calibration made on top of it: rerunning `lerobot-calibrate`
-moves what every joint angle means, and re-recording the head's home moves what every head angle means. To catch
-that, a calibrated URDF records the robot settings it was made under (each clicked arm's LeRobot calibration, the
-head's home and directions, the gripper's LeRobot calibration for each gripper map), and when the harness connects,
+moves what every joint angle means, and redoing `setup.head` can flip what a head angle means. To catch that, a
+calibrated URDF records the robot settings it was made under (each clicked arm's LeRobot calibration, the head's
+directions, the gripper's LeRobot calibration for each gripper map), and when the harness connects,
 `XleRobotModel.check_robot` compares them with what the robot reports and refuses a mismatch, naming what changed
 and what to redo. Anything new that depends on a robot setting should be recorded and checked the same way.
+
+Not every robot setting is under the calibration. The head's recorded home (`setup.head_range`) is only where the
+head rests: the calibration turns the raw head ticks into angles with its own references and fitted zeros, so
+re-recording the home changes nothing it computes. Ask what a setting changes in what the server reports before
+recording it.
 
 ## The directory
 

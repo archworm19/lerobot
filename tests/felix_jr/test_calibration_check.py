@@ -77,8 +77,8 @@ def test_a_calibration_without_the_arms_gripper_map_or_for_another_robot_is_refu
     with pytest.raises(ValueError, match="no gripper map for the left arm"):
         make_session(client, model_for(client, gripper=False))
     stale = model_for(client)
-    stale.head_refs["head_eyes"] += 100
-    with pytest.raises(RobotMismatchError, match="head_eyes: home"):
+    stale.arm_calibration["left"]["elbow_flex"]["homing_offset"] += 40  # the arm recalibrated since
+    with pytest.raises(RobotMismatchError, match="left arm: elbow_flex recalibrated"):
         make_session(client, stale)
     assert fake.arm_backend.trajectories == []  # nothing moved
 

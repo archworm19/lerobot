@@ -40,7 +40,8 @@ from lerobot.felix_jr.harness.execute import held_object, prepare_execution  # n
 from lerobot.felix_jr.harness.objects import angles_of  # noqa: E402
 from lerobot.felix_jr.harness.reach import approach, join_poses, solve_pose  # noqa: E402
 
-URDF = Path(reach_module.__file__).parents[1] / "urdfs" / "xlerobot_calib10312026.urdf"
+# the calibration pen1 was planned with (frozen: its numbers only hold under it)
+URDF = Path(__file__).parents[1] / "reference" / "pen1_calibration_10312026.urdf"
 
 # the arms at rest, as pen1's capture4 saw them (the default start)
 REST = {

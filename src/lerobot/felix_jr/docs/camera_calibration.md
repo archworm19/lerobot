@@ -227,8 +227,9 @@ offsets folded in as a rotation about the joint's axis, so a model of the file w
 pixels), plus a `<felix_calibration>` element with what a URDF cannot hold: the servo map, intrinsics, visible sides,
 floor, the gripper maps, a snapshot of each clicked arm's LeRobot calibration, the parameter table with its priors,
 the estimates and their covariance, `fit_info` (sessions, pixel errors, held-out errors) and the URDF's original
-origins of the corrected joints. The snapshot and the head's servo map are what `check_robot` compares with the
-robot when the harness connects: the estimates hold only under the settings they were fit with. Pinocchio and placo ignore the element, and
+origins of the corrected joints. The snapshot and the head servos' directions are what `check_robot` compares
+with the robot when the harness connects (not the head's references: they are the model's own, and the fitted zeros
+are relative to them): the estimates hold only under the settings they were fit with. Pinocchio and placo ignore the element, and
 placo's view of the exported URDF is tested against the model, so any URDF reader gets the calibrated robot.
 `XleRobotModel.load` restores the original origins and gives back the exact model, ready to refit.
 

@@ -111,7 +111,7 @@ def test_the_moving_tip_turns_on_the_jaws_circle_from_the_pinch_point(model, arm
 
 def test_the_moving_tip_matches_pen1s_arc():
     # the right arm in the 10/31 calibration: the arc recorded in docs/sessions.md (pen1, takeaway 4)
-    m = XleRobotModel.load(Path(MERGED_URDF).parent / "xlerobot_calib10312026.urdf")
+    m = XleRobotModel.load(V1_REFERENCE.parent / "pen1_calibration_10312026.urdf")
     q = m.joint_vector()
     frame = m.frame_pose(pinch_frame("right"), q)
     for opening, expected_cm in (

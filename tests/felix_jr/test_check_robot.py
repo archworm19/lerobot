@@ -1,5 +1,5 @@
-"""`XleRobotModel.check_robot`: a calibration refuses a robot whose head home or head signs changed, or whose arms
-were recalibrated with `lerobot-calibrate`, since it was made; `api.Harness` checks when it connects. Against the fake
+"""`XleRobotModel.check_robot`: a calibration refuses a robot whose head directions changed, or whose arms were
+recalibrated with `lerobot-calibrate`, since it was made (not one whose head home was re-recorded); `api.Harness` checks when it connects. Against the fake
 server, through a real socket."""
 
 import logging
@@ -72,30 +72,30 @@ def test_a_calibration_made_for_the_robot_passes(client):
     model_for(client).check_robot(client)
 
 
-def test_a_re_recorded_head_home_is_refused(client):
+def test_a_re_recorded_or_missing_head_home_is_not_a_mismatch(client):
+    # the model turns raw head ticks into angles with its own references and fitted zeros; the home is where the head
+    # rests (a calibration started from an older one keeps that one's references, e.g. 967 against a home of 1475)
     model = model_for(client)
-    client.head_move("head_eyes", delta_deg=5.0)
-    client.head_record("head_eyes", "home")
-    with pytest.raises(
-        RobotMismatchError, match=r"head_eyes: home \d+ ticks on the robot, \d+ in the calibration"
-    ):
-        model.check_robot(client)
-
-
-def test_a_head_without_a_recorded_home_is_refused():
+    client.head_move("head_neck", delta_deg=20.0)
+    client.head_record("head_neck", "home")
+    assert client.head_state()["head_neck"]["home"] != model.head_refs["head_neck"]
+    model.check_robot(client)
     server, thread, address = serve(FakeHardware())  # nothing recorded
     try:
-        with FelixClient(address, timeout_s=5.0) as client:
-            model = XleRobotModel.from_urdf(
-                head_signs=SIGNS, head_refs={"head_neck": 2048, "head_eyes": 2048}
-            )
-            with pytest.raises(RobotMismatchError) as error:
-                model.check_robot(client)
+        with FelixClient(address, timeout_s=5.0) as fresh:
+            XleRobotModel.from_urdf(
+                head_signs=SIGNS, head_refs={"head_neck": 967, "head_eyes": 1324}
+            ).check_robot(fresh)
     finally:
         stop(server, thread)
-    assert "head_neck: no home recorded on the robot" in str(error.value)
-    assert "setup.head_range --name head_neck" in str(error.value)
-    assert "head_eyes: no home recorded on the robot" in str(error.value)
+
+
+def test_flipped_head_directions_are_refused(client):
+    model = model_for(client, signs={"head_neck": -1, "head_eyes": -1})
+    with pytest.raises(
+        RobotMismatchError, match=r"head_eyes: sign 1 on the robot, -1 in the calibration \(setup.head"
+    ):
+        model.check_robot(client)
 
 
 @pytest.mark.parametrize("field", ["homing_offset", "drive_mode", "range_min", "range_max"])
@@ -117,7 +117,7 @@ def test_every_mismatch_is_listed(client):
     with pytest.raises(RobotMismatchError) as error:
         model.check_robot(client)
     lines = [line.strip() for line in str(error.value).splitlines()[1:]]
-    assert lines[0] == "head_neck: sign -1 on the robot, 1 in the calibration"
+    assert lines[0].startswith("head_neck: sign -1 on the robot, 1 in the calibration")
     assert lines[1].startswith("right arm: shoulder_lift recalibrated on the robot: range_min 0 (was 5)")
     assert lines[2].startswith("right arm: wrist_roll recalibrated on the robot: homing_offset 0 (was 9)")
     assert lines[3].startswith(

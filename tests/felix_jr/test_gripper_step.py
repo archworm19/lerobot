@@ -23,7 +23,7 @@ from lerobot.felix_jr.server.client import FelixClient
 from lerobot.felix_jr.server.hardware import FakeHardware
 from lerobot.felix_jr.server.server import RobotServer
 
-URDF = Path(__file__).parents[2] / "src" / "lerobot" / "felix_jr" / "urdfs" / "xlerobot_calib10312026.urdf"
+URDF = Path(__file__).parent / "reference" / "pen1_calibration_10312026.urdf"  # written before gripper maps
 MODEL_RADIUS = 0.0809  # the right arm's pinch point from its hinge, in the 10/31 calibration
 RADIUS = 0.0868  # where the calipers touch the tips: a little farther out
 # the right arm's gripper (and the fake arms'): 1447 ticks, 1.272 deg per unit

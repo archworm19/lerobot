@@ -852,33 +852,22 @@ class XleRobotModel:
     def check_robot(self, client: Any) -> None:
         """Raise `RobotMismatchError` unless the robot behind `client` still has the settings this model copied.
 
-        A calibration is made under settings that live on the robot and change only there: the head's servo map
-        (`head_signs`, and `head_refs`: each head servo's home, recorded with `setup.head_range`), which turns head
-        readings into the camera's pose; each arm's LeRobot calibration (`arm_calibration`), which turns servo ticks
-        into the joint angles the estimates correct; and the gripper's, for each gripper map. After any of them
-        changes, the model's geometry is silently wrong. Parts the robot does not report (no head servos, an arm
-        that is not connected) are not checked; nor are arms the model has no snapshot of (calibrations made before
-        snapshots), which is logged.
+        A calibration is made under settings that live on the robot and change only there: the head servos'
+        directions (`head_signs`, from `setup.head`), which turn head readings into angles; each arm's LeRobot
+        calibration (`arm_calibration`), which turns servo ticks into the joint angles the estimates correct; and the
+        gripper's, for each gripper map. After any of them changes, the model's geometry is silently wrong. The head's
+        recorded home is not among them: the model turns raw head ticks into angles with its own references
+        (`head_refs`) and fitted zeros, so re-recording the home (`setup.head_range`) only changes where the head
+        rests. Parts the robot does not report (no head servos, an arm that is not connected) are not checked; nor are
+        arms the model has no snapshot of (calibrations made before snapshots), which is logged.
         """
         problems = []
         head = client.get_state().get("head") or {}
         for servo in HEAD_JOINTS:
-            if servo not in head:
-                continue
-            home, ref = head[servo]["home"], self.head_refs[servo]
-            record = "setup.head_range" + (" --name head_neck" if servo == "head_neck" else "")
-            if home is None:
+            if servo in head and head[servo]["sign"] != self.head_signs[servo]:
                 problems.append(
-                    f"{servo}: no home recorded on the robot; the calibration's is {ref} ticks ({record})"
-                )
-            elif home != ref:
-                problems.append(
-                    f"{servo}: home {home} ticks on the robot, {ref} in the calibration (re-recorded? recalibrate "
-                    "the camera, docs/README.md section 6)"
-                )
-            if head[servo]["sign"] != self.head_signs[servo]:
-                problems.append(
-                    f"{servo}: sign {head[servo]['sign']} on the robot, {self.head_signs[servo]} in the calibration"
+                    f"{servo}: sign {head[servo]['sign']} on the robot, {self.head_signs[servo]} in the calibration "
+                    "(setup.head redone? recalibrate the camera, docs/README.md section 6)"
                 )
         robot = {arm_id.removesuffix("_arm"): arm_record(m) for arm_id, m in client.arm_calibration().items()}
         for arm, motors in robot.items():

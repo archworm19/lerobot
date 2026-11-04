@@ -238,7 +238,7 @@ radius r. It needs a calibrated URDF from section 6 (the model's radius is the s
 Draws where the calibrated URDF puts both fingertips over the head camera, view after view, with the gripper at
 different openings: the pinch point (cyan, placed by the camera calibration) and the moving jaw's tip (magenta,
 placed by the gripper map from section 7 as well). It needs a URDF with the arm's gripper map, made for this robot
-(the same check as the harness's: re-recorded head homes or a recalibrated arm are refused).
+(the same check as the harness's: a recalibrated arm or flipped head directions are refused).
 
 1. Server on the Pi with the arm (and the head): as for section 6.
 2. On your computer, with the workspace clear:
@@ -273,8 +273,9 @@ placed by the gripper map from section 7 as well). It needs a URDF with the arm'
 
 - `RobotMismatchError: the calibration does not match the robot` when the harness connects: the calibrated URDF
   was made under settings that have changed on the robot since. The message lists each mismatch and its fix:
-  - a head home re-recorded with `setup.head_range` (or never recorded): the camera's pose is computed from the wrong
-    reference; recalibrate the camera (section 6).
+  - `head_<servo>: sign`: the head's directions changed (`setup.head` redone), so every head angle is inverted;
+    recalibrate the camera (section 6). A re-recorded head home is not a mismatch: it only changes where the head
+    rests.
   - `<arm> arm: <motor> recalibrated on the robot`: the arm was recalibrated with `lerobot-calibrate`, so its joint
     angles mean something else than when you clicked; recalibrate the camera (section 6).
   - `<arm> gripper map: gripper recalibrated`: rerun `calibration.gripper_step` (section 7).
