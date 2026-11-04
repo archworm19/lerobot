@@ -206,13 +206,15 @@ class GripperMap:
     `gripper.pos` is LeRobot's 0-100 over the gripper's calibrated tick range, so the map holds only under the
     gripper's LeRobot calibration it was measured with (`calibration`, a `motor_record` as the robot reported it):
     recalibrating the arm with `lerobot-calibrate` invalidates it (`XleRobotModel.check_robot`). `measurements` are
-    the `(gripper.pos, gap m)` pairs it was fit to.
+    the `(gripper.pos, gap m)` pairs it was fit to; `radius_m` the radius of the circle the moving tip turns on, where
+    the gaps were measured (fitted with the map).
     """
 
     pos_closed: float
     deg_per_unit: float
     calibration: dict[str, int]
     measurements: tuple[tuple[float, float], ...] = ()
+    radius_m: float | None = None
 
     def opening_deg(self, pos: float) -> float:
         """The jaws' opening angle (degrees) at `gripper.pos` `pos`."""
