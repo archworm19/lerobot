@@ -27,10 +27,12 @@ arm mounts by millimeters to centimeters, the elbow zeros by -2 to -3.5 deg, and
 | File | What |
 |---|---|
 | `calibration/merge_urdf.py` | builds `xlerobot_so101.urdf` (committed): the XLeRobot's head and base with two SO-101 arms |
-| `calibration/xle_robot_model.py` | `XleRobotModel`: kinematics, parameter table, estimates, pinch points, derivatives, saving |
+| `calibration/xle_robot_model.py` | `XleRobotModel`: kinematics, parameter table, estimates, gripper points (the pinch point, which the calibration uses, and the moving jaw's tip), derivatives, saving |
 | `calibration/xle_fit.py` | sessions of clicks, the fit, held-out validation, the report; CLI to refit sessions |
 | `calibration/views.py` | `find_view` (head and arm joints that show a pinch point), `plan_targets` |
+| `calibration/live_view.py` | `LiveView`: one arm seen through the head camera, moved through planned views (shared) |
 | `calibration/collect.py` | the interactive session: views, clicks, refits, `calibration.urdf` at the end |
+| `calibration/check.py` | checking a calibration on the robot: both fingertips drawn at views and openings, no clicks |
 
 Tests: `tests/felix_jr/test_xle_robot_model.py` (including agreement with version 1's frozen predictions,
 `reference/v1_reference.json`), `test_xle_robot_model_vs_placo.py`, `test_xle_fit.py`, `test_views.py`,
@@ -239,7 +241,8 @@ placo's view of the exported URDF is tested against the model, so any URDF reade
    click.
 3. **Learned column:** a parameter marked "no" was not determined by the clicks; do not read meaning into its value.
 4. **Poses you did not collect:** try the result where the VLM will plan, by clicking a few more and checking the
-   error.
+   error, or with `calibration.check` (`README.md` section 8): it draws both fingertips at new views and gripper
+   openings, with nothing to click, which tests the gripper map and the hinge as well.
 5. **Simulation is optimistic:** with the right model and random poses, 20 to 80 clicks with 1.5 px noise bring the
    held-out error from about 220 px to about 2 px. Real errors also include backlash and play.
 

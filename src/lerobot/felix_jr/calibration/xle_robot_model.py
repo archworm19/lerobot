@@ -23,6 +23,11 @@ The design is in `docs/camera_calibration.md`. In short:
   at the pinch point. Its opening is measured from there (`GripperMap`, recorded by `calibration.gripper_step`), not as
   the URDF's joint angle: in the SO-101 URDF the jaws meet at about -11.4 deg (from the moving jaw's mesh), past the
   joint's -10 deg limit. The moving tip turns on a circle of `jaw_radius` about the hinge axis.
+- **Gripper points.** Everything that predicts a point (`point`, `predict`, `predict_many`, `pixel_jacobian`,
+  `visibility`) takes which one (`POINTS`): `pinch`, the fixed jaw's tip (the calibration's), or `moving_tip`, the
+  moving jaw's tip: the pinch point turned about the hinge axis by the jaws' opening (`opening_deg`, degrees from
+  closed; `XleRobotModel.opening_deg` reads it off `gripper.pos`). Both are fixed to the gripper body for a given
+  opening. `pinch_point` and `moving_tip` are the two by name.
 
 Joint configurations `q` are pinocchio configuration vectors of measured angles (`joint_vector` builds one from
 servo readings); `zero:` corrections are added inside, so the same `q` serves every `theta`.
@@ -79,6 +84,9 @@ SIGMAS = {
     "arm origin": 0.002,
     "tip": 0.008,  # where "the tip of the closed gripper" is, relative to the SO-101's tool center point
 }
+
+
+POINTS = ("pinch", "moving_tip")  # the gripper points the model predicts (module docstring)
 
 
 def pinch_frame(arm: str) -> str:
@@ -174,7 +182,7 @@ def default_parameters(
 
 @dataclass
 class Prediction:
-    """What the model says about an arm's pinch point.
+    """What the model says about one of an arm's gripper points (`POINTS`).
 
     Its pixel (u, v), depth along the optical axis, position in the camera frame and in the root frame, and
     `visibility` (see `XleRobotModel.visibility`).
@@ -554,12 +562,64 @@ class XleRobotModel:
         """X_root_optical (4x4): the color camera's optical frame (x right, y down, z forward)."""
         return self.frame_pose(OPTICAL_FRAME, q, theta)
 
+    def point(
+        self,
+        arm: str,
+        q: np.ndarray,
+        point: str = "pinch",
+        opening_deg: float | None = None,
+        theta: np.ndarray | Mapping[str, float] | None = None,
+    ) -> np.ndarray:
+        """Root-frame position (m) of one of `arm`'s gripper points (`POINTS`); `opening_deg` for the moving tip."""
+        self._evaluate(q, theta)
+        return self._point(arm, point, opening_deg)
+
     def pinch_point(
         self, arm: str, q: np.ndarray, theta: np.ndarray | Mapping[str, float] | None = None
     ) -> np.ndarray:
-        """Root-frame position (m) of `arm`'s estimated pinch point. Everything that needs it goes through here."""
-        self._evaluate(q, theta)
-        return self._pose(pinch_frame(arm))[:3, 3]
+        """Root-frame position (m) of `arm`'s estimated pinch point: the fixed jaw's tip, where the tips meet."""
+        return self.point(arm, q, "pinch", theta=theta)
+
+    def moving_tip(
+        self,
+        arm: str,
+        q: np.ndarray,
+        opening_deg: float,
+        theta: np.ndarray | Mapping[str, float] | None = None,
+    ) -> np.ndarray:
+        """Root-frame position (m) of `arm`'s moving jaw's tip, with the jaws `opening_deg` degrees open."""
+        return self.point(arm, q, "moving_tip", opening_deg, theta)
+
+    def opening_deg(self, arm: str, gripper_pos: float) -> float:
+        """The jaws' opening (degrees from closed) at LeRobot's `gripper.pos`, from the arm's `GripperMap`."""
+        if arm not in self.gripper_maps:
+            raise ValueError(f"no gripper map for the {arm} arm: measure it with calibration.gripper_step")
+        return self.gripper_maps[arm].opening_deg(gripper_pos)
+
+    def _point(self, arm: str, point: str, opening_deg: float | None) -> np.ndarray:
+        """`point` at the evaluated configuration."""
+        pinch = self._pose(pinch_frame(arm))[:3, 3]
+        if point == "pinch":
+            return pinch
+        if point != "moving_tip":
+            raise ValueError(f"unknown gripper point {point!r}; one of {POINTS}")
+        origin = self._hinge(arm)[0]
+        return origin + self._moving_turn(arm, opening_deg) @ (pinch - origin)
+
+    def _hinge(self, arm: str) -> tuple[np.ndarray, np.ndarray]:
+        """A point on `arm`'s gripper hinge axis and its unit direction (positive opens), as now evaluated.
+
+        Neither depends on the gripper joint's own angle.
+        """
+        hinge = self._joints[arm_joint(arm, "gripper")]
+        frame = self._pose(hinge.child)  # its origin is on the axis
+        return frame[:3, 3], frame[:3, :3] @ (hinge.axis / np.linalg.norm(hinge.axis))
+
+    def _moving_turn(self, arm: str, opening_deg: float | None) -> np.ndarray:
+        """The rotation (3x3, root frame) that takes the pinch point to the moving tip, `opening_deg` open."""
+        if opening_deg is None:
+            raise ValueError("the moving tip needs the jaws' opening (opening_deg)")
+        return pin.exp3(self._hinge(arm)[1] * np.radians(opening_deg))
 
     def project(
         self, points: np.ndarray, q: np.ndarray, theta: np.ndarray | Mapping[str, float] | None = None
@@ -569,25 +629,38 @@ class XleRobotModel:
         return self._project(np.atleast_2d(points))
 
     def predict(
-        self, arm: str, q: np.ndarray, theta: np.ndarray | Mapping[str, float] | None = None
+        self,
+        arm: str,
+        q: np.ndarray,
+        theta: np.ndarray | Mapping[str, float] | None = None,
+        point: str = "pinch",
+        opening_deg: float | None = None,
     ) -> Prediction:
-        """Where `arm`'s pinch point lands in the image, where it is, and whether the camera can see it."""
+        """Where one of `arm`'s gripper points lands in the image, where it is, and whether the camera can see it.
+
+        The point is the pinch point by default; `opening_deg` places the moving tip.
+        """
         self._evaluate(q, theta)
-        tip = self._pose(pinch_frame(arm))[:3, 3]
-        uv, z = self._project(tip[None])
+        xyz = self._point(arm, point, opening_deg)
+        uv, z = self._project(xyz[None])
         x_root_camera = self._pose(OPTICAL_FRAME)
-        p_camera = x_root_camera[:3, :3].T @ (tip - x_root_camera[:3, 3])
-        return Prediction(uv[0], float(z[0]), p_camera, tip, self._visibility(arm))
+        p_camera = x_root_camera[:3, :3].T @ (xyz - x_root_camera[:3, 3])
+        return Prediction(uv[0], float(z[0]), p_camera, xyz, self._visibility(arm, xyz))
 
     def predict_many(
-        self, arm: str, qs: Sequence[np.ndarray], theta: np.ndarray | Mapping[str, float] | None = None
+        self,
+        arm: str,
+        qs: Sequence[np.ndarray],
+        theta: np.ndarray | Mapping[str, float] | None = None,
+        point: str = "pinch",
+        opening_deg: float | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Pixels (N, 2) and depths (N,) of `arm`'s pinch point at each of `qs`, applying `theta` once (for fits)."""
+        """Pixels (N, 2) and depths (N,) of a gripper point at each of `qs`, applying `theta` once (for fits)."""
         self._apply(theta)
         uv, z = np.full((len(qs), 2), np.nan), np.full(len(qs), np.nan)
         for i, q in enumerate(qs):
             self._forward(q)
-            uv_i, z_i = self._project(self._pose(pinch_frame(arm))[:3, 3][None])
+            uv_i, z_i = self._project(self._point(arm, point, opening_deg)[None])
             uv[i], z[i] = uv_i[0], z_i[0]
         return uv, z
 
@@ -599,35 +672,46 @@ class XleRobotModel:
         q: np.ndarray,
         theta: np.ndarray | Mapping[str, float] | None = None,
         joints: Sequence[str] = (),
+        point: str = "pinch",
+        opening_deg: float | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Derivatives of the pixel of `arm`'s pinch point.
+        """Derivatives of the pixel of one of `arm`'s gripper points (default the pinch point).
 
         (2, P) w.r.t. the estimates and (2, len(joints)) w.r.t. the measured angles of `joints` (URDF names, e.g.
         `head_pan_joint`, `left_elbow_flex`). Zeros if the pinch point is at or behind the camera.
 
         Analytic: every parameter and joint moves everything below its URDF joint by a twist (a translation for
         `pos:` and prismatic joints, a rotation about an axis through the joint's origin for `rot:`, `zero:` and
-        revolute joints); the pixel changes with the pinch point's motion relative to the camera's.
+        revolute joints); the pixel changes with the point's motion relative to the camera's. The moving tip moves
+        with the gripper body like the pinch point, except under the pinch point's own offset (`pos:` / `rot:` of
+        `pinch_joint`), which moves it turned by the opening.
         """
         self._evaluate(q, theta)
-        return self._jacobians(arm, joints)
+        return self._jacobians(arm, joints, point, opening_deg)
 
     def pixel_jacobian_many(
-        self, arm: str, qs: Sequence[np.ndarray], theta: np.ndarray | Mapping[str, float] | None = None
+        self,
+        arm: str,
+        qs: Sequence[np.ndarray],
+        theta: np.ndarray | Mapping[str, float] | None = None,
+        point: str = "pinch",
+        opening_deg: float | None = None,
     ) -> np.ndarray:
         """(N, 2, P): `pixel_jacobian` w.r.t. the estimates at each of `qs`, applying `theta` once (for fits)."""
         self._apply(theta)
         out = np.zeros((len(qs), 2, len(self.parameters)))
         for i, q in enumerate(qs):
             self._forward(q)
-            out[i] = self._jacobians(arm, ())[0]
+            out[i] = self._jacobians(arm, (), point, opening_deg)[0]
         return out
 
-    def _jacobians(self, arm: str, joints: Sequence[str]) -> tuple[np.ndarray, np.ndarray]:
+    def _jacobians(
+        self, arm: str, joints: Sequence[str], point: str = "pinch", opening_deg: float | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
         """`pixel_jacobian` at the evaluated configuration."""
         x_root_camera = self._pose(OPTICAL_FRAME)
         rotation, center = x_root_camera[:3, :3], x_root_camera[:3, 3]
-        tip = self._pose(pinch_frame(arm))[:3, 3]
+        tip = self._point(arm, point, opening_deg)
         x, y, z = rotation.T @ (tip - center)
         d_parameters, d_joints = np.zeros((2, len(self.parameters))), np.zeros((2, len(joints)))
         if z <= 1e-6:
@@ -644,6 +728,12 @@ class XleRobotModel:
         moves_tip = np.array([[joint in tip_chain] for _, joint, _ in coordinates], dtype=float)
         moves_camera = np.array([[joint in camera_chain] for _, joint, _ in coordinates], dtype=float)
         d_tip = (linear + np.cross(angular, tip)) * moves_tip
+        if point == "moving_tip":  # the pinch point's own offset moves it turned, not rigidly
+            hinge_chain = self._ancestors(self._joints[arm_joint(arm, "gripper")].child)
+            offset = np.array([[joint in tip_chain - hinge_chain] for _, joint, _ in coordinates])
+            pinch = self._pose(pinch_frame(arm))[:3, 3]
+            turned = (linear + np.cross(angular, pinch)) @ self._moving_turn(arm, opening_deg).T
+            d_tip = np.where(offset, turned, d_tip)
         d_center = (linear + np.cross(angular, center)) * moves_camera
         d_camera_frame = (
             d_tip - d_center - np.cross(angular * moves_camera, tip - center)
@@ -706,21 +796,24 @@ class XleRobotModel:
         return self._ancestor_cache[link]
 
     def visibility(
-        self, arm: str, q: np.ndarray, theta: np.ndarray | Mapping[str, float] | None = None
+        self,
+        arm: str,
+        q: np.ndarray,
+        theta: np.ndarray | Mapping[str, float] | None = None,
+        point: str = "pinch",
+        opening_deg: float | None = None,
     ) -> float:
-        """Signed cosine between `arm`'s gripper hinge axis and the line of sight from its pinch point to the camera.
+        """Signed cosine between `arm`'s gripper hinge axis and the line of sight from a gripper point to the camera.
 
-        Near +1 / -1 the camera sees the jaws meet from the positive / negative side; near 0 it looks along the
-        plane the jaws open in, and the pinch point hides.
+        Near +1 / -1 the camera sees the jaws from the positive / negative side; near 0 it looks along the plane the
+        jaws open in, and the point hides behind them.
         """
         self._evaluate(q, theta)
-        return self._visibility(arm)
+        return self._visibility(arm, self._point(arm, point, opening_deg))
 
-    def _visibility(self, arm: str) -> float:
-        hinge = self._joints[arm_joint(arm, "gripper")]
-        axis = self._pose(hinge.child)[:3, :3] @ (hinge.axis / np.linalg.norm(hinge.axis))
-        sight = self._pose(OPTICAL_FRAME)[:3, 3] - self._pose(pinch_frame(arm))[:3, 3]
-        return float(axis @ sight) / float(np.linalg.norm(sight))
+    def _visibility(self, arm: str, xyz: np.ndarray) -> float:
+        sight = self._pose(OPTICAL_FRAME)[:3, 3] - xyz
+        return float(self._hinge(arm)[1] @ sight) / float(np.linalg.norm(sight))
 
     def jaw_radius(self, arm: str, theta: np.ndarray | Mapping[str, float] | None = None) -> float:
         """Distance (m) from `arm`'s pinch point to its gripper's hinge axis: the circle the moving jaw's tip turns on.
@@ -728,11 +821,8 @@ class XleRobotModel:
         Both are fixed to the gripper body, so it does not depend on the joints.
         """
         self._evaluate(self.joint_vector(), theta)
-        hinge = self._joints[arm_joint(arm, "gripper")]
-        frame = self._pose(hinge.child)  # its origin is on the axis
-        axis = frame[:3, :3] @ (hinge.axis / np.linalg.norm(hinge.axis))
-        offset = self._pose(pinch_frame(arm))[:3, 3] - frame[:3, 3]
-        return float(np.linalg.norm(np.cross(offset, axis)))
+        origin, axis = self._hinge(arm)
+        return float(np.linalg.norm(np.cross(self._pose(pinch_frame(arm))[:3, 3] - origin, axis)))
 
     def in_view(self, uv: np.ndarray, margin: float = 0.0) -> bool:
         """True if pixel `uv` is inside the image, at least `margin` pixels from the border."""

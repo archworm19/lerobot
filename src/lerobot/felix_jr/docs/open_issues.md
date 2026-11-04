@@ -34,25 +34,26 @@ Last updated 2026-11-02 (10 closed: the legacy objects are gone; the IK smoke te
     **a. Add a grasp point to `XleRobotModel`, next to the pinch point.** The grasp point is where an object of width
     w is held: centered in the gap at depth d into the jaws. With the moving jaw opened by theta, the gap's
     bisector is at theta / 2 from the fixed jaw, so roughly `r * (cos(theta / 2), sin(theta / 2))` in the jaw plane,
-    offset from the **gripper hinge** (the `<arm>_gripper` joint's origin, the pivot), not from the pinch point. The
-    moving tip is the pinch point turned about the hinge axis by the opening: `jaw_radius` gives the circle (~8.1 cm
-    on the right arm) and the map from b the opening. Do not use the URDF's joint angle for it: in the SO-101 URDF
-    the jaws meet at about -11.4 deg (from the moving jaw's mesh), past the joint's -10 deg limit, so angle 0 is
-    already ~16 mm open. `joint_vector` still leaves the gripper joint at 0.
+    offset from the **gripper hinge** (the `<arm>_gripper` joint's origin, the pivot), not from the pinch point.
+    Built so far: the **moving tip** (`XleRobotModel.moving_tip`, and `point="moving_tip"` on every predicting
+    method), the pinch point turned about the hinge axis by the opening (`opening_deg`, from b's map with
+    `XleRobotModel.opening_deg`), on the circle `jaw_radius` gives (~8.1 cm on the right arm). It does not use the
+    URDF's joint angle: in the SO-101 URDF the jaws meet at about -11.4 deg (from the moving jaw's mesh), past the
+    joint's -10 deg limit, so angle 0 is already ~16 mm open; `joint_vector` still leaves the gripper joint at 0. Not
+    yet: the grasp point itself (between the two tips, at depth d), which builds on it.
 
     **b. Measure the gripper's range of motion: `gripper.pos` -> jaw opening.** Built: `calibration.gripper_step`
-    (`README.md` section 7) steps the gripper, takes caliper gaps, and writes a `GripperMap` (where the tips meet,
-    degrees per unit, the calibrated range it holds for, the raw measurements) into the calibrated URDF's
-    `<felix_calibration>` element; `XleRobotModel.gripper_maps` reads it. The harness refuses a map whose range no
-    longer matches the robot's (`XleRobotModel.check_robot`, when it connects). Not yet done: running it on the robot
-    (both arms), and committing the resulting URDF.
+    (`README.md` section 7) steps the gripper, takes caliper gaps, plots them as it goes, and writes a `GripperMap`
+    (where the tips meet, degrees per unit (the servo's), the tip radius, the gripper's LeRobot calibration it holds
+    for, the raw measurements) into the calibrated URDF's `<felix_calibration>` element; `XleRobotModel.gripper_maps`
+    reads it, and the harness refuses a map made under another calibration (`XleRobotModel.check_robot`). Measured
+    on the right arm (2026-11-04): tips meet at `gripper.pos` -1.0, radius 86.8 mm, gaps within 1.3 mm. Not yet
+    done: the left arm, and committing the resulting URDF.
 
-    **c. Decide how the pinch point helpers coexist with the grasp point.** `XleRobotModel`'s pinch point methods
-    (`pinch_point`, the projection and its derivatives, `pinch_frame`, `pinch_joint`, visibility) are what the
-    calibration needs: the closed pinch point is what a person can see and click. Options: parameterize them (pinch
-    or grasp point), or keep them for calibration and add separate grasp point methods. Suggestion: keep the pinch
-    methods as they are and add a general "point in a frame" accessor that both build on, so the calibration code
-    does not change.
+    **c. Decide how the pinch point helpers coexist with the grasp point.** Decided and built: the predicting methods
+    (`point`, `predict`, `predict_many`, `pixel_jacobian(_many)`, `visibility`) take which gripper point
+    (`POINTS`: `pinch`, the default, so the calibration is unchanged, or `moving_tip`); `pinch_point` and
+    `moving_tip` name the two. The grasp point (a) becomes a third.
 
     **d. Move the planning and rendering from the pinch point to the grasp point.** Everything that places the
     object at `width / 2` along the pinch frame's -x:

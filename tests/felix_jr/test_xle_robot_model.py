@@ -14,6 +14,7 @@ from lerobot.felix_jr.calibration.merge_urdf import (  # noqa: E402
     build_merged_urdf,
 )
 from lerobot.felix_jr.calibration.xle_robot_model import (  # noqa: E402
+    GripperMap,
     XleRobotModel,
     default_parameters,
     pinch_frame,
@@ -83,6 +84,79 @@ def test_predict_many_is_predict_at_each_configuration(model):
         single = model.predict("right", q, theta)
         np.testing.assert_allclose(uv[i], single.uv)
         assert z[i] == pytest.approx(single.z)
+
+
+@pytest.mark.parametrize("arm", ["left", "right"])
+def test_the_moving_tip_turns_on_the_jaws_circle_from_the_pinch_point(model, arm):
+    rng = np.random.default_rng(7)
+    theta = {p.name: float(rng.normal(0, p.sigma)) for p in model.parameters}
+    q = model.joint_vector({arm: random_readings(rng)[0]})
+    pinch = model.pinch_point(arm, q, theta)
+    np.testing.assert_allclose(
+        model.moving_tip(arm, q, 0.0, theta), pinch, atol=1e-12
+    )  # closed: the tips meet
+    radius = model.jaw_radius(arm, theta)
+    frame = model.frame_pose(pinch_frame(arm), q, theta)
+    for opening in (10.0, 45.0, 120.0):
+        tip = model.moving_tip(arm, q, opening, theta)
+        assert np.linalg.norm(tip - pinch) == pytest.approx(
+            2 * radius * np.sin(np.radians(opening) / 2)
+        )  # a chord
+        local = frame[:3, :3].T @ (tip - frame[:3, 3])
+        assert local[0] < 0 and abs(local[1]) < 1e-6  # opens along the pinch frame's -x, in its x-z plane
+    assert model.point(arm, q, "moving_tip", 45.0, theta) == pytest.approx(
+        model.moving_tip(arm, q, 45.0, theta)
+    )
+
+
+def test_the_moving_tip_matches_pen1s_arc():
+    # the right arm in the 10/31 calibration: the arc recorded in docs/sessions.md (pen1, takeaway 4)
+    m = XleRobotModel.load(Path(MERGED_URDF).parent / "xlerobot_calib10312026.urdf")
+    q = m.joint_vector()
+    frame = m.frame_pose(pinch_frame("right"), q)
+    for opening, expected_cm in (
+        (10.0, (-1.3, 0.0, 0.4)),
+        (20.0, (-2.7, 0.0, 0.6)),
+        (30.0, (-4.2, 0.0, 0.6)),
+    ):
+        local = frame[:3, :3].T @ (m.moving_tip("right", q, opening) - frame[:3, 3])
+        np.testing.assert_allclose(local * 100, expected_cm, atol=0.06)
+
+
+def test_predictions_of_the_moving_tip(model):
+    rng = np.random.default_rng(8)
+    theta = {p.name: float(rng.normal(0, p.sigma)) for p in model.parameters}
+    qs = [
+        model.joint_vector({"right": arm}, ticks) for arm, ticks in (random_readings(rng) for _ in range(3))
+    ]
+    uv, z = model.predict_many("right", qs, theta, point="moving_tip", opening_deg=40.0)
+    for i, q in enumerate(qs):
+        tip = model.moving_tip("right", q, 40.0, theta)
+        single = model.predict("right", q, theta, point="moving_tip", opening_deg=40.0)
+        np.testing.assert_allclose(single.point, tip)
+        np.testing.assert_allclose(single.uv, model.project(tip, q, theta)[0][0])
+        np.testing.assert_allclose(uv[i], single.uv)
+        assert z[i] == pytest.approx(single.z)
+        assert single.visibility == pytest.approx(
+            model.visibility("right", q, theta, point="moving_tip", opening_deg=40.0)
+        )
+    with pytest.raises(ValueError, match="opening"):
+        model.predict("right", qs[0], theta, point="moving_tip")
+    with pytest.raises(ValueError, match="unknown gripper point"):
+        model.point("right", qs[0], "elbow")
+
+
+def test_the_opening_comes_from_the_gripper_map():
+    m = XleRobotModel.from_urdf(
+        head_signs=SIGNS,
+        head_refs=REFS,
+        gripper_maps={
+            "right": GripperMap(-1.37, 1.2718, {"range_min": 2046, "range_max": 3493}, radius_m=0.0855)
+        },
+    )
+    assert m.opening_deg("right", 1.04) == pytest.approx(1.2718 * 2.41)
+    with pytest.raises(ValueError, match="no gripper map for the left arm"):
+        m.opening_deg("left", 10.0)
 
 
 def test_a_fixed_joint_correction_moves_everything_below_it(model):
@@ -202,32 +276,37 @@ def test_head_angles_and_pinch_frames():
 
 
 @pytest.mark.parametrize("arm", ["left", "right"])
-def test_the_pixel_jacobian_matches_finite_differences(model, arm):
+@pytest.mark.parametrize(("point", "opening"), [("pinch", None), ("moving_tip", 35.0)])
+def test_the_pixel_jacobian_matches_finite_differences(model, arm, point, opening):
     rng = np.random.default_rng(5)
     theta = np.array([rng.normal(0, p.sigma) for p in model.parameters])
     theta[[p.kind == "rot" for p in model.parameters]] *= (
         10  # large rotations: the exp map's Jacobian matters
     )
     theta[[p.name == "zero:head_tilt_joint" for p in model.parameters]] = 0.58  # look down at the arms
-    joints = ["head_pan_joint", "head_tilt_joint", *(f"{arm}_{j}" for j in ARM_JOINTS)]
+    # the gripper joint's own angle moves neither point: the moving tip is set by the opening
+    joints = ["head_pan_joint", "head_tilt_joint", *(f"{arm}_{j}" for j in ARM_JOINTS), f"{arm}_gripper"]
+    which = {"point": point, "opening_deg": opening}
     while True:
         arm_pose, ticks = random_readings(rng)
         q = model.joint_vector({arm: arm_pose}, ticks)
-        if model.predict(arm, q, theta).z > 0.1:
+        if model.predict(arm, q, theta, **which).z > 0.1:
             break
-    d_parameters, d_joints = model.pixel_jacobian(arm, q, theta, joints)
+    d_parameters, d_joints = model.pixel_jacobian(arm, q, theta, joints, **which)
     step = 1e-6
     for i in range(len(theta)):
         e = np.zeros_like(theta)
         e[i] = step
-        numeric = (model.predict(arm, q, theta + e).uv - model.predict(arm, q, theta - e).uv) / (2 * step)
+        after, before = model.predict(arm, q, theta + e, **which), model.predict(arm, q, theta - e, **which)
+        numeric = (after.uv - before.uv) / (2 * step)
         np.testing.assert_allclose(d_parameters[:, i], numeric, atol=1e-4, err_msg=model.parameters[i].name)
     for i, joint in enumerate(joints):
         e = np.zeros_like(q)
         e[model.nominal_model.joints[model.nominal_model.getJointId(joint)].idx_q] = step
-        numeric = (model.predict(arm, q + e, theta).uv - model.predict(arm, q - e, theta).uv) / (2 * step)
+        after, before = model.predict(arm, q + e, theta, **which), model.predict(arm, q - e, theta, **which)
+        numeric = (after.uv - before.uv) / (2 * step)
         np.testing.assert_allclose(d_joints[:, i], numeric, atol=1e-4, err_msg=joint)
-    many = model.pixel_jacobian_many(arm, [q, q], theta)
+    many = model.pixel_jacobian_many(arm, [q, q], theta, **which)
     np.testing.assert_array_equal(many[1], d_parameters)
 
 

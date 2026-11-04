@@ -208,25 +208,49 @@ Rolls stay within `--max-roll` (130 degrees): keep an eye on the wrist camera's 
 ### 7. Measure the gripper's opening (calipers, needs the server)
 
 Finds how far `gripper.pos` opens each arm's jaws, so plans can open the gripper to a width instead of guessing. The
-gripper is a claw (the moving jaw turns about a hinge ~8 cm behind the tips), so the script turns each gap you
-measure into an opening angle and fits a line through them. It needs a calibrated URDF from section 6 (the jaw's
-radius comes from it).
+gripper is a claw (the moving jaw turns about a hinge ~8 cm behind the tips), so each gap you measure is a chord of
+the circle the tip turns on: `gap = 2 r sin(theta / 2)`, with the opening angle theta at the servo's own scale
+(degrees per unit from the gripper's calibrated range, about 1.27). The script fits where the tips meet and the
+radius r. It needs a calibrated URDF from section 6 (the model's radius is the starting point and the check).
 
 1. Server on the Pi with the arm: `server.server --right-port <PORT>` (or `--left-port`).
 2. On your computer, with calipers at hand:
    `uv run python -m lerobot.felix_jr.calibration.gripper_step tcp://<pi>:5555 --arm right
    --start-from <calibration.urdf> --out <new calibration.urdf>`
    The gripper steps through `--positions` (default 10, 25, ..., 85). At each, measure the gap between the
-   fingertips, inner faces at the very tips, and type it in mm (Enter skips, q stops).
-3. It prints each measurement against the fit, where the tips meet (`gripper.pos`, about 1 if the arm was calibrated
-   with the jaws closed) and degrees per unit, which should be close to the servo's own (about 1.27). A warning means
-   a gap was misread or the jaws slip; measure again.
+   fingertips, inner faces at the very tips, and type it in mm (Enter skips, q stops). A window plots the gaps
+   and the opening angles they give, with the fit, after each one, so a misread gap stands out (`--no-plot` for
+   none).
+3. It prints each measurement against the fit, where the tips meet (`gripper.pos`, about 0-1 if the arm was
+   calibrated with the jaws closed), the radius, and how far the gaps scatter around the fit, and saves the plot next
+   to `--out` (`.png`). The radius should be within a few mm of the model's distance from the pinch point to the hinge
+   (more if the calipers touch beyond the pinch point: 86.8 mm against 80.9 on the right arm); a warning means it is
+   not, or that the gaps scatter more than 2.5 mm: check where the calipers touch, and measure again.
 4. `--out` is the `--start-from` calibration plus the arm's map; `--start-from` is never overwritten. Do the other arm
    with `--start-from` the file just written. Redo it after `lerobot-calibrate` on that arm: the map is tied to the
    gripper's LeRobot calibration (as the robot reports it), and the file records which one. The script refuses a
    `--start-from` made under an older calibration of the arm (recalibrate the camera first). `--refit` refits the
    stored measurements with no robot. A camera calibration started from this file (`collect` /
    `xle_fit --start-from`) keeps the maps.
+
+### 8. Check the calibration on the robot (no clicks, needs the server)
+
+Draws where the calibrated URDF puts both fingertips over the head camera, view after view, with the gripper at
+different openings: the pinch point (cyan, placed by the camera calibration) and the moving jaw's tip (magenta,
+placed by the gripper map from section 7 as well). It needs a URDF with the arm's gripper map, made for this robot
+(the same check as the harness's: re-recorded head homes or a recalibrated arm are refused).
+
+1. Server on the Pi with the arm (and the head): as for section 6.
+2. On your computer, with the workspace clear:
+   `uv run python -m lerobot.felix_jr.calibration.check tcp://<pi>:5555 --arm right --model <calibration.urdf>
+   --out-dir <a scratch folder>`
+   `n` moves to the next view (the same views `collect` uses) with the gripper at the next of `--openings`
+   (default 0, 15, 30, 50, 70); `[` / `]` close / open it by `--gripper-step` at the same view; the arrow keys turn
+   the head; `q` quits and sends the robot to rest.
+3. Read the result: both circles should sit on the fingertips everywhere. An offset of the pinch point that changes
+   with the pose or the head is the camera calibration (recalibrate, section 6); a pinch point on target with the
+   moving tip off, growing with the opening, is the gripper map (re-measure, section 7). With `--out-dir`, every
+   frame is saved as drawn and raw, with `frames.json` (the measured state and both predictions per frame).
 
 ## Checks and teleop (after either setup)
 

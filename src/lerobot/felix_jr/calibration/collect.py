@@ -45,7 +45,16 @@ from typing import Any
 import cv2
 import numpy as np
 
-from lerobot.felix_jr.calibration.views import MAX_ROLL_DEG, Target, find_view, plan_targets
+from lerobot.felix_jr.calibration.live_view import (
+    INTRINSICS_KEYS,
+    NECK_RANGE_TICKS,  # noqa: F401  (re-exported: head_limits' range without recorded limits)
+    LiveView,
+    decode_key,
+    head_limits,  # noqa: F401  (re-exported)
+    parse_seed,
+    set_floor,
+)
+from lerobot.felix_jr.calibration.views import MAX_ROLL_DEG
 from lerobot.felix_jr.calibration.xle_fit import (
     SESSION_FILE,
     Click,
@@ -64,41 +73,21 @@ from lerobot.felix_jr.calibration.xle_fit import (
 from lerobot.felix_jr.calibration.xle_robot_model import (
     HEAD_JOINTS,
     SIDES,
-    TICKS_PER_TURN,
     XleRobotModel,
     arm_record,
     default_parameters,
 )
 from lerobot.felix_jr.depth import with_matrices
 from lerobot.felix_jr.harness.scene import Scene
-from lerobot.felix_jr.server.client import Capture, FelixClient
-from lerobot.felix_jr.server.protocol import DEFAULT_PORT, ServerError
+from lerobot.felix_jr.server.client import FelixClient
+from lerobot.felix_jr.server.protocol import DEFAULT_PORT
 
-TICKS_PER_DEG = TICKS_PER_TURN / 360.0
 MIN_CLICKS_TO_FIT = 4
-NECK_RANGE_TICKS = (
-    450  # +/- ticks (about 40 deg) the neck may be turned from where it is, if no limit is recorded
-)
 NECK_PRIOR_NO_HOME = np.radians(45.0)  # head pan zero prior sigma when the neck has no recorded home
 REFIT_EVALUATIONS = (
     20  # optimizer evaluations per refit after a click (`r` and the final fit run to convergence)
 )
 CALIBRATION_FILE = "calibration.urdf"
-INTRINSICS_KEYS = ("fx", "fy", "ppx", "ppy", "width", "height")
-# cv2.waitKeyEx codes differ by platform (macOS, Linux GTK, Windows, Qt).
-UP_KEYS = {63232, 65362, 2490368, 0, ord("i")}
-DOWN_KEYS = {63233, 65364, 2621440, 1, ord("k")}
-LEFT_KEYS = {63234, 65361, 2424832, 2, ord("j")}
-RIGHT_KEYS = {63235, 65363, 2555904, 3, ord("l")}
-KEY_ACTIONS = {ord("n"): "next", ord("u"): "undo", ord("r"): "refit", ord("q"): "quit", 27: "quit"}
-
-
-def decode_key(key: int) -> str | None:
-    """The action for a `cv2.waitKeyEx` code: up, down, left, right, next, undo, refit, quit; None if none."""
-    for keys, action in ((UP_KEYS, "up"), (DOWN_KEYS, "down"), (LEFT_KEYS, "left"), (RIGHT_KEYS, "right")):
-        if key in keys:
-            return action
-    return KEY_ACTIONS.get(key)
 
 
 def annotate(
@@ -119,8 +108,10 @@ def annotate(
     return out
 
 
-class CollectSession:
+class CollectSession(LiveView):
     """One calibration run: moves the robot, shows frames, records clicks, refits after each. See the module docstring."""
+
+    no_more_views = "no more views: click what is left, then q"
 
     def __init__(
         self,
@@ -150,25 +141,39 @@ class CollectSession:
         arm pose the targets spread around (`{"shoulder_pan.pos": ...}`; default the center pose). `side` overrides
         which side of the gripper must face the camera; `floor_z` the floor (see the module docstring).
         """
-        self.client, self.arm, self.out_dir, self.show = client, arm, out_dir, show
-        self.arm_id = f"{arm}_arm"
+        self.out_dir, self.refit_evaluations = out_dir, refit_evaluations
         self.notes: list[str] = []
-        self.max_vel, self.max_accel, self.head_step_deg = max_vel, max_accel, head_step_deg
-        self.color_format, self.max_roll, self.refit_evaluations = color_format, max_roll, refit_evaluations
-        self.message = "click the pinch point of the closed gripper; n = next view"
         self.last_rms: float | None = None
         self.frame_clicks: list[tuple[float, float]] = []
         (out_dir / "images").mkdir(parents=True, exist_ok=True)
 
-        self.capture: Capture = client.capture(color_format=color_format)
-        intrinsics = {k: self.capture.calibration["color_intrinsics"][k] for k in INTRINSICS_KEYS}
-        self.model = self._build_model(start_from, client.head_state(), intrinsics)
-        record = arm_record(client.arm_calibration()[self.arm_id])  # what the clicks' joint angles mean
+        capture = client.capture(color_format=color_format)
+        intrinsics = {k: capture.calibration["color_intrinsics"][k] for k in INTRINSICS_KEYS}
+        model = self._build_model(start_from, client.head_state(), intrinsics)
+        record = arm_record(client.arm_calibration()[f"{arm}_arm"])  # what the clicks' joint angles mean
         if side is not None:
             if side not in SIDES:
                 raise ValueError(f"side must be one of {SIDES}")
-            self.model.visible_side[arm] = side
-        self._set_floor(floor_z)
+            model.visible_side[arm] = side
+        set_floor(model, arm, floor_z, self._note)
+        super().__init__(
+            client,
+            model,
+            arm,
+            show,
+            capture,
+            n_targets,
+            max_vel,
+            max_accel,
+            head_step_deg,
+            color_format,
+            seed_pose,
+            delta_scale,
+            max_roll,
+        )
+        self.message = (
+            self.notes[-1] if self.notes else "click the pinch point of the closed gripper; n = next view"
+        )
 
         if resume and (out_dir / SESSION_FILE).is_file():
             self.session = load_session(out_dir)
@@ -187,8 +192,6 @@ class CollectSession:
                 f"refitting with {sum(len(s.clicks) for s in self.others)} clicks from the other sessions"
             )
 
-        self.targets: list[Target] = plan_targets(self.model, arm, n_targets, seed_pose, delta_scale)
-        self.target_index = 0
         self._refit()
         self.render()
 
@@ -231,24 +234,7 @@ class CollectSession:
             parameters=default_parameters(overrides=overrides),
         )
 
-    def _set_floor(self, floor_z: float | None) -> None:
-        if floor_z is not None:
-            self.model.floor_z = floor_z
-        elif self.model.floor_z is None:
-            base = self.model.frame_pose(f"{self.arm}_base_link", self.model.joint_vector())
-            self.model.floor_z = float(base[2, 3])
-            self._note(
-                "no floor height known: keeping the pinch point above the arm base's height (--floor-z)"
-            )
-
     # ---- showing --------------------------------------------------------------------------------------------
-
-    def current_q(self) -> np.ndarray:
-        """The robot's measured joints in the current frame, as the model's `q`."""
-        state = self.capture.state
-        return self.model.joint_vector(
-            {self.arm: state[self.arm_id]}, {n: int(state["head"][n]["ticks"]) for n in HEAD_JOINTS}
-        )
 
     def status_lines(self, predicted: np.ndarray | None) -> list[str]:
         """Text for the image: counts, the model's current accuracy, and the last message."""
@@ -271,70 +257,9 @@ class CollectSession:
         self.show(annotate(self.capture.color, self.status_lines(uv), uv, self.frame_clicks))
 
     def refresh(self, after: float | None = None) -> None:
-        """Take a new frame (taken after server time `after`, if given) and show it."""
-        self.capture = self.client.capture(color_format=self.color_format, after=after)
+        """Take a new frame (taken after server time `after`, if given) and show it, with no clicks on it yet."""
         self.frame_clicks = []
-        self.render()
-
-    # ---- moving ---------------------------------------------------------------------------------------------
-
-    def _move_head_to(self, targets: dict[str, int]) -> float | None:
-        """Move each head servo to raw ticks `targets`. Returns the finish time of the last move."""
-        head = self.client.head_state()
-        done = None
-        for name, target in targets.items():
-            delta = head[name]["sign"] * (target - head[name]["ticks"]) / TICKS_PER_DEG
-            if abs(delta) * TICKS_PER_DEG >= 2:
-                done = self.client.head_move(name, delta_deg=delta)["done_at"]
-        return done
-
-    def next_pose(self) -> None:
-        """Find a view of the next target that shows the pinch point, move the arm and the head there, show it.
-
-        Targets whose best view does not show the pinch point (`View.ok`) are skipped.
-        """
-        head = self.client.head_state()
-        limits = head_limits(head)
-        ticks = {n: int(head[n]["ticks"]) for n in HEAD_JOINTS}
-        skipped = 0
-        while self.target_index < len(self.targets):
-            target = self.targets[self.target_index]
-            self.target_index += 1
-            seed = self.model.joint_vector({self.arm: target.arm_pose}, ticks)
-            view = find_view(self.model, self.arm, seed, target.point, limits, max_roll_deg=self.max_roll)
-            if view.ok:
-                break
-            skipped += 1
-        else:
-            self.message = "no more views: click what is left, then q"
-            self.render()
-            return
-        status = self.client.move_joints(
-            {self.arm_id: view.arm_pose}, max_vel=self.max_vel, max_accel=self.max_accel
-        )
-        if status["state"] != "done":
-            self.message = f"the arm motion ended as {status['state']}: {status['reason']}"
-            self.refresh(status["finished_at"])
-            return
-        done = self._move_head_to(view.head_ticks) or status["finished_at"]
-        skip_text = f" ({skipped} targets skipped: no view showed them)" if skipped else ""
-        self.message = (
-            f"view {self.target_index}: gripper facing the camera within {view.facing_deg:.0f} deg{skip_text}"
-        )
-        self.refresh(done)
-
-    def jog(self, neck_deg: float = 0.0, eyes_deg: float = 0.0) -> None:
-        """Turn the head by the given degrees (positive = left / down) and show a new frame."""
-        done = None
-        try:
-            for name, delta in (("head_neck", neck_deg), ("head_eyes", eyes_deg)):
-                if delta:
-                    result = self.client.head_move(name, delta_deg=delta)
-                    done = result["done_at"]
-                    self.message = "" if not result["clamped"] else f"{name} is at its recorded limit"
-        except ServerError as e:
-            self.message = str(e)
-        self.refresh(done)
+        super().refresh(after)
 
     # ---- clicks ---------------------------------------------------------------------------------------------
 
@@ -430,44 +355,13 @@ class CollectSession:
 
     def handle(self, action: str) -> bool:
         """Do one action from `decode_key`. Returns False when it is time to quit."""
-        step = self.head_step_deg
-        if action == "quit":
-            return False
-        if action == "next":
-            self.next_pose()
-        elif action == "undo":
+        if action == "undo":
             self.undo()
         elif action == "refit":
             self.refit()
-        elif action in ("up", "down"):
-            self.jog(eyes_deg=step if action == "down" else -step)  # the eyes' positive direction is down
-        elif action in ("left", "right"):
-            self.jog(neck_deg=step if action == "left" else -step)  # the neck's positive direction is left
-        return True
-
-
-def head_limits(head: dict[str, dict[str, Any]]) -> dict[str, tuple[int, int]]:
-    """Allowed raw ticks per head servo from `client.head_state()`: the recorded limits, else a range around now.
-
-    Limits are recorded as the servo's positive / negative direction (down / left, up / right), in raw ticks, so
-    the lower and upper bound are whichever of the two is smaller. Without recorded limits the servo may move
-    `NECK_RANGE_TICKS` either side of where it is now (nothing is known about the cable or the mount).
-    """
-    limits = {}
-    for name, servo in head.items():
-        if servo["limit_neg"] is not None and servo["limit_pos"] is not None:
-            low, high = sorted((servo["limit_neg"], servo["limit_pos"]))
         else:
-            low, high = servo["ticks"] - NECK_RANGE_TICKS, servo["ticks"] + NECK_RANGE_TICKS
-        limits[name] = (max(low, 0), min(high, TICKS_PER_TURN - 1))
-    return limits
-
-
-def parse_seed(text: str | None) -> dict[str, float] | None:
-    """`"shoulder_pan=10,elbow_flex=-5"` -> `{"shoulder_pan.pos": 10.0, "elbow_flex.pos": -5.0}` (None for no text)."""
-    if not text:
-        return None
-    return {f"{k.strip()}.pos": float(v) for k, v in (part.split("=") for part in text.split(","))}
+            return super().handle(action)
+        return True
 
 
 def main() -> None:
