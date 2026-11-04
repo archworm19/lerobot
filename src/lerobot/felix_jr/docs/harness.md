@@ -351,7 +351,7 @@ to an earlier view, compares two plans made from the same grid, and so on.
 | `Points` | world | xyz + labels (e.g. from `locate`), and the pixels they came from |
 | `TableEstimate` | world | table height `h` in the base frame, inlier count, spread, tilt, inlier mask (see below) |
 | `Focus` | 2D | the views the model chose to work in, and why |
-| `Poses` | world | gripper poses solved for one arm: tool point, pitch, jaw direction, the joints, reachable or by how much it misses; for a sweep, the pitch ranges per target (J) |
+| `Poses` | world | gripper poses solved for one arm: grasp point, pitch, jaw direction, the joints, reachable or by how much it misses; for a sweep, the pitch ranges per target (J) |
 | `Execution` | world | the exact moves `execute` would send through some `Poses`: joint targets every ~1 cm and gripper actions |
 
 Geometry lives in the world frame (`Grid`, `Points`, `Poses`; a path is the order of a `Poses`' points). Images live in `Capture` / `View`. So drawing an
@@ -504,7 +504,7 @@ see or override (1.K). They also hid a bug: with the jaw direction constrained o
 a pick and place landed on the other side of the jaws, which would have put the object down upside down. So the
 tools were cut back to one optimization, and the orchestration moved to the model.
 
-**The problem.** The target is the tool point's position and an orientation: pitch (the gripper axis above
+**The problem.** The target is the grasp point's position (midway between the fingertips, closed on an object `width` wide; `reach.py`'s docstring) and an orientation: pitch (the gripper axis above
 horizontal), heading (the axis about the vertical) and roll (the jaws about the axis). Six numbers; the arm has five
 joints. So not every pose is reachable, and the formulation says what to keep:
 
@@ -731,4 +731,4 @@ not perception, and led to choosing a pitch per pose and then to one optimizatio
 picked a pen on the second try but never placed it: the first grasp missed by ~1.4 cm across the jaws (small errors
 adding up in the one direction a thin object does not forgive), the head camera could not see the grasp well, both
 lift / back-out moves stopped on the 1.5 deg settle tolerance and went home, and the gripper turned out to be a
-claw, not the parallel gripper the tool point assumes.
+claw, not the parallel gripper the tool point assumed (modeled since 2026-11-04: `reach.py`'s grasp point).

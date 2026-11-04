@@ -25,7 +25,6 @@ FINGER_M = 0.03  # how long the fingers are drawn, back from their tips along th
 WRIST_M = 0.03  # and the body behind them, toward the wrist
 FIXED_JAW_COLOR, MOVING_JAW_COLOR = (255, 60, 220), (0, 230, 255)  # pink, cyan
 GRIPPER_BODY_COLOR = (200, 200, 200)  # neutral, so only the fingers carry color
-JAW_CLEARANCE_M = 0.01  # how much wider than the object the open jaws are drawn
 
 
 def render(view: View, *overlays: Any, labels: bool = True) -> np.ndarray:
@@ -330,18 +329,21 @@ def _occluded(view: View, xyz: np.ndarray, margin: float) -> np.ndarray:
 def _draw_poses(img: np.ndarray, view: View, poses: Poses, layout: "_Layout") -> None:
     """The path through the poses and a gripper at each.
 
-    The path is a thin line through the tool points in order. A gripper is two fingers joined at their base, with a
+    The path is a thin line through the grasp points in order. A gripper is two fingers joined at their base, with a
     short body behind toward the wrist: the fixed finger (its tip is the pinch point) in `FIXED_JAW_COLOR`, the moving
-    one in `MOVING_JAW_COLOR`, opened past `width`. So a roll of the wrist shows: the colors swap sides. A ring at the tool point is green if reached and red with an X if not, labeled with its name and
-    xyz in cm.
+    one in `MOVING_JAW_COLOR`, turned about the hinge as the jaws open for the approach (`Poses.open_jaw`; closed for
+    poses solved before it was kept). So a roll of the wrist shows: the colors swap sides. A ring at the grasp point
+    is green if reached and red with an X if not, labeled with its name and xyz in cm.
     """
     # TODO: draw only what the camera could see: hide (or dim) the parts of a gripper the depth shows a surface in
     # front of, as `_draw_grid` does with `_occluded` (`docs/open_issues.md`, 3).
     _polyline(img, view.project(poses.points), PATH_COLOR)
     for frame, point, label, ok in zip(poses.frames, poses.points, poses.labels, poses.ok, strict=True):
-        pinch, jaw, axis = frame[:3, 3], frame[:3, 0], frame[:3, 2]
-        moving = pinch - (poses.width + JAW_CLEARANCE_M) * jaw  # the moving jaw opens along -x
-        fixed_base, moving_base = pinch - FINGER_M * axis, moving - FINGER_M * axis
+        pinch, axis = frame[:3, 3], frame[:3, 2]
+        moving_frame = frame @ (poses.open_jaw if poses.open_jaw is not None else np.eye(4))
+        finger_base = np.array([0.0, 0.0, -FINGER_M, 1.0])  # back from the tip along the fixed finger
+        moving, moving_base = moving_frame[:3, 3], (moving_frame @ finger_base)[:3]
+        fixed_base = pinch - FINGER_M * axis
         wrist = (fixed_base + moving_base) / 2 - WRIST_M * axis
         uv = view.project(
             np.array([pinch, fixed_base, moving, moving_base, (fixed_base + moving_base) / 2, wrist, point])

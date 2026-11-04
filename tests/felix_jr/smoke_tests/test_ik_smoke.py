@@ -34,7 +34,12 @@ pytest.importorskip("scipy")
 placo = pytest.importorskip("placo")
 
 from lerobot.felix_jr.calibration.merge_urdf import SO101_JOINTS  # noqa: E402
-from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, arm_joint, pinch_frame  # noqa: E402
+from lerobot.felix_jr.calibration.xle_robot_model import (  # noqa: E402
+    GripperMap,
+    XleRobotModel,
+    arm_joint,
+    pinch_frame,
+)
 from lerobot.felix_jr.harness import reach as reach_module  # noqa: E402
 from lerobot.felix_jr.harness.execute import held_object, prepare_execution  # noqa: E402
 from lerobot.felix_jr.harness.objects import angles_of  # noqa: E402
@@ -42,6 +47,13 @@ from lerobot.felix_jr.harness.reach import approach, join_poses, solve_pose  # n
 
 # the calibration pen1 was planned with (frozen: its numbers only hold under it)
 URDF = Path(__file__).parents[1] / "reference" / "pen1_calibration_10312026.urdf"
+# the right gripper's map (calibration.gripper_step, 2026-11-04)
+GRIPPER = GripperMap(
+    pos_closed=-1.37,
+    deg_per_unit=1.2718,
+    calibration={"drive_mode": 0, "homing_offset": -860, "range_min": 2046, "range_max": 3493},
+    radius_m=0.0855,
+)
 
 # the arms at rest, as pen1's capture4 saw them (the default start)
 REST = {
@@ -99,7 +111,9 @@ EMPTY_RIM_Z = 0.872
 
 @pytest.fixture(scope="module")
 def model():
-    return XleRobotModel.load(URDF)
+    m = XleRobotModel.load(URDF)
+    m.gripper_maps["right"] = GRIPPER  # measured after pen1; the gripper's servo has not changed since
+    return m
 
 
 @pytest.fixture(scope="module")
@@ -277,11 +291,15 @@ def test_the_plan_is_solved_as_recorded_and_prepares_without_jumps(model, plan):
         for a, b in zip(execution.steps.joints[:-1], execution.steps.joints[1:], strict=True)
     ]
     assert max(jumps) < MAX_STEP_JUMP_DEG, f"step {int(np.argmax(jumps)) + 2}: {max(jumps):.1f} deg"
-    assert [m.label for m in execution.moves if "gripper" in m.label] == [
-        "start: gripper open",
-        "pick: gripper close",
-        "place: gripper open",
+    grips = [m for m in execution.moves if "gripper" in m.label]
+    assert [m.label for m in grips] == [
+        "start: gripper open (tips 3.0 cm apart)",  # the 1 cm pen, plus the clearance
+        "pick: gripper close (tips 0.7 cm apart)",  # the pen, less the squeeze
+        "place: gripper open (tips 3.0 cm apart)",
     ]
+    opening, closing = grips[0].targets["gripper.pos"], grips[1].targets["gripper.pos"]
+    assert opening == pytest.approx(GRIPPER.pos_for(model.opening_for_width("right", 0.03)))
+    assert 0.0 < closing < opening < 25.0  # not pen1's guessed 60-80
 
 
 # ---- 6. carrying the pen --------------------------------------------------------------------------------------------

@@ -366,15 +366,15 @@ def angles_of(rotation: np.ndarray, heading_hint_deg: float = 0.0) -> tuple[floa
 class Poses:
     """Gripper poses solved for `arm`, in path order (`reach.solve_pose`, `join_poses`, `approach`).
 
-    Each pose aimed the tool point (the midpoint of jaws `width` apart; the pinch frame's origin is the fixed jaw) at
-    `points[i]` with the orientation `targets[i]` = (pitch, heading or None, roll or None), deg. The errors say how far
+    Each pose aimed the grasp point (where an object `width` wide is held, `grasp` in the pinch frame, whose origin is
+    the fixed jaw's tip; `reach`'s module docstring) at `points[i]` with the orientation `targets[i]` = (pitch, heading or None, roll or None), deg. The errors say how far
     the solution is from each, and `ok` whether it is within the tolerances (position m, heading deg, roll deg) with
     the pitch held.
     """
 
     arm: str
     capture: Capture
-    points: np.ndarray  # (M, 3) where each pose aims the tool point (root frame)
+    points: np.ndarray  # (M, 3) where each pose aims the grasp point (root frame)
     labels: tuple[str, ...]  # (M,)
     frames: np.ndarray  # (M, 4, 4) the solved X_root_pinch
     joints: tuple[dict[str, float], ...]  # (M,) the solved joints, LeRobot degrees
@@ -385,8 +385,16 @@ class Poses:
     at_limit: tuple[tuple[str, ...], ...]  # (M,) joints at a bound
     ok: np.ndarray  # (M,) bool
     targets: tuple[tuple[float, float | None, float | None], ...]  # (M,) (pitch, heading, roll) asked for
-    width: float  # m, between the jaws at the tool point
+    width: float  # m, the object's: the jaws close on it between the tips
     tolerances: tuple[float, float, float]  # position (m), heading (deg), roll (deg)
+    # the grasp point in the pinch frame, and the moving jaw with the jaws open for the approach (`moving_jaw`: a
+    # point of the fixed jaw -> the same point of the moving one, pinch frame); None in poses solved before
+    grasp: np.ndarray | None = None
+    open_jaw: np.ndarray | None = None
+    # where the object's center is once the jaws close (`grasp` without the margin), and the margin: how far the grasp
+    # point was aimed toward the moving jaw, so the fixed one clears the object (`reach`'s module docstring)
+    held: np.ndarray | None = None
+    margin: float = 0.0
 
     def angles(self) -> list[tuple[float, float, float]]:
         """The solved (pitch, heading, roll) of each pose, deg."""
@@ -423,7 +431,9 @@ class Poses:
             if self.ok.all()
             else f"{int(self.ok.sum())}/{len(self.ok)} meet their targets"
         )
-        jaws = f", jaws {_cm(self.width)} cm apart" if self.width else ""
+        jaws = f", for an object {_cm(self.width)} cm wide" if self.width else ""
+        if self.margin:
+            jaws += f", the fixed jaw {_cm(self.margin)} cm clear of it"
         return f"{self.arm} arm{jaws}: {verdict}: " + "; ".join(rows)
 
 
@@ -501,7 +511,7 @@ class ArmPath:
 class HeldObject:
     """An object held in the jaws, carried rigidly through some of `poses` (`execute.held_object`); text only.
 
-    It is a segment `length` long through the tool point, along `axes` (the end that was "up" when grasped first),
+    It is a segment `length` long through the grasp point, along `axes` (the end that was "up" when grasped first),
     at each pose it is held at; NaN at the others. `tilt_deg` is how far its axis has turned from how it was grasped.
     """
 

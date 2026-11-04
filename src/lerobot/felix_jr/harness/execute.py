@@ -6,7 +6,9 @@ solved from the last one's joints with its pitch and roll interpolated between t
 refuses if a step misses or a joint jumps more than `max_jump_deg` between steps. Each move settles within a
 tolerance: `pose_tol_deg` at the labeled poses, the looser `step_tol_deg` at the steps between them (they are there to
 stay near the drawn line, not to be exact; a loaded, extended arm does not get within 1.5 deg). Gripper actions go at
-the poses `grip` names (and "start", before the first move); there are none by default.
+the poses `grip` names (and "start", before the first move); there are none by default. "open" opens the jaws
+`reach.OPEN_CLEARANCE_M` wider than the object (`Poses.width`) and its margin, "close" closes them to `reach.SQUEEZE_M` narrower,
+each as the `gripper.pos` the arm's gripper map gives (`XleRobotModel.gripper_pos_for`).
 
 `run_execution` sends the moves one by one, after checking that the arm is where the poses' capture saw it. Two kinds
 of failure, two answers (`docs/sessions.md`, pen1):
@@ -29,7 +31,7 @@ import numpy as np
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 
 from .objects import ArmPath, Capture, Execution, HeldObject, Move, Poses
-from .reach import solve_path
+from .reach import OPEN_CLEARANCE_M, SQUEEZE_M, solve_path
 
 if TYPE_CHECKING:
     from lerobot.felix_jr.server.client import FelixClient
@@ -60,8 +62,6 @@ def prepare_execution(
     model: XleRobotModel,
     poses: Poses,
     grip: Mapping[str, str] | None = None,
-    gripper_open: float = 60.0,
-    gripper_closed: float = 1.0,
     step: float = 0.01,
     max_jump_deg: float = 20.0,
     pose_tol_deg: float = 2.5,
@@ -89,14 +89,20 @@ def prepare_execution(
         jump = max(abs(steps.joints[i][k] - steps.joints[i - 1][k]) for k in steps.joints[i])
         if jump > max_jump_deg:
             raise ValueError(f"step {i + 1}: a joint jumps {jump:.0f} deg (more than {max_jump_deg:.0f})")
-    settings = {
-        "open": (gripper_open, 10.0, True),
-        "close": (gripper_closed, 2.0, False),
-    }  # a closed grip stalls
+    settings = {  # (tips apart, timeout, settle): a grip closed on the object stops short of its target
+        "open": (poses.width + poses.margin + OPEN_CLEARANCE_M, 10.0, True),
+        "close": (max(poses.width - SQUEEZE_M, 0.0), 2.0, False),
+    }
+    positions = {
+        action: gripper_pos(model, poses.arm, apart)
+        for action, (apart, _, _) in settings.items()
+        if action in grip.values()
+    }
 
     def gripper(key: str, where: str) -> Move:
-        value, timeout, settle = settings[grip[key]]
-        return Move(f"{where}: gripper {grip[key]}", {"gripper.pos": value}, timeout, settle)
+        apart, timeout, settle = settings[grip[key]]
+        label = f"{where}: gripper {grip[key]} (tips {100 * apart:.1f} cm apart)"
+        return Move(label, {"gripper.pos": positions[grip[key]]}, timeout, settle)
 
     moves = [gripper(START, "start")] if START in grip else []
     for i, joints in enumerate(steps.joints):
@@ -106,6 +112,13 @@ def prepare_execution(
         if label in grip:
             moves.append(gripper(label, label))
     return Execution(poses, steps, tuple(moves))
+
+
+def gripper_pos(model: XleRobotModel, arm: str, apart: float) -> float:
+    """The `gripper.pos` (0-100) that puts the tips `apart` m apart, as far as the jaws open."""
+    widest = model.gripper_maps[arm].opening_deg(100.0) if arm in model.gripper_maps else 180.0
+    opening = min(model.opening_for_width(arm, min(apart, 2 * model.jaw_radius(arm))), widest)
+    return float(np.clip(model.gripper_pos_for(arm, opening), 0.0, 100.0))
 
 
 class StoppedError(RuntimeError):
@@ -219,7 +232,7 @@ def held_object(
 ) -> HeldObject:
     """The object taken at pose `grasp` and let go at `release`, carried rigidly with the jaws in between.
 
-    At `grasp` its center is the tool point and its axis is `axis` (the object's long direction, the end that is up
+    At `grasp` its center is the grasp point and its axis is `axis` (the object's long direction, the end that is up
     first; default vertical, an upright object). Whatever the gripper does to it on the way shows: a roll of the
     wrist turns it.
     """
@@ -230,7 +243,9 @@ def held_object(
         raise ValueError(f"{release!r} comes before {grasp!r}")
     up = np.asarray(axis, dtype=np.float64) / np.linalg.norm(axis)
     frame = poses.frames[first]
-    center_local = np.array([-poses.width / 2, 0.0, 0.0])  # the tool point, in the pinch frame
+    if poses.grasp is None:
+        raise ValueError("these poses were solved before the grasp point was kept: solve them again")
+    center_local = poses.held if poses.held is not None else poses.grasp  # once the jaws closed on it
     axis_local = frame[:3, :3].T @ up
     m = len(poses.labels)
     centers, axes, tilt = np.full((m, 3), np.nan), np.full((m, 3), np.nan), np.full(m, np.nan)

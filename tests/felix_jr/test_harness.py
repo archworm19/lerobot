@@ -408,10 +408,12 @@ class TestScan:
 
 
 DOWN_FRAME = np.column_stack([[0, 1, 0], [1, 0, 0], [0, 0, -1]])  # pinch frame pointing down, jaws along y
+OPEN_JAW = np.eye(4)
+OPEN_JAW[:3, 3] = (-0.05, 0.0, 0.0)  # the moving finger 5 cm from the fixed one (a hand-built opening)
 
 
 def make_poses(capture, ok=(True, False)) -> Poses:
-    """Two poses from above over the box, jaws 3 cm apart along y (built by hand, no IK); the second misses."""
+    """Two poses from above over the box, for an object 3 cm wide (built by hand, no IK); the second misses."""
     points = np.array([[0.65, 0.0, BOX_Z + 0.02], [0.7, 0.0, BOX_Z + 0.02]])
     frames = np.repeat(np.eye(4)[None], 2, axis=0)
     frames[:, :3, :3] = DOWN_FRAME
@@ -432,13 +434,15 @@ def make_poses(capture, ok=(True, False)) -> Poses:
         ((-90.0, None, 0.0), (-90.0, None, 0.0)),
         0.03,
         (0.005, 10.0, 10.0),
+        np.array([-0.015, 0.0, 0.0]),  # the grasp point, as `frames` were placed
+        OPEN_JAW,
     )
 
 
 class TestPoses:
     def test_describe(self, capture):
         text = make_poses(capture).describe()
-        assert text.startswith("right arm, jaws 3.0 cm apart: 1/2 meet their targets: ")
+        assert text.startswith("right arm, for an object 3.0 cm wide: 1/2 meet their targets: ")
         assert "at1 ok (pitch -90, heading +0, roll +0)" in text
         assert "at2 misses (3.0 cm off, pitch 8.0 deg off, at limit: wrist_flex; got pitch -90" in text
 

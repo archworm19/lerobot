@@ -2,10 +2,15 @@
 
 The reasoning is in `docs/harness.md` (1.J). In short:
 
-**The target** is a full gripper pose in the root frame: the tool point's position, and an orientation given as
-pitch, heading and roll (`orientation`). The **tool point** is the midpoint between the open jaws, where the object's
-center goes: the pinch frame's origin is where the closed jaws meet, the fixed jaw, and the moving jaw opens along
-the pinch frame's -x, so with the jaws `width` apart the tool point is `width / 2` along -x from the pinch point.
+**The target** is a full gripper pose in the root frame: the grasp point's position, and an orientation given as
+pitch, heading and roll (`orientation`). The **grasp point** is where the center of an object `width` wide is held:
+midway between the tips, with the jaws opened until the moving tip is `width` from the pinch point (the fixed jaw's
+tip, the pinch frame's origin). The gripper is a claw, the moving jaw turning about a hinge behind the tips, so this is
+not `width / 2` along the jaw axis: the moving tip's arc also brings it forward (`XleRobotModel.grasp_offset`).
+Only the moving jaw opens, so all the open clearance is on its side and the fixed fingertip touches the object; a
+`margin` aims the grasp point that much toward the moving jaw instead (the fixed tip `width / 2 + margin` from the
+object's center), the jaws open that much wider, and closing sweeps the object onto the fixed jaw: it is held at the
+plain grasp point (`Poses.held`), pushed up to `margin` sideways.
 **Pitch** is the gripper axis' angle above horizontal (the axis is the pinch frame's +z, wrist to fingertips): -90
 straight down, 0 horizontal. **Heading** is the axis' direction about the vertical (deg from root +x toward +y).
 **Roll** turns the jaws about the axis: 0 has the jaw axis horizontal, along heading + 90 deg; 180 swaps the jaws.
@@ -46,6 +51,9 @@ if TYPE_CHECKING or _scipy_available:
 LIMIT_MARGIN = 0.95  # joints stay within this fraction of their URDF limits
 PITCH_TOL_DEG = 0.1  # the held pitch: its penalty scale
 PITCH_OK_DEG = 0.5  # and how far off it may end up and still count as held
+# TODO (docs/open_issues.md, 14): how far to open and how hard to close are first guesses.
+OPEN_CLEARANCE_M = 0.02  # the jaws open this much wider than the object for the approach
+SQUEEZE_M = 0.003  # and close to this much narrower than it: holds without stalling the servo for long
 POSITION_TOL_M = 0.005
 ROLL_TOL_DEG = 10.0
 AT_LIMIT_RAD = 1e-3  # a joint this close to a bound is reported as at its limit
@@ -63,7 +71,7 @@ class Solution:
     x: np.ndarray  # the arm's five joints (rad)
     joints: dict[str, float]  # the same in LeRobot degrees
     frame: np.ndarray  # (4, 4) X_root_pinch
-    position_error_m: float  # of the tool point
+    position_error_m: float  # of the grasp point
     pitch_error_deg: float
     heading_error_deg: float  # NaN if the heading was free
     roll_error_deg: float  # NaN if the roll was free
@@ -72,7 +80,7 @@ class Solution:
 
 
 class ArmIK:
-    """One arm's joints, their limits, the tool point and the rest of the robot's pose; solves one pose at a time."""
+    """One arm's joints, their limits, the grasp point and the rest of the robot's pose; solves one pose at a time."""
 
     def __init__(
         self,
@@ -81,8 +89,13 @@ class ArmIK:
         arms: Mapping[str, Mapping[str, float]],
         head_ticks: Mapping[str, int] | None = None,
         width: float = 0.0,
+        margin: float = 0.0,
     ):
-        """`arms` / `head_ticks` fix the rest of the robot and give the default start; `width` places the tool point."""
+        """`arms` / `head_ticks` fix the rest of the robot and give the default start.
+
+        `width` (the object's) and `margin` (the fixed jaw's clearance) place the grasp point and how far the jaws
+        open (the module docstring).
+        """
         require_package("scipy", extra="felix_jr")
         self.model, self.arm = model, arm
         self.index = [model.q_index(arm_joint(arm, j)) for j in SO101_JOINTS]
@@ -94,7 +107,15 @@ class ArmIK:
         )  # the wrist camera's cable limits the roll (as in calibration)
         self.lower[roll] = max(self.lower[roll], -np.radians(MAX_ROLL_DEG))
         self.upper[roll] = min(self.upper[roll], np.radians(MAX_ROLL_DEG))
-        self.offset = np.array([-width / 2, 0.0, 0.0])  # the tool point in the pinch frame
+        self.width, self.margin = width, margin
+        self.offset = model.grasp_offset(
+            arm, width, margin
+        )  # the grasp point (aimed at the target), pinch frame
+        self.held = model.grasp_offset(arm, width)  # where the object is once the jaws close
+        open_width = min(width + margin + OPEN_CLEARANCE_M, 2 * model.jaw_radius(arm))
+        self.open_jaw = model.moving_jaw(
+            arm, model.opening_for_width(arm, open_width)
+        )  # opened for the approach
         self.q = model.joint_vector(arms, head_ticks or None)
         self.start = self.clip(self.q[self.index])
 
@@ -113,7 +134,7 @@ class ArmIK:
         return self.model.frame_pose(pinch_frame(self.arm), q)
 
     def tool(self, frame: np.ndarray) -> np.ndarray:
-        """The tool point of a pinch frame."""
+        """The grasp point of a pinch frame."""
         return frame[:3, :3] @ self.offset + frame[:3, 3]
 
     def solve(
@@ -223,13 +244,14 @@ def solve_pose(
     roll_tol_deg: float = ROLL_TOL_DEG,
     init: Mapping[str, float] | Poses | None = None,
     label: str = "1",
+    margin: float = 0.0,
 ) -> Poses:
     """Solve one pose (see the module docstring) and return it as `Poses` of one.
 
     `init` is the start: joints in LeRobot degrees, or `Poses` (its last pose's joints); default the arm's pose in
     `capture`.
     """
-    ik = ArmIK(model, arm, capture.arms, capture.head_ticks, width)
+    ik = ArmIK(model, arm, capture.arms, capture.head_ticks, width, margin)
     start = None
     if isinstance(init, Poses):
         start = ik.radians(init.joints[-1])
@@ -240,6 +262,7 @@ def solve_pose(
     )
     target = (float(pitch_deg), heading_deg, roll_deg)
     return _poses(
+        ik,
         arm,
         capture,
         width,
@@ -252,13 +275,14 @@ def solve_pose(
 
 
 def join_poses(*parts: Poses) -> Poses:
-    """Several `Poses` (same arm, capture and jaw width) as one path, in the order given; labels must be unique."""
+    """Several `Poses` (same arm, capture and object width) as one path, in the order given; labels unique."""
     if not parts:
         raise ValueError("nothing to join")
     first = parts[0]
     for part in parts[1:]:
-        if part.arm != first.arm or part.capture is not first.capture or part.width != first.width:
-            raise ValueError("only poses of the same arm, capture and jaw width can be joined")
+        same = (part.arm, part.width, part.margin) == (first.arm, first.width, first.margin)
+        if not same or part.capture is not first.capture:
+            raise ValueError("only poses of the same arm, capture, object width and margin can be joined")
     labels = tuple(label for part in parts for label in part.labels)
     if len(set(labels)) != len(labels):
         raise ValueError(f"labels repeat: {labels}")
@@ -278,6 +302,10 @@ def join_poses(*parts: Poses) -> Poses:
         tuple(t for p in parts for t in p.targets),
         first.width,
         first.tolerances,
+        first.grasp,
+        first.open_jaw,
+        first.held,
+        first.margin,
     )
 
 
@@ -303,6 +331,10 @@ def select_poses(poses: Poses, *labels: str) -> Poses:
         tuple(poses.targets[i] for i in index),
         poses.width,
         poses.tolerances,
+        poses.grasp,
+        poses.open_jaw,
+        poses.held,
+        poses.margin,
     )
 
 
@@ -321,7 +353,7 @@ def approach(
     if len(pose.labels) != 1:
         raise ValueError("approach takes one solved pose")
     label, frame = pose.labels[0], pose.frames[0]
-    ik = ArmIK(model, pose.arm, pose.capture.arms, pose.capture.head_ticks, pose.width)
+    ik = ArmIK(model, pose.arm, pose.capture.arms, pose.capture.head_ticks, pose.width, pose.margin)
     tool = ik.tool(frame)
     pitch, heading, roll = angles_of(frame[:3, :3])
     points = {"back": tool - back * frame[:3, 2], "at": tool, "up": tool + np.array([0.0, 0.0, up])}
@@ -336,6 +368,7 @@ def approach(
         solution = ik.solve(points[key], pitch, heading, roll, position_tol, 10.0, roll_tol, start)
         parts.append(
             _poses(
+                ik,
                 pose.arm,
                 pose.capture,
                 pose.width,
@@ -355,7 +388,7 @@ def solve_path(model: XleRobotModel, poses: Poses, points: np.ndarray, marks: Se
     Each step starts from the last one's joints; its pitch and roll are interpolated between the poses it lies
     between (as they were achieved), its heading is free (`execute.prepare_execution`).
     """
-    ik = ArmIK(model, poses.arm, poses.capture.arms, poses.capture.head_ticks, poses.width)
+    ik = ArmIK(model, poses.arm, poses.capture.arms, poses.capture.head_ticks, poses.width, poses.margin)
     position_tol, heading_tol, roll_tol = poses.tolerances
     achieved = [angles_of(f[:3, :3]) for f in poses.frames]
     start, solutions, targets = ik.radians(poses.joints[0]), [], []
@@ -372,11 +405,12 @@ def solve_path(model: XleRobotModel, poses: Poses, points: np.ndarray, marks: Se
             start = solution.x
     labels = [str(i + 1) for i in range(len(points))]
     return _poses(
-        poses.arm, poses.capture, poses.width, list(points), labels, solutions, targets, poses.tolerances
+        ik, poses.arm, poses.capture, poses.width, list(points), labels, solutions, targets, poses.tolerances
     )
 
 
 def _poses(
+    ik: ArmIK,
     arm: str,
     capture: Capture,
     width: float,
@@ -402,4 +436,8 @@ def _poses(
         tuple(targets),
         width,
         tolerances,
+        ik.offset,
+        ik.open_jaw,
+        ik.held,
+        ik.margin,
     )

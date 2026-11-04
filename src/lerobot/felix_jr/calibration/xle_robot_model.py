@@ -28,6 +28,11 @@ The design is in `docs/camera_calibration.md`. In short:
   moving jaw's tip: the pinch point turned about the hinge axis by the jaws' opening (`opening_deg`, degrees from
   closed; `XleRobotModel.opening_deg` reads it off `gripper.pos`). Both are fixed to the gripper body for a given
   opening. `pinch_point` and `moving_tip` are the two by name.
+- **Grasping.** An object `width` wide is held between the tips: the jaws open until the moving tip is `width` from
+  the pinch point (`opening_for_width`), and the object's center goes midway between the tips (`grasp_offset`, in the
+  pinch frame; with a margin, aimed that much toward the moving jaw, so the fixed one, which does not move, clears
+  the object). `moving_jaw` is the turn that takes the fixed jaw to the moving one at an opening (to draw it), and
+  `gripper_pos_for` the `gripper.pos` that opens the jaws that far (the arm's `GripperMap`).
 
 Joint configurations `q` are pinocchio configuration vectors of measured angles (`joint_vector` builds one from
 servo readings); `zero:` corrections are added inside, so the same `q` serves every `theta`.
@@ -595,6 +600,61 @@ class XleRobotModel:
         if arm not in self.gripper_maps:
             raise ValueError(f"no gripper map for the {arm} arm: measure it with calibration.gripper_step")
         return self.gripper_maps[arm].opening_deg(gripper_pos)
+
+    def opening_for_width(
+        self, arm: str, width_m: float, theta: np.ndarray | Mapping[str, float] | None = None
+    ) -> float:
+        """The jaws' opening (degrees) that puts the moving tip `width_m` from the pinch point (a chord of its circle)."""
+        radius = self.jaw_radius(arm, theta)
+        if not 0.0 <= width_m <= 2 * radius:
+            raise ValueError(
+                f"the {arm} jaws cannot be {width_m * 100:.1f} cm apart (at most {2 * radius * 100:.1f} cm)"
+            )
+        return float(np.degrees(2 * np.arcsin(width_m / (2 * radius))))
+
+    def moving_jaw(
+        self, arm: str, opening_deg: float, theta: np.ndarray | Mapping[str, float] | None = None
+    ) -> np.ndarray:
+        """X_pinch (4x4): where a point of the fixed jaw (pinch frame) is on the moving jaw, `opening_deg` open.
+
+        The turn about the hinge axis, in the pinch frame: it takes the pinch point to the moving tip. Both jaws are
+        fixed to the gripper body, so it does not depend on the joints.
+        """
+        self._evaluate(self.joint_vector(), theta)
+        pinch = self._pose(pinch_frame(arm))
+        turn = np.eye(4)
+        turn[:3, :3] = self._moving_turn(arm, opening_deg)
+        origin = self._hinge(arm)[0]
+        turn[:3, 3] = origin - turn[:3, :3] @ origin
+        return np.linalg.inv(pinch) @ turn @ pinch
+
+    def grasp_offset(
+        self,
+        arm: str,
+        width_m: float,
+        margin_m: float = 0.0,
+        theta: np.ndarray | Mapping[str, float] | None = None,
+    ) -> np.ndarray:
+        """Where the center of an object `width_m` wide is, in the pinch frame, when grasped.
+
+        Midway between the tips, with the moving one `width_m` from the pinch point (the origin): where it is held.
+        With `margin_m`, the point `margin_m` farther from the fixed tip, toward the moving one: where to aim so the
+        fixed jaw clears the object by that much, the moving jaw then sweeping the object onto it as it closes.
+        """
+        tip = self.moving_jaw(arm, self.opening_for_width(arm, width_m, theta), theta)[:3, 3]
+        if not margin_m:
+            return tip / 2
+        # the direction toward the moving tip (for no width, that of a tip just apart)
+        toward = (
+            tip if width_m else self.moving_jaw(arm, self.opening_for_width(arm, 1e-3, theta), theta)[:3, 3]
+        )
+        return toward / np.linalg.norm(toward) * (width_m / 2 + margin_m)
+
+    def gripper_pos_for(self, arm: str, opening_deg: float) -> float:
+        """The `gripper.pos` that opens `arm`'s jaws `opening_deg` degrees (its `GripperMap`; `opening_deg`'s inverse)."""
+        if arm not in self.gripper_maps:
+            raise ValueError(f"no gripper map for the {arm} arm: measure it with calibration.gripper_step")
+        return self.gripper_maps[arm].pos_for(opening_deg)
 
     def _point(self, arm: str, point: str, opening_deg: float | None) -> np.ndarray:
         """`point` at the evaluated configuration."""

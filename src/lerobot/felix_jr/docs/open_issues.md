@@ -18,53 +18,37 @@ Last updated 2026-11-02 (10 closed: the legacy objects are gone; the IK smoke te
 
 ## Fix the gripper model (the biggest issue)
 
-14. **The gripper is a claw; the tool point assumes a parallel gripper.** One jaw is fixed (its tip is the pinch
-    point); the moving jaw rotates about a pivot ~8 cm behind the tips, so its tip moves along an arc ((-1.3, 0, +0.4)
-    cm at 10 deg, (-2.7, 0, +0.6) at 20, (-4.2, 0, +0.6) at 30, in the pinch frame). The gap is a wedge, widest at the
-    tips; an object's grip center is not `width / 2` from the pinch point along the jaw axis, as the tool point
-    assumes; and closing pushes the object along the jaws as well as across.
+14. **The gripper is a claw.** One jaw is fixed (its tip is the pinch point); the moving jaw turns about a hinge
+    ~8 cm behind the tips, so its tip moves along an arc ((-1.3, 0, +0.4) cm at 10 deg, (-2.7, 0, +0.6) at 20,
+    (-4.2, 0, +0.6) at 30, in the pinch frame), the gap is a wedge, widest at the tips, and closing pushes the object
+    along the jaws as well as across. This is what made pen1's first grasp miss: only the moving jaw opens, so a
+    ~2 cm error toward the fixed jaw put the pen just outside the grip (pen1 measured it +0.4..+1.4 cm outside the
+    fixed jaw, where the plan put it 0.5 cm inside).
 
-    This is what made pen1's first grasp miss. The plan put the pen within a couple of centimeters of the pinch point,
-    which a parallel gripper opening around its center would have forgiven. Here only the moving jaw opens and the
-    fixed jaw stays at the pinch point, so the direction of the ~2 cm error decided it: toward the moving jaw, the pen
-    is inside the grip; toward the fixed jaw, it is just outside (pen1 measured it +0.4..+1.4 cm outside the fixed jaw,
-    where the plan put it 0.5 cm inside). The tool point is also the closed fingertip, so aiming it at a thin object
-    puts the object at the very tips; it should sit a finger-depth (~1.5-2 cm) into the jaws.
+    **Built (2026-11-04).** The gripper map (`calibration.gripper_step`, `README.md` section 7; both arms in
+    `urdfs/xle_calib_11042026.urdf`), the moving tip (`XleRobotModel.moving_tip`, `point="moving_tip"` on every
+    predicting method; not the URDF's joint angle, which is ~16 mm open at 0), checked on the robot
+    (`calibration.check`, section 8), and the harness on top of it: `width` is the object's, the jaws open until the
+    tips are `width` apart, and the **grasp point** (where `solve_pose` puts the target and `held_object` the
+    object's center) is midway between the tips (`XleRobotModel.grasp_offset`); `prepare_execution` opens and closes
+    the gripper by the object's width through the map; `render` draws the moving finger turned about the hinge.
 
-    **a. Add a grasp point to `XleRobotModel`, next to the pinch point.** The grasp point is where an object of width
-    w is held: centered in the gap at depth d into the jaws. With the moving jaw opened by theta, the gap's
-    bisector is at theta / 2 from the fixed jaw, so roughly `r * (cos(theta / 2), sin(theta / 2))` in the jaw plane,
-    offset from the **gripper hinge** (the `<arm>_gripper` joint's origin, the pivot), not from the pinch point.
-    Built so far: the **moving tip** (`XleRobotModel.moving_tip`, and `point="moving_tip"` on every predicting
-    method), the pinch point turned about the hinge axis by the opening (`opening_deg`, from b's map with
-    `XleRobotModel.opening_deg`), on the circle `jaw_radius` gives (~8.1 cm on the right arm). It does not use the
-    URDF's joint angle: in the SO-101 URDF the jaws meet at about -11.4 deg (from the moving jaw's mesh), past the
-    joint's -10 deg limit, so angle 0 is already ~16 mm open; `joint_vector` still leaves the gripper joint at 0. Not
-    yet: the grasp point itself (between the two tips, at depth d), which builds on it.
-
-    **b. Measure the gripper's range of motion: `gripper.pos` -> jaw opening.** Built: `calibration.gripper_step`
-    (`README.md` section 7) steps the gripper, takes caliper gaps, plots them as it goes, and writes a `GripperMap`
-    (where the tips meet, degrees per unit (the servo's), the tip radius, the gripper's LeRobot calibration it holds
-    for, the raw measurements) into the calibrated URDF's `<felix_calibration>` element; `XleRobotModel.gripper_maps`
-    reads it, and the harness refuses a map made under another calibration (`XleRobotModel.check_robot`). Measured
-    on the right arm (2026-11-04): tips meet at `gripper.pos` -1.0, radius 86.8 mm, gaps within 1.3 mm. Not yet
-    done: the left arm, and committing the resulting URDF.
-
-    **c. Decide how the pinch point helpers coexist with the grasp point.** Decided and built: the predicting methods
-    (`point`, `predict`, `predict_many`, `pixel_jacobian(_many)`, `visibility`) take which gripper point
-    (`POINTS`: `pinch`, the default, so the calibration is unchanged, or `moving_tip`); `pinch_point` and
-    `moving_tip` name the two. The grasp point (a) becomes a third.
-
-    **d. Move the planning and rendering from the pinch point to the grasp point.** Everything that places the
-    object at `width / 2` along the pinch frame's -x:
-    - `harness/reach.py`: `Reach.offset` (the tool point in the pinch frame), and the module docstring's definition;
-    - `harness/execute.py`: `held_object`'s `center_local`;
-    - `harness/render.py`: the gripper drawing (the moving jaw drawn parallel to the fixed one, `width` apart);
-    - `harness/objects.py` (`Poses.width`, `position_error_m`) and the tool docs in `harness/api.py` (`solve_pose`,
-      `approach`, the render legend) that describe the tool point.
-
-    Also from item 2 (merged here): close to "object width minus a bit" rather than to 1. Closing to 1 on an object
-    stalls the servo against it for as long as it holds (torque and heat); this needs the mapping from b.
+    Still open:
+    - **TODO: how far to open and how hard to close.** `reach.OPEN_CLEARANCE_M` (the tips 2 cm wider apart than the
+      object for the approach) and `reach.SQUEEZE_M` (close to 3 mm narrower, to hold without stalling the servo for
+      long) are first guesses. The clearance trades the margin for the ~1-2 cm aim error (on the moving jaw's side
+      only: the fixed jaw does not move) against hitting neighbors; the squeeze, grip against the servo's load and
+      heat. Worth measuring: the load after closing at a few squeezes, and the aim error at the tips.
+    - **Grasping at the tips.** The grasp point is between the fingertips, so a thin object is held at the very tips,
+      where pen1's pen sat. Holding it a finger-depth (~1.5-2 cm) into the jaws would be a `depth` on the grasp: the
+      points of both jaws that far back from the tips, and the opening that leaves `width` between them there.
+    - **The fixed jaw's margin.** Only the moving jaw opens, so with no margin the fixed fingertip touches the
+      object's side and an aim error toward it misses (pen1's first attempt). `solve_pose(..., margin=)` (default 0)
+      aims the grasp point that far toward the moving jaw instead, opens that much wider, and lets closing sweep the
+      object onto the fixed jaw (`Poses.held`). Which margin works, and what the sweep does to the object, is
+      untested.
+    - **Try it on the robot:** a pen1-like pick with the new grasp point and gripper commands (a new session), once
+      at margin 0 and once at ~1 cm.
 
 ## Set up the wrist cameras
 

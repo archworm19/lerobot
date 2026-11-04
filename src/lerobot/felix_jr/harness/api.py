@@ -325,9 +325,10 @@ def render(h: Harness, view: View, *overlays: Any, labels: bool = True) -> np.nd
 
     Overlays: `Grid`, `Points`, `TableEstimate`, `Poses`, `ArmPath`.
 
-    `Poses` are drawn as the path through them (in order) and a gripper at each: two fingers on a base, the fixed one
-    pink and the moving one cyan (a roll of the wrist shows as the colors swapping sides), a ring at the tool point
-    (green if reachable, red with an X if not) and the label with its xyz in cm. `ArmPath` draws the arm's body
+    `Poses` are drawn as the path through them (in order) and a gripper at each, open as for the approach: the fixed
+    finger pink, the moving one cyan, turned about the hinge behind them (a claw, so the gap is a wedge, widest at the
+    tips; a roll of the wrist shows as the colors swapping sides), a ring at the grasp point (green if reachable, red
+    with an X if not) and the label with its xyz in cm. `ArmPath` draws the arm's body
     (from `arm_path`). The text of `Poses` gives each pose's wrist roll; `held_object` says what a roll does to what
     the gripper carries. Pick what helps: poses alone, poses with the arm, a grid to read positions;
     `labels=False` drops the text. Nothing is checked against the depth: judge clearance from the images.
@@ -361,11 +362,16 @@ def solve_pose(
     roll_tol_deg: float = 10.0,
     init: Any = None,
     label: str = "1",
+    margin: float = 0.0,
 ) -> Poses:
     """Solve the joints that put `arm`'s gripper at a pose: one constrained optimization, from `init`.
 
-    The target: `position` (root frame, m) for the tool point, the midpoint between the jaws opened `width` m (the
-    object's center goes there); `pitch_deg`, the gripper axis above horizontal (-90 straight down, 0 horizontal);
+    The target: `position` (root frame, m) for the grasp point, where the center of an object `width` m wide is held:
+    midway between the fingertips, with the jaws opened until the tips are `width` apart (the jaws close on the
+    object at the tips; 0 for none). Only the moving jaw opens: the fixed fingertip touches the object's side, so
+    an aim error toward it misses the object. `margin` (m, e.g. 0.01) aims that much toward the moving jaw instead:
+    the fixed jaw clears the object by `margin`, the jaws open as much wider, and closing sweeps the object onto the
+    fixed jaw (pushing it up to `margin` sideways: fine for a leaning pen, not for something that tips over); `pitch_deg`, the gripper axis above horizontal (-90 straight down, 0 horizontal);
     `heading_deg`, the axis' direction about the vertical (deg from +x toward +y; None: free); `roll_deg`, the jaws
     about the axis (0: jaws horizontal; 180: the jaws swapped; None: free, but then it can land anywhere: for a path,
     hold the roll the first pose got, or the wrist swings between poses). The pitch is held; position, heading and
@@ -389,12 +395,13 @@ def solve_pose(
         roll_tol_deg,
         init,
         label,
+        margin,
     )
 
 
 @tool(Effect.SOFTWARE)
 def join_poses(h: Harness, *poses: Poses) -> Poses:
-    """Solved poses as one path, in the order given (same arm, capture and jaw width; labels unique).
+    """Solved poses as one path, in the order given (same arm, capture, object width and margin; labels unique).
 
     Draw it with `render`, run it with `prepare_execution`.
     """
@@ -420,19 +427,18 @@ def approach(
 
 
 @tool(Effect.SOFTWARE)
-def prepare_execution(
-    h: Harness, poses: Poses, grip: Mapping[str, str] | None = None, gripper_open: float = 60.0
-) -> Execution:
+def prepare_execution(h: Harness, poses: Poses, grip: Mapping[str, str] | None = None) -> Execution:
     """The exact moves `execute` would send to go through `poses` in order, solved every ~1 cm.
 
     `grip` maps a pose label (or "start", before the first move) to "open" / "close", e.g. {"start": "open",
-    "pick": "close", "place": "open"}. Fails if a step misses or a joint would jump. Nothing moves.
+    "pick": "close", "place": "open"}: open puts the tips 2 cm wider apart than the poses' object width and margin,
+    close 3 mm narrower than the object (it holds it). Fails if a step misses or a joint would jump. Nothing moves.
     """
     if h.ws.is_stale(poses):
         raise ValueError(
             "these poses come from before the arm last moved: capture again and solve them again"
         )
-    return _execute.prepare_execution(h.model, poses, grip, gripper_open)
+    return _execute.prepare_execution(h.model, poses, grip)
 
 
 @tool(Effect.SOFTWARE)
@@ -457,7 +463,7 @@ def held_object(
     """How the object taken at pose `grasp` and let go at `release` turns while the jaws carry it (text, not drawn).
 
     `length` (m) and `axis` (its long direction at the grasp; default vertical, an upright object) describe it; its
-    center is the tool point. The description gives its tilt from how it was grasped at each pose: a roll of the
+    center is the grasp point. The description gives its tilt from how it was grasped at each pose: a roll of the
     wrist on the way turns it, and could put it down tilted or upside down.
     """
     return _execute.held_object(poses, length, grasp, release, axis)
