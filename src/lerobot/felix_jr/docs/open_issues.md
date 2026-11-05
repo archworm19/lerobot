@@ -135,14 +135,20 @@ including the object being grasped. Revisit only if the model, given good render
     measured error to apply when the grasp is a little more extended), then add it to `protocols.md` (rule 1's
     "measure the arm" step); and log its measurements (pose, load, error) toward the sag model.
 
-17. **Nothing checks whether the head camera can see a grasp.** pen2 chose two picks the camera could not check:
-    the jaws edge-on (`XleRobotModel.visibility` +0.03), then hidden by the forearm and the wrist camera's plate.
-    The visibility cosine scores only the jaws' orientation; a session stand-in (the arm's link origins against the
-    line of sight) misses the plate, which sits to the side of the wrist. Built (2026-11-05):
-    `calibration.wrist_camera_board` fits each plate from clicked corners into the calibration
-    (`WristBoard`, a box link; `calibration.check` draws it). **Not yet run on the robot.** TODO: the occlusion
-    check itself (the lines from the head camera to the pinch point, the moving tip and the grasp point against the
-    plate's box and a cylinder along the forearm), reported by `solve_pose` with the visibility.
+17. **Seeing a grasp from the head camera: the plates are checked, the forearm is not.** pen2 chose two picks the
+    camera could not check: the jaws edge-on (`XleRobotModel.visibility` +0.03), then hidden by the forearm (its
+    black sleeve: the replay against the fitted plates found the plate off to the side). Built (2026-11-05): `calibration.wrist_camera_board` fits each plate into the calibration
+    (`WristBoard`, a box link); `XleRobotModel.hidden_by` / `view_of` test the line of sight against both plates;
+    `find_view` refuses views a plate hides; `solve_pose` reports per pose "jaws seen / edge-on / hidden by the ...
+    plate"; `calibration.check` draws the plates. Replayed on pen2 and container1: the right plate's fit sits on the
+    real plate (2.3 px RMS, 38 x 43 mm) and hides none of those grasps.
+    TODO:
+    - **The sleeved forearm:** a cylinder along the lower arm with the sleeve's real radius (measured, or fitted from
+      clicks on its edges), tested like the plates. It is what hid pen2's second pick.
+    - **Re-check the left plate's fit:** 38 x 54 mm at 3.3 px RMS (the right: 38 x 43), not square; likely a corner
+      clicked out of order or a misclick (`wrist_board.md` has the per-corner errors; `calibration.check` shows
+      whether its outline sits on the plate). Re-run if it is off.
+    - Using the report in a session: prefer a grasp the camera sees before contact.
 
 ## Tooling
 

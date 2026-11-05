@@ -189,8 +189,8 @@ def default_parameters(
 class Prediction:
     """What the model says about one of an arm's gripper points (`POINTS`).
 
-    Its pixel (u, v), depth along the optical axis, position in the camera frame and in the root frame, and
-    `visibility` (see `XleRobotModel.visibility`).
+    Its pixel (u, v), depth along the optical axis, position in the camera frame and in the root frame,
+    `visibility` (see `XleRobotModel.visibility`) and `hidden_by` (`XleRobotModel.hidden_by`).
     """
 
     uv: np.ndarray
@@ -198,6 +198,7 @@ class Prediction:
     p_camera: np.ndarray
     point: np.ndarray
     visibility: float
+    hidden_by: tuple[str, ...] = ()  # the arms whose wrist camera plate is between the camera and the point
 
 
 def motor_record(motor: Mapping[str, int]) -> dict[str, int]:
@@ -239,6 +240,29 @@ class GripperMap:
 
 
 BOARD_THICKNESS_M = 0.01  # the wrist camera's mount plate, with the board on it (assumed, not measured)
+PLATE_MARGIN_M = 0.005  # a plate hides what passes this close to its box (its fit and the arm's error)
+SIGHT_END_M = (
+    0.005  # the line of sight stops this short of the point: a point on the plate's edge is not hidden
+)
+
+
+def segment_hits_box(a: np.ndarray, b: np.ndarray, pose: np.ndarray, half: np.ndarray) -> bool:
+    """Whether the segment from `a` to `b` (root frame) passes through the box at `pose` (4x4) of half-size `half`."""
+    rotation, center = pose[:3, :3], pose[:3, 3]
+    start, direction = rotation.T @ (a - center), rotation.T @ (b - a)
+    low, high = 0.0, 1.0
+    for axis in range(3):
+        if abs(direction[axis]) < 1e-12:
+            if abs(start[axis]) > half[axis]:
+                return False
+            continue
+        t1, t2 = sorted(
+            ((-half[axis] - start[axis]) / direction[axis], (half[axis] - start[axis]) / direction[axis])
+        )
+        low, high = max(low, t1), min(high, t2)
+        if low > high:
+            return False
+    return True
 
 
 def wrist_board_link(arm: str) -> str:
@@ -758,7 +782,7 @@ class XleRobotModel:
         uv, z = self._project(xyz[None])
         x_root_camera = self._pose(OPTICAL_FRAME)
         p_camera = x_root_camera[:3, :3].T @ (xyz - x_root_camera[:3, 3])
-        return Prediction(uv[0], float(z[0]), p_camera, xyz, self._visibility(arm, xyz))
+        return Prediction(uv[0], float(z[0]), p_camera, xyz, self._visibility(arm, xyz), self._hidden_by(xyz))
 
     def predict_many(
         self,
@@ -923,6 +947,46 @@ class XleRobotModel:
         """
         self._evaluate(q, theta)
         return self._visibility(arm, self._point(arm, point, opening_deg))
+
+    def hidden_by(
+        self,
+        arm: str,
+        q: np.ndarray,
+        point: str = "pinch",
+        opening_deg: float | None = None,
+        theta: np.ndarray | Mapping[str, float] | None = None,
+    ) -> tuple[str, ...]:
+        """The arms whose wrist camera plate (`wrist_boards`) is between the camera and one of `arm`'s gripper points.
+
+        Each plate is its box, `PLATE_MARGIN_M` larger; an arm without a fitted plate hides nothing.
+        """
+        self._evaluate(q, theta)
+        return self._hidden_by(self._point(arm, point, opening_deg))
+
+    def view_of(
+        self, arm: str, q: np.ndarray, xyz: np.ndarray, theta: np.ndarray | Mapping[str, float] | None = None
+    ) -> tuple[float, tuple[str, ...]]:
+        """How the camera sees a root-frame point held by `arm`'s jaws (a grasp point).
+
+        Returns the jaws' `visibility` there and the arms whose plate hides it (as `hidden_by`).
+        """
+        self._evaluate(q, theta)
+        xyz = np.asarray(xyz, dtype=float)
+        return self._visibility(arm, xyz), self._hidden_by(xyz)
+
+    def _hidden_by(self, xyz: np.ndarray) -> tuple[str, ...]:
+        camera = self._pose(OPTICAL_FRAME)[:3, 3]
+        sight = xyz - camera
+        end = camera + sight * max(0.0, 1.0 - SIGHT_END_M / max(float(np.linalg.norm(sight)), 1e-9))
+        hits = []
+        for arm, board in self.wrist_boards.items():
+            link = wrist_board_link(arm)
+            if link not in self._frame_ids:
+                continue
+            _, size = board.box()
+            if segment_hits_box(camera, end, self._pose(link), size / 2 + PLATE_MARGIN_M):
+                hits.append(arm)
+        return tuple(hits)
 
     def _visibility(self, arm: str, xyz: np.ndarray) -> float:
         sight = self._pose(OPTICAL_FRAME)[:3, 3] - xyz

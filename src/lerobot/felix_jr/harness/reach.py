@@ -77,6 +77,9 @@ class Solution:
     roll_error_deg: float  # NaN if the roll was free
     at_limit: tuple[str, ...]  # joints that ended at a bound
     ok: bool  # within every tolerance, the pitch held
+    # how the capture's camera sees the grasp point: the jaws' visibility there, the arms whose plate hides it
+    visibility: float = float("nan")
+    hidden_by: tuple[str, ...] = ()
 
 
 class ArmIK:
@@ -206,6 +209,7 @@ class ArmIK:
         roll_error = float("nan") if roll_deg is None else _angle(roll, roll_deg)
         q = self.q.copy()
         q[self.index] = x
+        visibility, hidden_by = self.model.view_of(self.arm, q, self.tool(frame))
         names = [
             j
             for j, v, lo, hi in zip(SO101_JOINTS, x, self.lower, self.upper, strict=True)
@@ -227,6 +231,8 @@ class ArmIK:
             roll_error_deg=roll_error,
             at_limit=tuple(names),
             ok=bool(ok),
+            visibility=visibility,
+            hidden_by=hidden_by,
         )
 
 
@@ -306,6 +312,8 @@ def join_poses(*parts: Poses) -> Poses:
         first.open_jaw,
         first.held,
         first.margin,
+        np.concatenate([p.seen() for p in parts]),
+        tuple(h for p in parts for h in p.hidden()),
     )
 
 
@@ -335,6 +343,8 @@ def select_poses(poses: Poses, *labels: str) -> Poses:
         poses.open_jaw,
         poses.held,
         poses.margin,
+        poses.seen()[index],
+        tuple(poses.hidden()[i] for i in index),
     )
 
 
@@ -440,4 +450,6 @@ def _poses(
         ik.open_jaw,
         ik.held,
         ik.margin,
+        np.array([s.visibility for s in solutions]),
+        tuple(s.hidden_by for s in solutions),
     )

@@ -219,3 +219,75 @@ def test_a_session_is_refused_for_another_robots_calibration(robot, tmp_path):
     with pytest.raises(Exception, match="elbow_flex recalibrated"):
         BoardSession(client, start, "left", tmp_path / "board", lambda image: None)
     assert fake.arm_backend.trajectories == []
+
+
+# ---- the plates in the camera's way ---------------------------------------------------------------------------
+
+
+def test_a_segment_hits_a_box_only_through_it():
+    from lerobot.felix_jr.calibration.xle_robot_model import segment_hits_box
+
+    box, half = np.eye(4), np.array([0.02, 0.02, 0.005])
+    assert segment_hits_box(np.array([0, 0, 1.0]), np.array([0, 0, -1.0]), box, half)  # straight through
+    assert not segment_hits_box(np.array([0.05, 0, 1.0]), np.array([0.05, 0, -1.0]), box, half)  # beside it
+    assert not segment_hits_box(np.array([0, 0, 1.0]), np.array([0, 0, 0.1]), box, half)  # stops short
+    assert segment_hits_box(np.array([-1.0, 0.01, 0]), np.array([1.0, 0.01, 0]), box, half)  # edge-on, inside
+    turned = np.eye(4)
+    turned[:3, :3] = [[1, 0, 0], [0, 0, -1], [0, 1, 0]]  # the thin axis now along y
+    assert not segment_hits_box(np.array([0, 0.03, 1.0]), np.array([0, 0.03, -1.0]), box, half)
+    assert segment_hits_box(np.array([0, 0.003, 1.0]), np.array([0, 0.003, -1.0]), turned, half)
+
+
+def plate_in_front_of_pinch(
+    model: XleRobotModel, q: np.ndarray, ahead: float, aside: float = 0.0
+) -> WristBoard:
+    """A 4 cm plate `ahead` m in front of the right pinch point toward the camera, `aside` m off the line of sight,
+    facing the camera."""
+    pinch = model.pinch_point("right", q)
+    camera = model.camera_pose(q)[:3, 3]
+    sight = (camera - pinch) / np.linalg.norm(camera - pinch)
+    u = np.cross(sight, [0.0, 0.0, 1.0])
+    u /= np.linalg.norm(u)
+    v = np.cross(sight, u)
+    center = pinch + ahead * sight + aside * u
+    corners_root = [center + 0.02 * (u + v), center + 0.02 * (u - v), center + 0.02 * (-u - v)]
+    frame = model.frame_pose(board_parent("right"), q)
+    corners = tuple(tuple(frame[:3, :3].T @ (c - frame[:3, 3])) for c in corners_root)
+    return WristBoard(board_parent("right"), corners, tuple(frame[:3, :3].T @ -sight))
+
+
+def test_a_plate_between_the_camera_and_the_pinch_point_hides_it(model):
+    q = model.joint_vector({"right": REST})
+    assert model.hidden_by("right", q) == ()  # no plates fitted: nothing hides
+    hiding = model.with_wrist_board("right", plate_in_front_of_pinch(model, q, ahead=0.03))
+    assert hiding.hidden_by("right", q) == ("right",)
+    assert hiding.predict("right", q).hidden_by == ("right",)
+    beside = model.with_wrist_board("right", plate_in_front_of_pinch(model, q, ahead=0.03, aside=0.06))
+    assert beside.hidden_by("right", q) == () and beside.predict("right", q).hidden_by == ()
+    behind = model.with_wrist_board("right", plate_in_front_of_pinch(model, q, ahead=-0.03))
+    assert behind.hidden_by("right", q) == ()  # behind the point: not in the way
+
+
+def test_solved_poses_say_what_the_camera_sees_of_the_grasp(model):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from lerobot.felix_jr.harness.reach import join_poses, select_poses, solve_pose
+
+    capture = SimpleNamespace(arms={"right": REST}, head_ticks={})
+    pick = np.array([-0.4538, 0.1421, 0.8632])
+    pose = solve_pose(model, "right", capture, pick, -15.0, roll_deg=0.0, width=0.01, label="pick")
+    q = model.joint_vector({"right": pose.joints[0]})
+    visibility, hidden = model.view_of(
+        "right", q, pose.frames[0][:3, :3] @ pose.grasp + pose.frames[0][:3, 3]
+    )
+    assert pose.visibility[0] == pytest.approx(visibility) and pose.hidden_by == ((),) and hidden == ()
+    assert "camera: jaws" in pose.describe() and f"{visibility:+.2f}" in pose.describe()
+    hidden_pose = replace(pose, hidden_by=(("right",),))
+    assert "camera: hidden by the right wrist camera plate" in hidden_pose.describe()
+    edge_on = replace(pose, visibility=np.array([0.03]))
+    assert "camera: jaws edge-on (+0.03)" in edge_on.describe()
+    up = solve_pose(model, "right", capture, pick + [0, 0, 0.05], -15.0, width=0.01, init=pose, label="up")
+    path = join_poses(hidden_pose, up)
+    assert path.hidden_by == (("right",), ()) and len(path.visibility) == 2
+    assert select_poses(path, "pick").hidden_by == (("right",),)

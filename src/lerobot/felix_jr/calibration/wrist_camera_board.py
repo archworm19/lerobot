@@ -316,6 +316,9 @@ class BoardSession(LiveView):
         self.calibration.check_robot(client)
         model = XleRobotModel.load(start_from)  # the one the views are planned with: from the plate's side
         model.visible_side[arm] = flip_side(model.visible_side[arm])
+        model.wrist_boards.pop(
+            arm, None
+        )  # an earlier fit of this plate: it is what the views are meant to show
         self.notes: list[str] = []
         capture = client.capture(color_format=color_format)
         intrinsics = {k: capture.calibration["color_intrinsics"][k] for k in INTRINSICS_KEYS}

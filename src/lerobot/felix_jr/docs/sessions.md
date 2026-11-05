@@ -115,8 +115,10 @@ from the cup and click its top with the other arm.
    spread over 10 poses on the way down (`prepare_execution` refuses a turn in place: it steps by distance, so a
    140 deg roll at one point is one step), all chained from the arm's pose (solved from the rest pose, the pick had
    landed on the other elbow branch). Held at the pick, jaws open: **the jaws were hidden again, this time by the
-   arm itself**: coming in steeply from behind and above, the forearm and the wrist camera's board sat between the
-   head camera and the jaws. The person saw the pick very close to the pen.
+   arm itself**: coming in steeply from behind and above, the forearm sat between the head camera and the jaws.
+   (First read as the forearm and the wrist camera's plate; replayed against the fitted plates,
+   `xle_calib_11052026.urdf`, the plate was off to the side and the jaws were behind the **black sleeve over the
+   forearm**, much bulkier than the arm's links.) The person saw the pick very close to the pen.
 6. **The pen had moved:** fresh depth put it 1.4-2.0 cm off the scan's line, leaning 61 deg (was 55), its heading
    turned ~15 deg (0.55 cm off after the first `look_at`): pushed during the first pick, the back-out or this
    descent, still leaning on the rim.

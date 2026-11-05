@@ -639,13 +639,13 @@ Status: **done** (2026-10-31). `uv run pytest tests/felix_jr/test_harness.py` (s
 model = XleRobotModel.load("~/cal_right/calibration.urdf")
 ws = Workspace()
 cap = Capture.from_session("~/cal_right", 0, model, load_calibration("~/pi_capture/calibration.json"))
-view = ws.call(full_view, cap)                      # cap is recorded as "external"
+view = ws.call(full_view, cap)  # cap is recorded as "external"
 table = ws.call(table_height, cap)
-grid = ws.call(make_grid, view, table, 0.02)        # the estimate, not table.h: the grid is derived from it
+grid = ws.call(make_grid, view, table, 0.02)  # the estimate, not table.h: the grid is derived from it
 close = ws.call(zoom, view, (200, 200, 200, 150))
-fine = ws.call(make_grid, close, table, 0.005)      # extent = what the zoomed view shows
+fine = ws.call(make_grid, close, table, 0.005)  # extent = what the zoomed view shows
 image = ws.call(render, close, fine)
-ws.ancestors(image)                                 # ['view2', 'grid2', 'view1', 'tableestimate1', 'capture1']
+ws.ancestors(image)  # ['view2', 'grid2', 'view1', 'tableestimate1', 'capture1']
 ```
 
 Choices made while building it:

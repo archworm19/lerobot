@@ -392,6 +392,10 @@ def solve_pose(
     `init`: where the solver starts (joints in LeRobot degrees, or `Poses` to continue from its last pose; default the
     arm's pose in the capture). It decides the branch (elbow up or down). One local solve, no retries: if a pose
     misses, the description says by how much and which joints are at a limit; try another pitch, start or tolerance.
+    The description also says, per pose, what the capture's camera sees of the grasp point: "jaws seen (+0.52)" (the
+    cosine of the hinge axis and the line of sight: the farther from 0, the more the camera looks into the gap),
+    "jaws edge-on" (below 0.2: they hide what is between them) or "hidden by the right wrist camera plate". Before
+    contact, prefer a pose the camera can check: try another roll, pitch or the other arm.
     """
     return _reach.solve_pose(
         h.model,

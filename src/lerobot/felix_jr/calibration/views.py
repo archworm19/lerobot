@@ -7,7 +7,8 @@ over the model (`XleRobotModel.predict`), so that the pinch point:
   trial pose puts the point behind the camera);
 - is at a target position (optional: from `plan_targets`);
 - is seen from the arm's visible side: the gripper's hinge axis points along the line of sight, so the jaws meet
-  in profile instead of hiding behind each other or behind the wrist camera's board;
+  in profile instead of hiding behind each other or behind the wrist camera's board (and, where the calibration
+  has the plates, `XleRobotModel.wrist_boards`, no plate is between the camera and it);
 - stays a clearance above the floor (the model's `floor_z`, if known);
 - and the joints stay near a seed pose, within the joint limits (bounds; the head's recorded limits if given).
 
@@ -174,6 +175,8 @@ def find_view(
         reasons.append("the pinch point is not in the picture")
     if facing > FACING_MAX_DEG:
         reasons.append(f"the gripper faces the camera only within {facing:.0f} deg")
+    if pred.hidden_by:
+        reasons.append(f"the {' and '.join(pred.hidden_by)} wrist camera plate hides the pinch point")
     if model.floor_z is not None and pred.point[2] < model.floor_z + FLOOR_CLEARANCE - 0.005:
         reasons.append("the pinch point is too close to the floor")
     head_angles = {joint: float(q[model.q_index(joint)]) for joint in HEAD_JOINTS.values()}
