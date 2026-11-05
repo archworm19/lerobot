@@ -11,6 +11,7 @@ next of `--openings` (LeRobot's `gripper.pos`), and the frame shows where the mo
 
   cyan circle       the pinch point: the fixed jaw's tip (placed by the camera calibration)
   magenta circle    the moving jaw's tip (placed by the gripper map and the hinge too), with a line between them
+  yellow outlines   the wrist cameras' plates the calibration has, both arms' (`calibration.wrist_camera_board`)
 
 computed from the joint angles and the `gripper.pos` measured with the frame. If the calibration is right, the two
 circles sit on the two fingertips at every view and every opening; how far off they are, and whether it changes
@@ -44,24 +45,37 @@ from lerobot.felix_jr.calibration.live_view import (
     set_floor,
 )
 from lerobot.felix_jr.calibration.views import MAX_ROLL_DEG
-from lerobot.felix_jr.calibration.xle_robot_model import Prediction, XleRobotModel
+from lerobot.felix_jr.calibration.xle_robot_model import HEAD_JOINTS, Prediction, XleRobotModel
 from lerobot.felix_jr.server.client import FelixClient
 from lerobot.felix_jr.server.protocol import DEFAULT_PORT
 
 DEFAULT_OPENINGS = (0.0, 15.0, 30.0, 50.0, 70.0)  # gripper.pos per view, in turn
-PINCH_COLOR, MOVING_COLOR = (0, 255, 255), (255, 0, 255)  # RGB: cyan, magenta
+PINCH_COLOR, MOVING_COLOR, BOARD_COLOR = (
+    (0, 255, 255),
+    (255, 0, 255),
+    (255, 220, 0),
+)  # RGB: cyan, magenta, yellow
 KEY_ACTIONS = {ord("n"): "next", ord("["): "close", ord("]"): "open", ord("q"): "quit", 27: "quit"}
 FRAMES_FILE = "frames.json"
 
 
 def annotate(
-    image: np.ndarray, lines: list[str], points: Sequence[tuple[np.ndarray | None, tuple, str]]
+    image: np.ndarray,
+    lines: list[str],
+    points: Sequence[tuple[np.ndarray | None, tuple, str]],
+    outlines: Sequence[np.ndarray] = (),
 ) -> np.ndarray:
     """Copy of the RGB `image` with each `(pixel, color, label)` as a labeled circle, and text at the top left.
 
-    A line joins the first two drawn points; a point with no pixel (None, or behind the camera) is left out.
+    A line joins the first two drawn points; a point with no pixel (None, or behind the camera) is left out. Each of
+    `outlines` (N, 2 pixels) is drawn as a closed yellow polygon: a wrist camera's plate.
     """
     out = image.copy()
+    for outline in outlines:
+        if np.isfinite(outline).all():
+            polygon = np.round(outline).astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(out, [polygon], True, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.polylines(out, [polygon], True, BOARD_COLOR, 1, cv2.LINE_AA)
     drawn = [(uv, color, label) for uv, color, label in points if uv is not None and np.isfinite(uv).all()]
     if len(drawn) >= 2:
         a, b = (tuple(int(round(float(c))) for c in uv) for uv, _, _ in drawn[:2])
@@ -182,7 +196,22 @@ class CheckSession(LiveView):
             (pinch.uv if pinch.z > 0 else None, PINCH_COLOR, "pinch"),
             (moving.uv if moving.z > 0 else None, MOVING_COLOR, "moving tip"),
         ]
-        return annotate(self.capture.color, lines, points)
+        return annotate(self.capture.color, lines, points, self.board_outlines())
+
+    def board_outlines(self) -> list[np.ndarray]:
+        """Each wrist camera plate the calibration has (both arms'), as its seen face in the current frame.
+
+        Each is (4, 2) pixels; a plate behind the camera is left out. The other arm's plate is placed at the joints this frame measured for it, if any, else at its rest in the URDF.
+        """
+        state = self.capture.state
+        arms = {arm: state[f"{arm}_arm"] for arm in self.model.wrist_boards if f"{arm}_arm" in state}
+        q = self.model.joint_vector(arms, {n: int(state["head"][n]["ticks"]) for n in HEAD_JOINTS})
+        outlines = []
+        for arm in self.model.wrist_boards:
+            uv, z = self.model.project(self.model.board_corners(arm, q), q)
+            if (z > 0).all():
+                outlines.append(uv)
+        return outlines
 
     # ---- frames ---------------------------------------------------------------------------------------------
 

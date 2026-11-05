@@ -242,7 +242,7 @@ placo's view of the exported URDF is tested against the model, so any URDF reade
    click.
 3. **Learned column:** a parameter marked "no" was not determined by the clicks; do not read meaning into its value.
 4. **Poses you did not collect:** try the result where the VLM will plan, by clicking a few more and checking the
-   error, or with `calibration.check` (`README.md` section 8): it draws both fingertips at new views and gripper
+   error, or with `calibration.check` (`README.md` section 9): it draws both fingertips at new views and gripper
    openings, with nothing to click, which tests the gripper map and the hinge as well.
 5. **Simulation is optimistic:** with the right model and random poses, 20 to 80 clicks with 1.5 px noise bring the
    held-out error from about 220 px to about 2 px. Real errors also include backlash and play.

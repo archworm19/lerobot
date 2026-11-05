@@ -233,11 +233,30 @@ radius r. It needs a calibrated URDF from section 6 (the model's radius is the s
    stored measurements with no robot. A camera calibration started from this file (`collect` /
    `xle_fit --start-from`) keeps the maps.
 
-### 8. Check the calibration on the robot (no clicks, needs the server)
+### 8. Fit the wrist cameras' plates (clicks, needs the server)
+
+The wrist camera sits on a square plate on each gripper. From the head camera that plate can hide the jaws (pen2,
+`sessions.md`), so occlusion checks need it in the model. This adds it to a calibration as a box, from three of its
+corners clicked view after view (the rest of the calibration stays as it is).
+
+1. Put small numbered marks (1, 2, 3) on three corners of the plate's back (the side the head camera sees), going
+   around it so that 2 is between 1 and 3. Same on both arms.
+2. Server on the Pi with the arm (and the head): as for section 6.
+3. On your computer, with the workspace clear:
+   `uv run python -m lerobot.felix_jr.calibration.wrist_camera_board tcp://<pi>:5555 --arm right
+   --start-from <calibration.urdf> --out-dir <a scratch folder>`
+   `n` moves to the next view (seen from the plate's side of the gripper); click corners 1, 2, 3 in order (`s`
+   skips one that is hidden, `u` undoes); after a few views the fitted plate is drawn in yellow and should sit on
+   the real one. 8-12 views are plenty; `q` fits and writes `calibration.urdf` and `wrist_board.md` in the folder.
+4. Read `wrist_board.md`: the pixel RMS (a few px), and the two fitted edges (equal, at 90 deg, the plate's size).
+5. The other arm: run again with `--start-from` the file just written. Then check the whole calibration (section 9).
+
+### 9. Check the calibration on the robot (no clicks, needs the server)
 
 Draws where the calibrated URDF puts both fingertips over the head camera, view after view, with the gripper at
 different openings: the pinch point (cyan, placed by the camera calibration) and the moving jaw's tip (magenta,
-placed by the gripper map from section 7 as well). It needs a URDF with the arm's gripper map, made for this robot
+placed by the gripper map from section 7 as well), and the wrist cameras' plates (yellow outlines, from
+section 8) where the URDF has them. It needs a URDF with the arm's gripper map, made for this robot
 (the same check as the harness's: a recalibrated arm or flipped head directions are refused).
 
 1. Server on the Pi with the arm (and the head): as for section 6.
@@ -249,7 +268,8 @@ placed by the gripper map from section 7 as well). It needs a URDF with the arm'
    the head; `q` quits and sends the robot to rest.
 3. Read the result: both circles should sit on the fingertips everywhere. An offset of the pinch point that changes
    with the pose or the head is the camera calibration (recalibrate, section 6); a pinch point on target with the
-   moving tip off, growing with the opening, is the gripper map (re-measure, section 7). With `--out-dir`, every
+   moving tip off, growing with the opening, is the gripper map (re-measure, section 7); a plate's outline off its
+   plate is its fit (section 8). With `--out-dir`, every
    frame is saved as drawn and raw, with `frames.json` (the measured state and both predictions per frame).
 
 ## Checks and teleop (after either setup)

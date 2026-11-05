@@ -159,3 +159,31 @@ def test_annotate_draws_both_tips_and_skips_one_behind_the_camera():
     alone = annotate(image, [], [(None, PINCH_COLOR, "pinch"), tips[1]])
     assert not has_color(alone, (255, 255, 255), 60, 75, half=0)  # no line with one point
     assert not has_color(alone, PINCH_COLOR, 60, 40 + 12)
+
+
+def test_the_wrist_camera_plates_are_drawn_where_the_calibration_has_them(robot):
+    from lerobot.felix_jr.calibration.check import BOARD_COLOR
+    from lerobot.felix_jr.calibration.xle_robot_model import WristBoard
+
+    fake, client = robot
+    with client.session():
+        bare, _ = make_session(client, model_for(client))
+        assert bare.board_outlines() == []  # none in the calibration: nothing drawn
+        model = model_for(client)
+        for arm in ("left", "right"):  # a 4 cm plate beside each gripper
+            plate = WristBoard(
+                f"{arm}_gripper_link",
+                ((0.02, -0.03, 0.06), (0.02, -0.03, 0.02), (0.02, 0.01, 0.02)),
+                (1.0, 0, 0),
+            )
+            model = model.with_wrist_board(arm, plate)
+        session, shown = make_session(client, model)
+        session.handle("next")
+        outlines = session.board_outlines()
+        q = session.current_q()
+        uv, _ = session.model.project(session.model.board_corners("left", q), q)
+        assert any(np.allclose(o, uv) for o in outlines)  # the checked arm's, at its measured joints
+        assert len(outlines) == 2  # the other arm's too, at its measured joints
+        assert session.model.in_view(uv[0], margin=5)
+        corner = np.round(uv[0]).astype(int)
+        assert has_color(shown[-1], BOARD_COLOR, corner[1], corner[0])  # drawn on the frame

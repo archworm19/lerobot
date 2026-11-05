@@ -29,7 +29,7 @@ the IK smoke test is built on pen1).
     **Built (2026-11-04).** The gripper map (`calibration.gripper_step`, `README.md` section 7; both arms in
     `urdfs/xle_calib_11042026.urdf`), the moving tip (`XleRobotModel.moving_tip`, `point="moving_tip"` on every
     predicting method; not the URDF's joint angle, which is ~16 mm open at 0), checked on the robot
-    (`calibration.check`, section 8), and the harness on top of it: `width` is the object's, the jaws open until the
+    (`calibration.check`, `README.md` section 9), and the harness on top of it: `width` is the object's, the jaws open until the
     tips are `width` apart, and the **grasp point** (where `solve_pose` puts the target and `held_object` the
     object's center) is midway between the tips (`XleRobotModel.grasp_offset`); `prepare_execution` opens and closes
     the gripper by the object's width through the map; `render` draws the moving finger turned about the hinge.
@@ -134,6 +134,15 @@ including the object being grasped. Revisit only if the model, given good render
     measured by hand. **TODO: test it in use on a few picks** (the correction at the attack point, how much of the
     measured error to apply when the grasp is a little more extended), then add it to `protocols.md` (rule 1's
     "measure the arm" step); and log its measurements (pose, load, error) toward the sag model.
+
+17. **Nothing checks whether the head camera can see a grasp.** pen2 chose two picks the camera could not check:
+    the jaws edge-on (`XleRobotModel.visibility` +0.03), then hidden by the forearm and the wrist camera's plate.
+    The visibility cosine scores only the jaws' orientation; a session stand-in (the arm's link origins against the
+    line of sight) misses the plate, which sits to the side of the wrist. Built (2026-11-05):
+    `calibration.wrist_camera_board` fits each plate from clicked corners into the calibration
+    (`WristBoard`, a box link; `calibration.check` draws it). **Not yet run on the robot.** TODO: the occlusion
+    check itself (the lines from the head camera to the pinch point, the moving tip and the grasp point against the
+    plate's box and a cylinder along the forearm), reported by `solve_pose` with the visibility.
 
 ## Tooling
 
