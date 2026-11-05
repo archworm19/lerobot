@@ -14,7 +14,8 @@ planned on it, and `pen1` (2026-11-01) moved the arm, every move approved; sessi
 `harness/scratch/sessions/`, write-ups in [sessions.md](sessions.md). On pen1 the gripper landed ~1 cm from plan, in line with the XLeRobot's inexpensive hardware: close enough everywhere except
 across the jaws, which is the first item.
 
-Last updated 2026-11-02 (10 closed: the legacy objects are gone; the IK smoke test is built on pen1).
+Last updated 2026-11-05 (16 added: the arm's sag, from pen2). 2026-11-02: 10 closed (the legacy objects are gone;
+the IK smoke test is built on pen1).
 
 ## Fix the gripper model (the biggest issue)
 
@@ -37,10 +38,14 @@ Last updated 2026-11-02 (10 closed: the legacy objects are gone; the IK smoke te
     - **TODO: how far to open and how hard to close.** `reach.OPEN_CLEARANCE_M` (the tips 2 cm wider apart than the
       object for the approach) and `reach.SQUEEZE_M` (close to 3 mm narrower, to hold without stalling the servo for
       long) are first guesses. The clearance trades the margin for the ~1-2 cm aim error (on the moving jaw's side
-      only: the fixed jaw does not move) against hitting neighbors; the squeeze, grip against the servo's load and
-      heat. Worth measuring: the load after closing at a few squeezes, and the aim error at the tips.
+      only: the fixed jaw does not move) against hitting neighbors. **The squeeze is too weak and in the wrong
+      unit** (pen2, 2026-11-05: a pen slipped out of the jaws at once; `tuning_notes.md` 3.9): the grip force is P
+      times how far the close target is past contact, and 3 mm of width was ~1 deg, a few percent of load. Make it
+      an overshoot in servo units / degrees past the object (or close to the tips meeting), with the servo's torque
+      cap setting the force; weigh it against overload protection (torque drops to 25 % after a long hard hold).
+      Worth measuring: the load after closing at a few overshoots, and how long until protection trips.
     - **Grasping at the tips.** The grasp point is between the fingertips, so a thin object is held at the very tips,
-      where pen1's pen sat. Holding it a finger-depth (~1.5-2 cm) into the jaws would be a `depth` on the grasp: the
+      where pen1's pen sat (and pen2's, which slipped). Holding it a finger-depth (~1.5-2 cm) into the jaws would be a `depth` on the grasp: the
       points of both jaws that far back from the tips, and the opening that leaves `width` between them there.
     - **The fixed jaw's margin.** Only the moving jaw opens, so with no margin the fixed fingertip touches the
       object's side and an aim error toward it misses (pen1's first attempt). `solve_pose(..., margin=)` (default 0)
@@ -108,6 +113,27 @@ including the object being grasped. Revisit only if the model, given good render
 8. **Only the pitch and jaws are chosen, not the approach direction.** The heading follows from the shoulder pan,
    so a side grasp always comes from the shoulder's side of the object. Reaching around an obstacle, or taking an
    object from a chosen side, would need the base to move (not planned) or the other arm.
+16. **The arm sags below the plan, and nothing corrects for it (a major issue).** On pen2 (2026-11-05) the left arm,
+    reaching out level at ~96 cm, held its attack pose **1.2 cm below** the plan (elbow_flex 1.6 deg and wrist_flex
+    0.9 deg off; across the jaws 0.1 cm). The model given the *measured* joints matched the real fingertips in the
+    image (~8 px), so the error is the servos not reaching their targets under the arm's own weight, not the
+    calibration; pen1 saw 1.2 deg at rest and more loaded and extended. It is about the size of a thin object and of
+    the clearances the grasps rely on (a jaw ~1 cm above a book's edge, a rim). What worked by hand: hold at the attack
+    point, measure the error (planned vs measured-joint pinch point), aim the grasp that much higher (1.0 of the 1.2
+    cm). What would fix it: a tool that returns that error at a hold and re-solves the next poses with it; then a
+    gravity model of the sag (per joint, by load and extension) so the plan is right the first time, or a higher
+    servo P gain / a closer settle tolerance (`tuning_notes.md`).
+    **Loaded, it is worse:** on container1 (2026-11-05) the right arm carrying a plastic tub by its rim held
+    shoulder_lift 2.5-8 deg short of its targets, and `run_execution` stopped the carry at the first labeled pose
+    (2.5 deg). `prepare_execution(..., pose_tol_deg=4.0)` (`session.py execute --pose-tol 4`) loosens it for a
+    carry; the fix is the same as above (a sag model by load).
+    **Built (2026-11-05): the `arm_error` tool.** At a hold, the gripper's error against the pose it was sent to
+    (the model at the measured joints vs the plan; vertical, across the jaws, along the axis) and the joints that
+    missed, with `.offset` to aim the next short move from there at its target minus it (by hand, this made pen2's
+    book grasp land and container1's rim grasp). Checked on container1's attack hold: (0.25, 0.23, -0.52) cm, as
+    measured by hand. **TODO: test it in use on a few picks** (the correction at the attack point, how much of the
+    measured error to apply when the grasp is a little more extended), then add it to `protocols.md` (rule 1's
+    "measure the arm" step); and log its measurements (pose, load, error) toward the sag model.
 
 ## Tooling
 

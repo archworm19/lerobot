@@ -17,6 +17,8 @@ running anything on the robot, and update it when what you do changes what it sa
     checks, teleop, troubleshooting, tests.
   - `docs/current_ports.md`: serial ports of each arm on each computer.
   - `docs/realsense_m1.md`: the RealSense on the Mac (pitfalls, what is verified).
+- **Protocols** (how to drive a session on the robot): `docs/protocols.md`. Follow them when running a
+  session.
 - **Design documents** (why things are the way they are):
   - `docs/harness.md`: the VLM harness (research summary, design principles 1.A-1.K, experiment plan).
   - `docs/camera_calibration.md`: the click calibration and `XleRobotModel`.

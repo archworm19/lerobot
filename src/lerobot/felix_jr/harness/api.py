@@ -34,7 +34,19 @@ import numpy as np
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 
 from . import execute as _execute, look as _look, reach as _reach, scan as _scan, tools as _tools
-from .objects import ArmPath, Capture, Execution, Focus, Grid, HeldObject, Points, Poses, TableEstimate, View
+from .objects import (
+    ArmError,
+    ArmPath,
+    Capture,
+    Execution,
+    Focus,
+    Grid,
+    HeldObject,
+    Points,
+    Poses,
+    TableEstimate,
+    View,
+)
 from .render import contact_sheet as _contact_sheet, render as _render  # the package re-exports `render`
 from .workspace import Workspace
 
@@ -427,18 +439,35 @@ def approach(
 
 
 @tool(Effect.SOFTWARE)
-def prepare_execution(h: Harness, poses: Poses, grip: Mapping[str, str] | None = None) -> Execution:
+def prepare_execution(
+    h: Harness, poses: Poses, grip: Mapping[str, str] | None = None, pose_tol_deg: float = 2.5
+) -> Execution:
     """The exact moves `execute` would send to go through `poses` in order, solved every ~1 cm.
 
     `grip` maps a pose label (or "start", before the first move) to "open" / "close", e.g. {"start": "open",
     "pick": "close", "place": "open"}: open puts the tips 2 cm wider apart than the poses' object width and margin,
     close 3 mm narrower than the object (it holds it). Fails if a step misses or a joint would jump. Nothing moves.
+    `execute` counts a labeled pose reached when every joint is within `pose_tol_deg` (the ~1 cm steps between
+    them: 4 deg); a loaded, extended arm sags further than 2.5 deg, so loosen it (e.g. 4) for a carry.
     """
     if h.ws.is_stale(poses):
         raise ValueError(
             "these poses come from before the arm last moved: capture again and solve them again"
         )
-    return _execute.prepare_execution(h.model, poses, grip)
+    return _execute.prepare_execution(h.model, poses, grip, pose_tol_deg=pose_tol_deg)
+
+
+@tool(Effect.SOFTWARE)
+def arm_error(h: Harness, poses: Poses, capture: Capture, label: str | None = None) -> ArmError:
+    """Where the arm really is at a hold, against the pose `label` of `poses` it was sent to (default the last).
+
+    `capture` is the one taken at the hold (`execute(..., hold=True)`), or a later one with the arm not moved since.
+    The description gives the gripper's error vertically, across the jaws and along the gripper axis, and the joints
+    that missed. The arm sags under its weight and load (~1 cm reaching out level), and it repeats in the same
+    configuration: to correct the next short move from the hold (the grasp from its attack point), aim it at its
+    target minus `.offset`. Not valid for other poses or loads. Nothing moves.
+    """
+    return _execute.arm_error(h.model, poses, capture, label)
 
 
 @tool(Effect.SOFTWARE)

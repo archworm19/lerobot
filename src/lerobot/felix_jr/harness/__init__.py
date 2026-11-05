@@ -1,6 +1,7 @@
 """The VLM harness: objects, long-term tools, rendering and the workspace DAG. Design: `docs/harness.md`."""
 
 from .objects import (
+    ArmError,
     ArmPath,
     Capture,
     Focus,
@@ -17,6 +18,7 @@ from .tools import focus, full_view, locate_grid, locate_pixels, make_grid, tabl
 from .workspace import Node, Workspace
 
 __all__ = [
+    "ArmError",
     "ArmPath",
     "Capture",
     "Focus",

@@ -193,6 +193,30 @@ Whether the motion now *feels* right to the operator has not been written down h
   driver was running (its DriverKit extension and helper apps). Quitting/disabling it fixed it. Terminal
   Input Monitoring permission can give the same symptom.
 
+### 3.9 Grip force is the close target's overshoot, and it was far too small *(inferred; pen2)*
+
+In position mode the gripper presses like every joint does: with a torque of about P times its position error
+(section 3.6: ~4.6 % load per degree at P 16), up to its cap. On pen2 (2026-11-05) the harness closed the left
+gripper to the object's width minus 3 mm (`reach.SQUEEZE_M`) on a ~1.0 cm pen: the jaw stopped on the pen at
+`gripper.pos` 3.8 against a target of 3.0, **0.8 units, ~12 ticks, ~1 deg** (the left gripper's range is
+2046..3493 ticks over 0..100). That is a few percent of load, and the pen slipped as soon as the lift started (it
+was held at the very tips, ~1.5 cm below its top, ~7.7 cm of it in a book's pages).
+
+The gripper's own limits are the SO-101 anti-burnout setup (`base_follower.py`, as in `SOFollower`):
+`Max_Torque_Limit` 500 (50 %), `Protection_Current` 250, `Overload_Torque` 25 (after the current stays over the
+limit for a while, the firmware drops the torque to 25 %). So:
+
+- **Set the squeeze as an overshoot past contact, not a gap.** Closing to `gripper.pos` ~0 (where the tips meet)
+  on a 1 cm object is ~5-6 units (~7 deg) past contact, ~6-7 times pen2's error: the cap, not the error, then sets
+  the force. A squeeze in meters (`SQUEEZE_M`) maps to very different forces with the object's width and where on
+  the claw it sits.
+- **Contact deeper in the jaws pushes harder** for the same torque (the force is torque over the distance to the
+  hinge: ~6.5 cm 1.5 cm in from the tips vs ~8 cm at them, ~+20 %), and touches more of the object.
+- **A long hard hold can weaken by itself** (overload protection): close, then move. `Present_Load` / current
+  (`diagnostics/lift_test.py` reads them) tell pressing from protecting.
+
+Not measured: the load at a few overshoots, how long until protection trips, the pages' friction.
+
 ## 4. Open questions
 
 - **Joint-speed limit feel.** Logged numbers look good (section 3.7); the subjective result is not recorded.

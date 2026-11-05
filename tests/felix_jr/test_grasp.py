@@ -11,7 +11,7 @@ pytest.importorskip("pinocchio")
 pytest.importorskip("scipy")
 
 from lerobot.felix_jr.calibration.xle_robot_model import GripperMap, XleRobotModel, pinch_frame  # noqa: E402
-from lerobot.felix_jr.harness.execute import gripper_pos, held_object, prepare_execution  # noqa: E402
+from lerobot.felix_jr.harness.execute import arm_error, gripper_pos, held_object, prepare_execution  # noqa: E402
 from lerobot.felix_jr.harness.reach import OPEN_CLEARANCE_M, SQUEEZE_M, join_poses, solve_pose  # noqa: E402
 
 URDF = Path(__file__).parent / "reference" / "pen1_calibration_10312026.urdf"
@@ -149,3 +149,41 @@ def test_a_margin_aims_toward_the_moving_jaw_and_the_object_ends_on_the_fixed_on
     assert labels == ["start: gripper open (tips 4.0 cm apart)", "pick: gripper close (tips 0.7 cm apart)"]
     with pytest.raises(ValueError, match="margin"):
         join_poses(pose, solve_pose(model, "right", CAPTURE, PICK, -15.0, width=width, label="other"))
+
+
+def test_prepare_execution_tool_passes_the_pose_tolerance(model):
+    from lerobot.felix_jr.harness import api
+
+    h = api.Harness(model=model, endpoint="tcp://127.0.0.1:1")  # never connects: nothing here moves
+    capture = CAPTURE
+    pose = h.call("solve_pose", "right", capture, PICK, -15.0, roll_deg=0.0, width=0.03, label="pick")
+    up = h.call("solve_pose", "right", capture, PICK + [0, 0, 0.05], -15.0, width=0.03, init=pose, label="up")
+    path = h.call("join_poses", pose, up)
+    default = h.call("prepare_execution", path)
+    loose = h.call("prepare_execution", path, pose_tol_deg=4.0)
+    labeled = [m.label for m in default.moves if not m.label.startswith("step")]
+    assert [m.tol for m in default.moves if m.label in labeled] == [2.5] * len(labeled)
+    assert [m.tol for m in loose.moves if m.label in labeled] == [4.0] * len(labeled)
+    assert [m.tol for m in loose.moves if m.label.startswith("step")] == [
+        m.tol for m in default.moves if m.label.startswith("step")
+    ]  # the steps keep their own
+
+
+def test_arm_error_is_the_measured_pinch_point_against_the_plan(model):
+    pose = solve_pose(model, "right", CAPTURE, PICK, -15.0, roll_deg=0.0, width=0.03, label="pick")
+    joints = dict(pose.joints[0])
+    exact = arm_error(model, pose, SimpleNamespace(arms={"right": joints}, head_ticks={}))
+    np.testing.assert_allclose(exact.offset, 0.0, atol=1e-9)  # where it was sent: no error
+    assert all(err == 0.0 for err in exact.joint_error_deg.values())
+
+    sagged = {**joints, "elbow_flex.pos": joints["elbow_flex.pos"] + 2.0}  # the elbow short of its target
+    hold = SimpleNamespace(arms={"right": sagged}, head_ticks={})
+    error = arm_error(model, pose, hold, "pick")
+    q = model.joint_vector(hold.arms)
+    np.testing.assert_allclose(error.offset, model.pinch_point("right", q) - pose.frames[0][:3, 3])
+    assert error.joint_error_deg["elbow_flex"] == pytest.approx(2.0)
+    assert np.linalg.norm(error.offset) > 0.005  # 2 deg at the elbow moves the tip more than half a cm
+    assert error.across @ error.axis == pytest.approx(0.0, abs=1e-9)  # across the jaws is not along the axis
+    assert "elbow_flex +2.0" in error.describe() and "across the jaws" in error.describe()
+    with pytest.raises(ValueError, match="no pose 'other'"):
+        arm_error(model, pose, hold, "other")
