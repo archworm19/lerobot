@@ -1,30 +1,40 @@
-"""`calibration.wrist_camera_board`: the plate in the model and the URDF, the corner fit, and a session against the
-fake robot."""
+"""`calibration.arm_shapes`: the plate and the capsules in the model and the URDF, their fits, and sessions against
+the fake robot."""
 
 import threading
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
 pytest.importorskip("pinocchio")
 pytest.importorskip("scipy")
 
-from lerobot.felix_jr.calibration.wrist_camera_board import (  # noqa: E402
+from lerobot.felix_jr.calibration.arm_shapes import (  # noqa: E402
     CORNERS,
-    BoardSession,
+    ArmShapesSession,
     CornerClick,
+    OutlineClick,
     board_from_fit,
     board_parent,
+    capsule_outline,
+    fit_capsule,
     fit_corners,
+    initial_capsule,
+    ray_segment_distance,
     squareness,
 )
+from lerobot.felix_jr.calibration.views import find_view, plan_targets  # noqa: E402
 from lerobot.felix_jr.calibration.xle_robot_model import (  # noqa: E402
+    Capsule,
     WristBoard,
     XleRobotModel,
     arm_record,
+    segment_distance,
     wrist_board_link,
 )
+from lerobot.felix_jr.harness.look import aim_head  # noqa: E402
 from lerobot.felix_jr.server.client import FelixClient  # noqa: E402
 from lerobot.felix_jr.server.hardware import FakeHardware  # noqa: E402
 from lerobot.felix_jr.server.server import RobotServer  # noqa: E402
@@ -166,7 +176,7 @@ def calibration_for(client, path: Path) -> Path:
     return path
 
 
-def click_true_corners(session: BoardSession, plate: np.ndarray) -> None:
+def click_true_corners(session: ArmShapesSession, plate: np.ndarray) -> None:
     """Click each corner where the plate `plate` (the parent's frame) puts it in the current frame."""
     q = session.current_q()
     frame = session.model.frame_pose(board_parent(session.arm), q)
@@ -181,7 +191,9 @@ def test_a_session_clicks_the_corners_view_by_view_and_writes_the_plate(robot, t
     out = tmp_path / "board"
     with client.session():
         shown: list[np.ndarray] = []
-        session = BoardSession(client, start, "left", out, shown.append, n_targets=8, floor_z=0.5)
+        session = ArmShapesSession(
+            client, start, "left", out, shown.append, parts=["plate"], n_targets=8, floor_z=0.5
+        )
         assert session.model.visible_side["left"] == "negative"  # views from the plate's side
         assert session.calibration.visible_side["left"] == "positive"  # what is written keeps its own
         plate = TRUE * [1, 1, 1]
@@ -205,9 +217,13 @@ def test_a_session_clicks_the_corners_view_by_view_and_writes_the_plate(robot, t
     np.testing.assert_allclose(np.array(written.wrist_boards["left"].corners), plate, atol=0.002)
     assert written.wrist_boards["left"].n_clicks == 8
     written.check_robot(client)  # still the same robot's calibration
-    assert (out / "corners.json").is_file() and "Wrist camera plate: left arm" in (
-        out / "wrist_board.md"
-    ).read_text()
+    report = (out / "arm_shapes.md").read_text()
+    assert (
+        (out / "corners.json").is_file()
+        and "# Arm shapes: left arm" in report
+        and "## Wrist camera plate" in report
+    )
+    assert "## Capsules" not in report
 
 
 def test_a_session_is_refused_for_another_robots_calibration(robot, tmp_path):
@@ -217,7 +233,7 @@ def test_a_session_is_refused_for_another_robots_calibration(robot, tmp_path):
     model.arm_calibration["left"]["elbow_flex"]["homing_offset"] += 40
     model.save(start)
     with pytest.raises(Exception, match="elbow_flex recalibrated"):
-        BoardSession(client, start, "left", tmp_path / "board", lambda image: None)
+        ArmShapesSession(client, start, "left", tmp_path / "board", lambda image: None)
     assert fake.arm_backend.trajectories == []
 
 
@@ -291,3 +307,261 @@ def test_solved_poses_say_what_the_camera_sees_of_the_grasp(model):
     path = join_poses(hidden_pose, up)
     assert path.hidden_by == (("right",), ()) and len(path.visibility) == 2
     assert select_poses(path, "pick").hidden_by == (("right",),)
+
+
+# ---- the capsules ---------------------------------------------------------------------------------------------
+
+
+def test_segment_and_ray_distances():
+    a, b = np.zeros(3), np.array([0.0, 0.0, 0.1])
+    points = np.array([[0.03, 0.0, 0.05], [0.0, 0.0, 0.14], [0.03, 0.0, -0.04]])
+    np.testing.assert_allclose(segment_distance(points, a, b), [0.03, 0.04, 0.05], atol=1e-12)
+    origins = np.array([[0.03, -1.0, 0.05], [0.0, -1.0, 0.2], [0.0, -1.0, 0.05]])
+    directions = np.array([[0.0, 1.0, 0.0]] * 3)
+    distance, along = ray_segment_distance(origins, directions, a, b)
+    np.testing.assert_allclose(distance, [0.03, 0.1, 0.0], atol=1e-12)  # beside, past the end, through it
+    np.testing.assert_allclose(along, [1.0, 1.0, 1.0], atol=1e-12)
+
+
+def test_capsules_in_the_model_and_the_urdf(model, tmp_path):
+    forearm = Capsule(
+        "right_lower_arm_link", (0.0, 0.0, 0.0), (0.1, 0.0, 0.0), 0.025, rms_px=1.2, n_clicks=30
+    )
+    finger = initial_capsule(model, "right", "moving_finger")
+    with_parts = model.with_capsules("right", {"forearm": forearm, "moving_finger": finger})
+    assert model.capsules == {}  # a copy
+    with_parts.save(tmp_path / "c.urdf")
+    loaded = XleRobotModel.load(tmp_path / "c.urdf")
+    assert loaded.capsules["right"] == {"forearm": forearm, "moving_finger": finger}
+    again = loaded.with_capsules(
+        "right", {"forearm": Capsule("right_lower_arm_link", (0, 0, 0), (0.2, 0, 0), 0.03)}
+    )
+    assert again.capsules["right"]["forearm"].radius == 0.03 and "moving_finger" in again.capsules["right"]
+    with pytest.raises(ValueError, match="unknown parts"):
+        model.with_capsules("right", {"elbow": forearm})
+    # the moving finger turns with the jaw, about the hinge: its tip end moves, by the jaw's own turn
+    q = model.joint_vector({"right": REST})
+    closed = again.capsules_root("right", q, 0.0)["moving_finger"]
+    opened = again.capsules_root("right", q, 30.0)["moving_finger"]
+    turn = model.moving_jaw("right", 30.0)
+    pinch = model.frame_pose("right_gripper_frame_link", q)
+    expected = pinch[:3, :3] @ (turn[:3, :3] @ np.asarray(finger.a) + turn[:3, 3]) + pinch[:3, 3]
+    np.testing.assert_allclose(opened[0], expected, atol=1e-12)
+    assert np.linalg.norm(opened[0] - closed[0]) > 0.01
+
+
+# the true forearm: off its URDF start, a little thicker
+FOREARM = Capsule("right_lower_arm_link", (0.01, 0.005, 0.0), (0.11, 0.015, 0.005), 0.028)
+
+
+def forearm_views(
+    model: XleRobotModel, capsule: Capsule, n: int
+) -> list[tuple[dict[str, float], dict[str, int]]]:
+    """Views as the session makes them: an arm pose and head aimed at the pinch point (`find_view`), then the head
+    turned to the capsule's middle (`aim_head`). Arm poses (LeRobot degrees) and head ticks."""
+    limits = {name: (ref - 900, ref + 900) for name, ref in model.head_refs.items()}
+    views = []
+    for target in plan_targets(model, "right", n):
+        seed = model.joint_vector({"right": target.arm_pose}, dict(model.head_refs))
+        view = find_view(model, "right", seed, target.point, limits)
+        if not view.ok:
+            continue
+        q = model.joint_vector({"right": view.arm_pose}, view.head_ticks)
+        frame = model.capsule_frame(capsule, "right", q)
+        middle = frame[:3, :3] @ (0.5 * (np.asarray(capsule.a) + np.asarray(capsule.b))) + frame[:3, 3]
+        ticks, _ = aim_head(model, view.head_ticks, middle)
+        views.append((dict(view.arm_pose), ticks))
+    return views
+
+
+def outline_points(model: XleRobotModel, capsule: Capsule, q: np.ndarray) -> list[np.ndarray]:
+    """Exact outline pixels of a capsule's side at `q`, both edges, at three places: each ray grazes the cylinder."""
+    frame = model.capsule_frame(capsule, "right" if capsule.parent.startswith("right") else "left", q)
+    a, b = (frame[:3, :3] @ np.asarray(p) + frame[:3, 3] for p in (capsule.a, capsule.b))
+    axis = (b - a) / np.linalg.norm(b - a)
+    camera = model.camera_pose(q)[:3, 3]
+    pixels = []
+    for s in (0.25, 0.5, 0.75):
+        center = a + s * (b - a)
+        across = (camera - center) - ((camera - center) @ axis) * axis
+        distance = np.linalg.norm(across)
+        toward, side = across / distance, np.cross(axis, across / distance)
+        cos = capsule.radius / distance
+        for sign in (1.0, -1.0):
+            uv, z = model.project(
+                center + capsule.radius * (cos * toward + sign * np.sqrt(1 - cos**2) * side), q
+            )
+            if z[0] > 0 and model.in_view(uv[0]):
+                pixels.append(uv[0])
+    return pixels
+
+
+def silhouette_clicks(
+    model: XleRobotModel, capsule: Capsule, n_views: int, noise_px: float = 0.0, seed: int = 0
+) -> list[OutlineClick]:
+    rng = np.random.default_rng(seed)
+    clicks = []
+    for view, (pose, ticks) in enumerate(forearm_views(model, capsule, n_views)):
+        q = model.joint_vector({"right": pose}, ticks)
+        for uv in outline_points(model, capsule, q):
+            pixel = uv + rng.normal(0, noise_px, 2)
+            clicks.append(OutlineClick("right", "forearm", pose, ticks, tuple(pixel), timestamp=float(view)))
+    return clicks
+
+
+def test_the_capsule_fit_finds_the_forearm(model):
+    clicks = silhouette_clicks(model, FOREARM, 10, noise_px=0.3)
+    assert len({c.timestamp for c in clicks}) >= 5 and len(clicks) >= 30
+    start = initial_capsule(model, "right", "forearm")
+    fitted, errors = fit_capsule(model, clicks, start)
+    assert fitted.parent == "right_lower_arm_link" and fitted.n_clicks == len(clicks)
+    assert fitted.radius == pytest.approx(FOREARM.radius, abs=0.0015)
+    assert np.sqrt(np.mean(errors**2)) < 1.0 and fitted.rms_px == pytest.approx(np.sqrt(np.mean(errors**2)))
+    # the axis: along the true one, through it where the clicks were (the ends are only pulled toward the start)
+    true_a, true_b = np.asarray(FOREARM.a), np.asarray(FOREARM.b)
+    fit_a, fit_b = np.asarray(fitted.a), np.asarray(fitted.b)
+    cos = abs((fit_b - fit_a) @ (true_b - true_a)) / (
+        np.linalg.norm(fit_b - fit_a) * np.linalg.norm(true_b - true_a)
+    )
+    assert np.degrees(np.arccos(min(cos, 1.0))) < 3.0
+    middle = true_a + 0.5 * (true_b - true_a)
+    assert segment_distance(middle[None], fit_a, fit_b)[0] < 0.003
+
+
+def test_a_capsule_outline_is_drawn_around_its_axis(model):
+    pose, ticks = forearm_views(model, FOREARM, 4)[0]
+    q = model.joint_vector({"right": pose}, ticks)
+    frame = model.capsule_frame(FOREARM, "right", q)
+    a, b = (frame[:3, :3] @ np.asarray(p) + frame[:3, 3] for p in (FOREARM.a, FOREARM.b))
+    polygon = capsule_outline(model, q, a, b, FOREARM.radius)
+    assert polygon is not None and polygon.shape == (18, 2)
+    uv, _ = model.project(np.array([a, b]), q)
+    middle = uv.mean(axis=0)
+    inside = cv2.pointPolygonTest(
+        polygon.astype(np.float32).reshape(-1, 1, 2), tuple(map(float, middle)), False
+    )
+    assert inside > 0
+    for edge in outline_points(model, FOREARM, q):  # the true outline: near the drawn one
+        assert (
+            abs(
+                cv2.pointPolygonTest(
+                    polygon.astype(np.float32).reshape(-1, 1, 2), tuple(map(float, edge)), True
+                )
+            )
+            < 4
+        )
+
+
+def click_true_outline(session: ArmShapesSession, capsule: Capsule, part: str) -> int:
+    """Click the part's exact outline in the current frame, then s for the next; how many points were clicked."""
+    assert session.asking() == part
+    pixels = outline_points(session.model, capsule, session.current_q())
+    for uv in pixels:
+        session.click(*uv)
+    session.skip()
+    return len(pixels)
+
+
+def test_a_session_asks_for_corners_then_parts_from_both_sides(robot, tmp_path):
+    fake, client = robot
+    start = calibration_for(client, tmp_path / "start.urdf")
+    out = tmp_path / "shapes"
+    forearm = Capsule("left_lower_arm_link", (0.01, 0.005, 0.0), (0.11, 0.015, 0.005), 0.028)
+    with client.session():
+        session = ArmShapesSession(
+            client,
+            start,
+            "left",
+            out,
+            lambda image: None,
+            parts=["plate", "forearm"],
+            n_targets=2,
+            n_other=2,
+            floor_z=0.5,
+        )
+        assert session.target_sides == [
+            "negative",
+            "negative",
+            "positive",
+            "positive",
+        ]  # the plate's side first
+        assert session.open_pos is None and any("gripper map" in note for note in session.notes)
+        sides = []
+        while session.next_pose():
+            sides.append(session.view_side)
+            if session.view_side == session.plate_side:
+                assert session.steps() == [1, 2, 3, "forearm"]
+                click_true_corners(session, TRUE)
+            else:
+                assert session.steps() == ["forearm"]  # the plate's back faces away: no corners
+            click_true_outline(session, forearm, "forearm")
+            assert session.asking() is None
+        assert "positive" in sides and "negative" in sides
+        assert "forearm" in session.capsules
+        session.undo()  # the last outline click, asked for again
+        assert session.asking() == "forearm"
+        path = session.finish()
+    assert path is not None
+    written = XleRobotModel.load(path)
+    fitted = written.capsules["left"]["forearm"]
+    assert fitted.radius == pytest.approx(forearm.radius, abs=0.002)
+    assert "left" in written.wrist_boards
+    report = (out / "arm_shapes.md").read_text()
+    assert "## Wrist camera plate" in report and "| forearm |" in report
+    assert (out / "outlines.json").is_file() and (out / "corners.json").is_file()
+    written.check_robot(client)
+
+
+def test_a_session_resumes_its_outline_clicks(robot, tmp_path):
+    fake, client = robot
+    start = calibration_for(client, tmp_path / "start.urdf")
+    out = tmp_path / "shapes"
+    forearm = Capsule("left_lower_arm_link", (0.01, 0.005, 0.0), (0.11, 0.015, 0.005), 0.028)
+    with client.session():
+        first = ArmShapesSession(
+            client,
+            start,
+            "left",
+            out,
+            lambda image: None,
+            parts=["forearm"],
+            n_targets=2,
+            n_other=0,
+            floor_z=0.5,
+        )
+        assert first.next_pose()
+        clicked = click_true_outline(first, forearm, "forearm")
+        again = ArmShapesSession(
+            client, start, "left", out, lambda image: None, parts=["forearm"], resume=True, floor_z=0.5
+        )
+    assert clicked > 0 and len(again.outline_clicks) == len(first.outline_clicks) == clicked
+    with pytest.raises(ValueError, match="parts must be"):
+        ArmShapesSession(client, start, "left", out, lambda image: None, parts=["elbow"])
+
+
+def test_the_head_turns_to_a_part_out_of_the_picture(robot, tmp_path):
+    fake, client = robot
+    start = calibration_for(client, tmp_path / "start.urdf")
+    with client.session():
+        session = ArmShapesSession(
+            client,
+            start,
+            "left",
+            tmp_path / "s",
+            lambda image: None,
+            parts=["forearm"],
+            n_targets=3,
+            n_other=0,
+            floor_z=0.5,
+        )
+        # put the forearm's estimate well off to the side of every view aimed at the pinch point
+        session.capsules["forearm"] = (
+            Capsule("left_lower_arm_link", (0.0, 0.0, 0.0), (0.0, 0.0, 0.5), 0.03),
+            np.zeros(1),
+        )
+        turned = False
+        while session.next_pose():
+            turned |= session.message.startswith("turned the head to the forearm")
+            assert session.asking() == "forearm"  # still asking for it after the turn
+            session.skip()
+    assert turned

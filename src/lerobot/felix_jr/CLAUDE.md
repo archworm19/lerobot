@@ -21,6 +21,7 @@ running anything on the robot, and update it when what you do changes what it sa
   session.
 - **Design documents** (why things are the way they are):
   - `docs/harness.md`: the VLM harness (research summary, design principles 1.A-1.K, experiment plan).
+  - `docs/object_grasping.md`: the object-centric grasping experiment (phase A built): plan, interfaces, frame naming, flow, what it replaces, open questions.
   - `docs/camera_calibration.md`: the click calibration and `XleRobotModel`.
   - `docs/server_plan.md`: the Pi / laptop split and the protocol.
   - `docs/head.md`: the head servos.

@@ -11,7 +11,8 @@ next of `--openings` (LeRobot's `gripper.pos`), and the frame shows where the mo
 
   cyan circle       the pinch point: the fixed jaw's tip (placed by the camera calibration)
   magenta circle    the moving jaw's tip (placed by the gripper map and the hinge too), with a line between them
-  yellow outlines   the wrist cameras' plates the calibration has, both arms' (`calibration.wrist_camera_board`)
+  yellow outlines   the wrist cameras' plates the calibration has, both arms' (`calibration.arm_shapes`)
+  orange outlines   the arms' capsules (fingers, gripper body, wrist, forearm) it has (`calibration.arm_shapes`)
 
 computed from the joint angles and the `gripper.pos` measured with the frame. If the calibration is right, the two
 circles sit on the two fingertips at every view and every opening; how far off they are, and whether it changes
@@ -37,6 +38,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from lerobot.felix_jr.calibration.arm_shapes import CAPSULE_COLOR, capsule_outline
 from lerobot.felix_jr.calibration.live_view import (
     INTRINSICS_KEYS,
     LiveView,
@@ -64,18 +66,21 @@ def annotate(
     lines: list[str],
     points: Sequence[tuple[np.ndarray | None, tuple, str]],
     outlines: Sequence[np.ndarray] = (),
+    capsules: Sequence[np.ndarray] = (),
 ) -> np.ndarray:
     """Copy of the RGB `image` with each `(pixel, color, label)` as a labeled circle, and text at the top left.
 
     A line joins the first two drawn points; a point with no pixel (None, or behind the camera) is left out. Each of
-    `outlines` (N, 2 pixels) is drawn as a closed yellow polygon: a wrist camera's plate.
+    `outlines` (N, 2 pixels) is drawn as a closed yellow polygon: a wrist camera's plate; each of `capsules` as an
+    orange one: a part of an arm.
     """
     out = image.copy()
-    for outline in outlines:
-        if np.isfinite(outline).all():
-            polygon = np.round(outline).astype(np.int32).reshape(-1, 1, 2)
-            cv2.polylines(out, [polygon], True, (0, 0, 0), 3, cv2.LINE_AA)
-            cv2.polylines(out, [polygon], True, BOARD_COLOR, 1, cv2.LINE_AA)
+    for shapes, color in ((outlines, BOARD_COLOR), (capsules, CAPSULE_COLOR)):
+        for outline in shapes:
+            if np.isfinite(outline).all():
+                polygon = np.round(outline).astype(np.int32).reshape(-1, 1, 2)
+                cv2.polylines(out, [polygon], True, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.polylines(out, [polygon], True, color, 1, cv2.LINE_AA)
     drawn = [(uv, color, label) for uv, color, label in points if uv is not None and np.isfinite(uv).all()]
     if len(drawn) >= 2:
         a, b = (tuple(int(round(float(c))) for c in uv) for uv, _, _ in drawn[:2])
@@ -196,7 +201,7 @@ class CheckSession(LiveView):
             (pinch.uv if pinch.z > 0 else None, PINCH_COLOR, "pinch"),
             (moving.uv if moving.z > 0 else None, MOVING_COLOR, "moving tip"),
         ]
-        return annotate(self.capture.color, lines, points, self.board_outlines())
+        return annotate(self.capture.color, lines, points, self.board_outlines(), self.capsule_outlines())
 
     def board_outlines(self) -> list[np.ndarray]:
         """Each wrist camera plate the calibration has (both arms'), as its seen face in the current frame.
@@ -211,6 +216,25 @@ class CheckSession(LiveView):
             uv, z = self.model.project(self.model.board_corners(arm, q), q)
             if (z > 0).all():
                 outlines.append(uv)
+        return outlines
+
+    def capsule_outlines(self) -> list[np.ndarray]:
+        """Each capsule the calibration has (both arms'), as its outline in the current frame (`capsule_outline`).
+
+        Placed like `board_outlines`; a moving finger at its arm's measured opening (closed without a gripper map).
+        """
+        state = self.capture.state
+        arms = {arm: state[f"{arm}_arm"] for arm in self.model.capsules if f"{arm}_arm" in state}
+        q = self.model.joint_vector(arms, {n: int(state["head"][n]["ticks"]) for n in HEAD_JOINTS})
+        outlines = []
+        for arm in self.model.capsules:
+            opening = 0.0
+            if arm in arms and arm in self.model.gripper_maps:
+                opening = max(self.model.opening_deg(arm, float(arms[arm]["gripper.pos"])), 0.0)
+            for a_root, b_root, radius in self.model.capsules_root(arm, q, opening).values():
+                polygon = capsule_outline(self.model, q, a_root, b_root, radius)
+                if polygon is not None:
+                    outlines.append(polygon)
         return outlines
 
     # ---- frames ---------------------------------------------------------------------------------------------

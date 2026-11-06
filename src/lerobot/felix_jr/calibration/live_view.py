@@ -107,6 +107,12 @@ class LiveView:
         """Show the current frame, with whatever the subclass draws over it."""
         raise NotImplementedError
 
+    def before_view(self, index: int) -> None:
+        """Called before a view of target `index` is looked for; nothing by default.
+
+        A subclass may set up the model for it, e.g. the side of the gripper the camera must see.
+        """
+
     # ---- the current frame ----------------------------------------------------------------------------------
 
     def current_q(self) -> np.ndarray:
@@ -146,6 +152,7 @@ class LiveView:
         skipped = 0
         while self.target_index < len(self.targets):
             target = self.targets[self.target_index]
+            self.before_view(self.target_index)
             self.target_index += 1
             seed = self.model.joint_vector({self.arm: target.arm_pose}, ticks)
             view = find_view(self.model, self.arm, seed, target.point, limits, max_roll_deg=self.max_roll)

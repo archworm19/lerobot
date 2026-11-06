@@ -3,6 +3,7 @@
 import json
 import threading
 
+import cv2
 import numpy as np
 import pytest
 
@@ -187,3 +188,34 @@ def test_the_wrist_camera_plates_are_drawn_where_the_calibration_has_them(robot)
         assert session.model.in_view(uv[0], margin=5)
         corner = np.round(uv[0]).astype(int)
         assert has_color(shown[-1], BOARD_COLOR, corner[1], corner[0])  # drawn on the frame
+
+
+def test_the_capsules_are_drawn_where_the_calibration_has_them(robot):
+    from lerobot.felix_jr.calibration.arm_shapes import CAPSULE_COLOR, initial_capsule
+    from lerobot.felix_jr.calibration.xle_robot_model import Capsule
+
+    fake, client = robot
+    with client.session():
+        bare, _ = make_session(client, model_for(client))
+        assert bare.capsule_outlines() == []
+        model = model_for(client)
+        body = Capsule("left_gripper_link", (0.0, 0.0, 0.02), (0.0, 0.0, 0.07), 0.02)
+        model = model.with_capsules(
+            "left", {"gripper_body": body, "fixed_finger": initial_capsule(model, "left", "fixed_finger")}
+        )
+        session, shown = make_session(client, model)
+        session.handle("next")
+        outlines = session.capsule_outlines()
+        assert len(outlines) == 2
+        q = session.current_q()
+        a_root, b_root, _ = session.model.capsules_root("left", q)["gripper_body"]
+        uv, _ = session.model.project(a_root, q)
+        assert session.model.in_view(uv[0], margin=30)
+        polygon = next(
+            o
+            for o in outlines
+            if cv2.pointPolygonTest(o.astype(np.float32).reshape(-1, 1, 2), tuple(map(float, uv[0])), False)
+            > 0
+        )
+        edge = np.round(polygon[0]).astype(int)
+        assert has_color(shown[-1], CAPSULE_COLOR, edge[1], edge[0])  # drawn on the frame

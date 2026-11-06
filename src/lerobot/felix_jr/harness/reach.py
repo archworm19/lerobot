@@ -47,6 +47,7 @@ from .objects import VERTICAL_COS, Capture, Poses, angles_of
 
 if TYPE_CHECKING or _scipy_available:
     from scipy.optimize import least_squares
+    from scipy.spatial.transform import Rotation
 
 LIMIT_MARGIN = 0.95  # joints stay within this fraction of their URDF limits
 PITCH_TOL_DEG = 0.1  # the held pitch: its penalty scale
@@ -80,6 +81,19 @@ class Solution:
     # how the capture's camera sees the grasp point: the jaws' visibility there, the arms whose plate hides it
     visibility: float = float("nan")
     hidden_by: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FrameSolution:
+    """One pose solved for a whole target frame (`ArmIK.solve_frame`)."""
+
+    x: np.ndarray  # the arm's five joints (rad)
+    joints: dict[str, float]  # the same in LeRobot degrees
+    root_from_pinch: np.ndarray  # (4, 4) the solved pinch frame
+    position_error_m: float  # of the grasp point
+    rotation_error_deg: np.ndarray  # (3,) the rotation's error about each of the target's axes
+    at_limit: tuple[str, ...]  # joints that ended at a bound
+    ok: bool  # within every tolerance
 
 
 class ArmIK:
@@ -189,6 +203,60 @@ class ArmIK:
             result.x, position, pitch_deg, heading_deg, roll_deg, position_tol, heading_tol_deg, roll_tol_deg
         )
 
+    def solve_frame(
+        self,
+        root_from_pinch: np.ndarray,
+        axes_root: np.ndarray,
+        rotation_tols_deg: Sequence[float],
+        position_tol: float = POSITION_TOL_M,
+        init: np.ndarray | None = None,
+    ) -> FrameSolution:
+        """The joints putting the pinch frame closest to the target `root_from_pinch`, from `init`.
+
+        A whole-frame target, for the object-centric grasps (`docs/object_grasping.md`): the grasp point within
+        `position_tol` of the target's, and the rotation's error split into its components about the three
+        `axes_root` (columns, orthonormal; e.g. a grasp's closing line, approach and hinge), each weighted by its own
+        tolerance. The arm has five joints, so most targets are met only within the tolerances: a loose axis is where
+        the solve gives way. One local solve, as `solve`.
+        """
+        goal_point = self.tool(root_from_pinch)
+        rot_goal = Rotation.from_matrix(root_from_pinch[:3, :3])
+        tols = np.radians(np.asarray(rotation_tols_deg, dtype=np.float64))
+
+        def errors(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            # the rotation taking the target to the solved frame, as a rotation vector in the root frame
+            error_root = (Rotation.from_matrix(frame[:3, :3]) * rot_goal.inv()).as_rotvec()
+            return self.tool(frame) - goal_point, axes_root.T @ error_root
+
+        def residuals(x: np.ndarray) -> np.ndarray:
+            position, rotation = errors(self.frame(x))
+            return np.concatenate([position / position_tol, rotation / tols])
+
+        start = self.clip(self.start if init is None else init)
+        result = least_squares(residuals, start, jac="2-point", bounds=(self.lower, self.upper), max_nfev=400)
+        frame = self.frame(result.x)
+        position, rotation = errors(frame)
+        q = self.q.copy()
+        q[self.index] = result.x
+        error_m, rotation_deg = float(np.linalg.norm(position)), np.degrees(np.abs(rotation))
+        return FrameSolution(
+            x=result.x,
+            joints={k: v for k, v in arm_pose_degrees(self.model, self.arm, q).items() if k != "gripper.pos"},
+            root_from_pinch=frame,
+            position_error_m=error_m,
+            rotation_error_deg=rotation_deg,
+            at_limit=self._at_limit(result.x),
+            ok=bool(error_m <= position_tol and (rotation_deg <= np.degrees(tols)).all()),
+        )
+
+    def _at_limit(self, x: np.ndarray) -> tuple[str, ...]:
+        """The joints of `x` within `AT_LIMIT_RAD` of a bound."""
+        return tuple(
+            j
+            for j, v, lo, hi in zip(SO101_JOINTS, x, self.lower, self.upper, strict=True)
+            if min(v - lo, hi - v) < AT_LIMIT_RAD
+        )
+
     def _solution(
         self,
         x: np.ndarray,
@@ -210,11 +278,7 @@ class ArmIK:
         q = self.q.copy()
         q[self.index] = x
         visibility, hidden_by = self.model.view_of(self.arm, q, self.tool(frame))
-        names = [
-            j
-            for j, v, lo, hi in zip(SO101_JOINTS, x, self.lower, self.upper, strict=True)
-            if min(v - lo, hi - v) < AT_LIMIT_RAD
-        ]
+        names = self._at_limit(x)
         ok = (
             error <= position_tol
             and pitch_error <= PITCH_OK_DEG
