@@ -7,6 +7,49 @@ renders and the workspace log; `session.py log <name>` prints the calls and obje
 (`workspace.pkl`) of the sessions before pen1 (`cable1`, `cable1_new`, `chapstick1`, `desk1`) no longer loads: it
 holds objects removed since (`Plan`, `Reach`) or lacks the call log. Their images and `log.jsonl` still read.
 
+## bowl1 (2026-11-05): put a chapstick, a small container and a jar into a bowl
+
+**Setup.** The container1 tub as the bowl (rim center (-45.5, -1.0) cm, radius 5.5, z 77.8); in a row in front of
+it a jar with a blue lid (4.0 cm wide, top 79.3), a white-capped container (3.3 cm, top 78.4) and a chapstick
+(1.6 cm, top 79.1). Right arm for all three, `urdfs/xle_calib_11052026.urdf` (the wrist camera plates fitted, so
+`solve_pose` reports when a plate hides a grasp), `protocols.md` rule 1 and pen2's proposed rules, every move approved.
+
+**Outcome.** **Done:** all three picked and placed in the bowl, each on the first grasp: the chapstick, then the
+white container, then the jar (it ended on top of the container).
+
+### What happened
+
+1. **Order and arm:** chapstick first (planned first, the white container's approach passed 2.4 cm from it), then
+   the white container, then the jar, each with nothing left on the arm's side.
+2. **Each pick the same way:** staging 6 cm above the attack point; the attack point 4 cm back along the gripper
+   axis; hold; `look_at` the grasp; re-locate the object; `arm_error`; sweep the move in at the measured pose; re-solve
+   aimed to cancel the error; in, close, lift 3 cm, hold and look; carry at half speed with `--pose-tol 4`; place,
+   open, hold; up 6-7 cm; home; a fresh look before the next.
+3. **`arm_error` at the four attack holds:** 0.4, 0.4, 0.8 and 0.5 cm, mostly 0.3-0.6 cm low, 0.0-0.6 across the
+   jaws (a more folded pose than pen2's level reach, which sagged 1.2). Every grasp aimed to cancel it landed.
+4. **The camera report chose the grasps:** the right plate hid the jar's grasp at pitch -30 roll 0 and the
+   chapstick's at pitch -40 roll -30; picks were taken where the jaws were "seen" (-0.37 to -0.66). In every centered
+   look the jaws and the object were in view.
+5. **Grasps:** the chapstick 1.2 cm into the jaws, closed to the tips meeting (held, slid up 3 cm as planned); the
+   white container by its cap (screwed on), closed to width - 3 mm (`gripper.pos` stopped at 15.6: pressing); the jar
+   by its lid (stopped at 19.6). Fixed-jaw margins 0.8-1.3 cm, widened at the hold when the sweep left 0.3-0.4 cm.
+6. **The jar, first plan:** roll -60 (to keep the jaws visible). The sweep at the hold found the fixed jaw *inside*
+   the jar's body: a tilted closing line crosses a vertical cylinder over width / cos(roll) (8 cm at 60 deg), while
+   the grasp model takes `width` along the closing line. Re-planned level (roll 0, pitch -40) from the hold: up,
+   the roll turned over 5 poses up high, a new attack point.
+7. **Locating:** the same object read 0.3-0.7 cm apart across head poses (the views' calibration, as container1);
+   one view with the plate over half the jar's lid put its center 1.5 cm off (a partial disc's median); the full-lid
+   capture from the same head pose was used instead.
+
+### Takeaways
+
+1. **The procedure works for a sequence:** three picks, no misses, no object pushed. Rule 1's swept move-in check
+   caught a real error (the tilted grasp) before contact.
+2. **Roll the jaws only for objects that are wide along the tilt;** for a vertical cylinder keep them level, or
+   use width / cos(roll). The tools do not know (`open_issues.md`, 18).
+3. **Locate from a view that sees the whole object;** a partly hidden object's points are biased.
+4. **`arm_error` is useful as built:** four holds, each correction landed.
+
 ## container1 (2026-11-05): pick a plastic tub by its rim, move it past a cable
 
 **Setup.** An empty clear plastic tub (rim radius 5.4 cm, ~7.5 cm tall) on the +y side, the USB-C dongle and its

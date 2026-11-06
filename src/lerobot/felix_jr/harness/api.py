@@ -53,7 +53,7 @@ from .workspace import Workspace
 if TYPE_CHECKING:
     from lerobot.felix_jr.server.client import FelixClient
 
-MODEL = Path(__file__).parents[1] / "urdfs" / "xle_calib_11042026.urdf"
+MODEL = Path(__file__).parents[1] / "urdfs" / "xle_calib_11052026.urdf"
 ENDPOINT = "tcp://ikeabot.local:5555"
 
 

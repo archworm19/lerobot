@@ -131,9 +131,9 @@ including the object being grasped. Revisit only if the model, given good render
     (the model at the measured joints vs the plan; vertical, across the jaws, along the axis) and the joints that
     missed, with `.offset` to aim the next short move from there at its target minus it (by hand, this made pen2's
     book grasp land and container1's rim grasp). Checked on container1's attack hold: (0.25, 0.23, -0.52) cm, as
-    measured by hand. **TODO: test it in use on a few picks** (the correction at the attack point, how much of the
-    measured error to apply when the grasp is a little more extended), then add it to `protocols.md` (rule 1's
-    "measure the arm" step); and log its measurements (pose, load, error) toward the sag model.
+    measured by hand. **Used on bowl1** (four attack holds, 0.4-0.8 cm; each grasp aimed to cancel the full error
+    landed). TODO: a couple more sessions, then add it to `protocols.md` (rule 1's "measure the arm" step); and log
+    its measurements (pose, load, error) toward the sag model.
 
 17. **Seeing a grasp from the head camera: the plates are checked, the forearm is not.** pen2 chose two picks the
     camera could not check: the jaws edge-on (`XleRobotModel.visibility` +0.03), then hidden by the forearm (its
@@ -149,6 +149,12 @@ including the object being grasped. Revisit only if the model, given good render
       clicked out of order or a misclick (`wrist_board.md` has the per-corner errors; `calibration.check` shows
       whether its outline sits on the plate). Re-run if it is off.
     - Using the report in a session: prefer a grasp the camera sees before contact.
+
+18. **A rolled grasp on a vertical object is wider than its `width`.** `solve_pose` takes `width` along the jaws'
+    closing line; rolled by `roll`, that line crosses a vertical cylinder over `width / cos(roll)` (bowl1: a 4 cm jar
+    at roll -60 needed 8 cm, and the plan put the fixed jaw inside it; the swept move-in check caught it). Fix:
+    describe the object (an upright cylinder of diameter `d`) and let the tool compute the opening, or warn when a
+    roll is far from level for an upright object.
 
 ## Tooling
 
