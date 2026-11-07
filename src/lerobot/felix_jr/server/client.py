@@ -95,6 +95,16 @@ class Capture:
         return Scene.from_capture(self.color, self.raw_depth, with_matrices(self.calibration))
 
 
+@dataclass
+class WristCapture:
+    """A frame from `FelixClient.wrist_capture`: the arm, its wrist camera's RGB frame, the joint state with it."""
+
+    arm: str
+    color: np.ndarray  # RGB uint8 (H, W, 3)
+    state: dict[str, Any]
+    timestamp: float  # server clock
+
+
 class FelixClient:
     """A blocking connection to one robot server. Not thread-safe: use one client per thread."""
 
@@ -182,6 +192,14 @@ class FelixClient:
             state=result["state"],
             timestamp=result["timestamp"],
         )
+
+    def wrist_capture(self, arm: str, color_format: str = "jpeg", after: float | None = None) -> WristCapture:
+        """The latest frame of `arm`'s wrist camera ("left" or "right") with the joint state.
+
+        JPEG by default: a live view polls it. `after` as for `capture`.
+        """
+        result, frames, meta = self._call("wrist_capture", arm=arm, color_format=color_format, after=after)
+        return WristCapture(result["arm"], decode_image(frames[0]), result["state"], result["timestamp"])
 
     def head_state(self) -> dict[str, dict[str, Any]]:
         """Per head servo: `ticks` now, `sign`, and the recorded `limit_pos`, `limit_neg`, `home`."""

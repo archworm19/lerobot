@@ -145,6 +145,14 @@ class RobotServer:
         result = {"timestamp": snap.timestamp, "calibration": snap.calibration, "state": snap.state}
         return result, frames
 
+    def cmd_wrist_capture(
+        self, arm: str, color_format: str = "png", after: float | None = None
+    ) -> tuple[dict[str, Any], list[dict]]:
+        """The latest frame of `arm`'s wrist camera (a binary frame) with the joint state."""
+        snap = self.hardware.wrist_capture(arm, after=after)
+        frames = [{"name": "color", "format": color_format, "data": encode_image(snap.color, color_format)}]
+        return {"arm": snap.arm, "timestamp": snap.timestamp, "state": snap.state}, frames
+
     def _head(self):
         if self.hardware.head is None:
             raise RuntimeError("this robot has no head servos")
@@ -227,6 +235,29 @@ class RobotServer:
         return self.hardware.motion.close_session(), []
 
 
+def wrist_devices(args: argparse.Namespace) -> dict[str, str | int]:
+    """Each arm's wrist camera to open: the one given, else the saved one if it is plugged in.
+
+    Given: `--<arm>-wrist-camera`; saved: `setup.find_wrist_cameras`. A saved camera that is missing is left out,
+    with a warning.
+    """
+    from lerobot.felix_jr.wrist_cameras import ARMS, resolve_wrist_camera
+
+    devices: dict[str, str | int] = {}
+    for arm in ARMS:
+        given = getattr(args, f"{arm}_wrist_camera")
+        if given:
+            devices[arm] = int(given) if given.isdigit() else given
+            continue
+        try:
+            devices[arm] = resolve_wrist_camera(arm)
+        except KeyError:
+            pass  # never set up: no wrist camera for this arm
+        except LookupError as e:
+            log.warning("%s: starting without it", e)
+    return devices
+
+
 def main() -> None:
     """Command line entry point; see the module docstring."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -237,6 +268,17 @@ def main() -> None:
     parser.add_argument("--left-port", help="serial port of the left arm (id left_arm)")
     parser.add_argument("--right-port", help="serial port of the right arm (id right_arm)")
     parser.add_argument("--no-camera", action="store_true", help="do not open the RealSense")
+    for arm in ("left", "right"):
+        parser.add_argument(
+            f"--{arm}-wrist-camera",
+            help=f"the {arm} wrist camera's device: a /dev/v4l/by-path/... path (stable) or an index "
+            "(default: the one saved by setup.find_wrist_cameras)",
+        )
+    parser.add_argument(
+        "--no-wrist-cameras",
+        action="store_true",
+        help="do not open the wrist cameras (not even the saved ones)",
+    )
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
@@ -286,6 +328,7 @@ def main() -> None:
                 fps=args.fps,
                 librealsense_build=args.librealsense_build,
                 home_on_exit=not args.no_home_on_exit,
+                wrist_cameras={} if args.no_wrist_cameras else wrist_devices(args),
                 **motion_kwargs,
             )
         except PortInUseError as e:

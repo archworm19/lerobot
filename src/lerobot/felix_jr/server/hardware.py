@@ -3,7 +3,8 @@
 `Hardware` is the only thing `server.py` talks to, so the server and client can be developed and tested on a
 computer with no robot (`FakeHardware`). `RealHardware` drives the RealSense through `pyrealsense2` directly,
 rather than through LeRobot's `RealSenseCamera`: a pyrealsense2 built from source has no pip metadata, so
-LeRobot's availability check reports it as not installed and the camera class refuses to open.
+LeRobot's availability check reports it as not installed and the camera class refuses to open. The wrist cameras
+(plain USB / UVC cameras, one per arm) are read with OpenCV (`UsbCamera`).
 """
 
 import contextlib
@@ -12,6 +13,7 @@ import logging
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -46,6 +48,16 @@ class Snapshot:
     timestamp: float
 
 
+@dataclass
+class WristSnapshot:
+    """One wrist camera's frame: `color` RGB uint8 (H, W, 3), the joint state read with it, the server time."""
+
+    arm: str  # "left" or "right"
+    color: np.ndarray
+    state: dict[str, Any]
+    timestamp: float
+
+
 class Hardware(Protocol):
     """The interface `RobotServer` uses; implemented by `FakeHardware` and `RealHardware`."""
 
@@ -66,6 +78,12 @@ class Hardware(Protocol):
 
         With `after` (a server `time.time()` value, e.g. a move's `done_at`), waits for a frame that arrived
         more than `FRAME_LATENCY_S` later, so the image shows the scene after the move.
+        """
+
+    def wrist_capture(self, arm: str, after: float | None = None) -> WristSnapshot:
+        """The latest frame of `arm`'s wrist camera ("left" or "right") with the current joint state.
+
+        `after` as for `capture`. Raises if the arm has no wrist camera.
         """
 
     def close(self) -> None:
@@ -325,15 +343,18 @@ class FakeHardware:
         arms: tuple[str, ...] = ("left_arm", "right_arm"),
         head_range_path: Path | None = None,
         arm_time_scale: float = 0.25,
+        wrist_renderer: Callable[[str, dict[str, Any]], np.ndarray] | None = None,
         **motion_kwargs: Any,
     ):
         """A fake robot with arms named `arms`.
 
         `head_range_path` is where the head's recorded range is kept (default: not saved). `arm_time_scale`
         shortens simulated arm motions (see `FakeArms`); `motion_kwargs` go to `MotionController` (e.g. a
-        short `watchdog_s` for tests).
+        short `watchdog_s` for tests). `wrist_renderer(arm, state)` draws a wrist camera's frame (RGB) from the
+        joint state (tests render a scene with it); by default each arm's wrist camera shows a gradient.
         """
         self.captures = 0
+        self.wrist_renderer = wrist_renderer
         self.arm_backend = FakeArms(arms, arm_time_scale)
         self.head: HeadController | None = HeadController(
             FakeHeadBackend(), {"head_neck": -1, "head_eyes": 1}, RangeStore(head_range_path)
@@ -347,6 +368,7 @@ class FakeHardware:
             "head": True,
             "base": True,
             "camera": True,
+            "wrist_cameras": [arm.removesuffix("_arm") for arm in self.arm_backend.arm_ids()],
             "motion": True,
             "fake": True,
         }
@@ -381,6 +403,18 @@ class FakeHardware:
             "depth_to_color_translation_m": [0.0, 0.0, 0.0],
         }
         return Snapshot(color, depth, calibration, self.state(), time.time())
+
+    def wrist_capture(self, arm: str, after: float | None = None) -> WristSnapshot:
+        """See `Hardware.wrist_capture` (`wrist_renderer`'s frame, else a gradient)."""
+        if f"{arm}_arm" not in self.arm_backend.arm_ids():
+            raise RuntimeError(f"no {arm} wrist camera on this robot")
+        state = self.state()
+        if self.wrist_renderer is not None:
+            color = self.wrist_renderer(arm, state)
+        else:
+            color = np.zeros((self.HEIGHT, self.WIDTH, 3), dtype=np.uint8)
+            color[..., 2] = np.linspace(0, 255, self.WIDTH, dtype=np.uint8)[None, :]
+        return WristSnapshot(arm, color, state, time.time())
 
     def close(self) -> None:
         """Stop any motion and go to rest (there is nothing else to release)."""
@@ -452,6 +486,67 @@ class _LatestFrames:
         self._thread.join(timeout=3.0)
 
 
+class UsbCamera:
+    """A USB / UVC camera read with OpenCV on a thread, keeping only the newest frame (a wrist camera).
+
+    `device` is a path (`/dev/v4l/by-path/...`, stable across reboots: the USB port, not the order the cameras were
+    found in) or an index. The camera is asked for `width` x `height` at `fps` (MJPG, so two cameras and the RealSense
+    fit on the Pi's USB); it may give another size: `size` is what it gives.
+    """
+
+    def __init__(self, device: str | int, width: int = 640, height: int = 480, fps: int = 30):
+        """Open the camera and start reading; raises RuntimeError if it does not open or give a frame."""
+        import cv2
+
+        self._capture = (
+            cv2.VideoCapture(device, cv2.CAP_V4L2) if isinstance(device, str) else cv2.VideoCapture(device)
+        )
+        if not self._capture.isOpened():
+            raise RuntimeError(f"wrist camera {device!r} does not open")
+        self._capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self._capture.set(cv2.CAP_PROP_FPS, fps)
+        self.device = device
+        self._lock = threading.Lock()
+        self._latest: tuple[np.ndarray, float] | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True, name=f"wrist-camera-{device}")
+        self._thread.start()
+        self.get(wait_s=10.0)  # warm up
+
+    def _run(self) -> None:
+        import cv2
+
+        while not self._stop.is_set():
+            ok, bgr = self._capture.read()
+            if ok:
+                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                with self._lock:
+                    self._latest = (rgb, time.time())
+            else:
+                time.sleep(0.01)
+
+    def get(self, after: float | None = None, wait_s: float = 5.0) -> tuple[np.ndarray, float]:
+        """The newest (RGB frame, arrival time); with `after`, one that arrived `FRAME_LATENCY_S` after it."""
+        deadline = time.time() + wait_s
+        newer_than = 0.0 if after is None else after + FRAME_LATENCY_S
+        while True:
+            with self._lock:
+                latest = self._latest
+            if latest is not None and time.time() - latest[1] < 2.0 and latest[1] > newer_than:
+                return latest
+            if time.time() > deadline:
+                raise RuntimeError(f"no recent frame from wrist camera {self.device!r}")
+            time.sleep(0.01)
+
+    def stop(self) -> None:
+        """Stop reading and release the camera."""
+        self._stop.set()
+        self._thread.join(timeout=3.0)
+        self._capture.release()
+
+
 class RealHardware:
     """The RealSense D415 plus any of the arms. Arms are optional so the camera can be tried alone first.
 
@@ -468,12 +563,14 @@ class RealHardware:
         fps: int = 30,
         librealsense_build: str | Path | None = DEFAULT_LIBREALSENSE_BUILD,
         home_on_exit: bool = True,
+        wrist_cameras: dict[str, str | int] | None = None,
         **motion_kwargs: Any,
     ):
         """Open the camera (unless `camera` is False) and connect each arm. Closes everything on failure.
 
         `home_on_exit`: on `close`, send the arms (and head) to their recorded home before the servos are
-        released, since releasing switches torque off. `motion_kwargs` go to `MotionController`.
+        released, since releasing switches torque off. `wrist_cameras` maps an arm ("left", "right") to its wrist
+        camera's device (`UsbCamera`). `motion_kwargs` go to `MotionController`.
         """
         from lerobot.felix_jr.home import (
             make_follower,
@@ -486,9 +583,12 @@ class RealHardware:
         self._frames: _LatestFrames | None = None
         self._pipeline = None
         self._calibration: dict[str, Any] | None = None
+        self.wrist_cameras: dict[str, UsbCamera] = {}
         try:
             if camera:
                 self._start_camera(width, height, fps, librealsense_build)
+            for arm, device in (wrist_cameras or {}).items():
+                self.wrist_cameras[arm] = UsbCamera(device)
             for robot_id, port in (arms or {}).items():
                 robot = make_follower(port, robot_id)
                 robot.connect(calibrate=False)
@@ -539,6 +639,7 @@ class RealHardware:
             "head": any(getattr(r, "with_head", False) for r in self.robots.values()),
             "base": any(getattr(r, "with_base", False) for r in self.robots.values()),
             "camera": self._frames is not None,
+            "wrist_cameras": sorted(self.wrist_cameras),
             "motion": True,
             "fake": False,
         }
@@ -561,6 +662,13 @@ class RealHardware:
         color, depth, timestamp = self._frames.get(after=after)
         return Snapshot(color, depth, self._calibration, self.state(), timestamp)
 
+    def wrist_capture(self, arm: str, after: float | None = None) -> WristSnapshot:
+        """See `Hardware.wrist_capture`."""
+        if arm not in self.wrist_cameras:
+            raise RuntimeError(f"no {arm} wrist camera: start the server with --{arm}-wrist-camera")
+        color, timestamp = self.wrist_cameras[arm].get(after=after)
+        return WristSnapshot(arm, color, self.state(), timestamp)
+
     def close(self) -> None:
         """Go to rest, stop the camera and disconnect the arms; safe to call twice."""
         if self.motion is not None:
@@ -573,6 +681,10 @@ class RealHardware:
             with contextlib.suppress(Exception):
                 self._pipeline.stop()
             self._pipeline = None
+        for wrist in self.wrist_cameras.values():
+            with contextlib.suppress(Exception):
+                wrist.stop()
+        self.wrist_cameras = {}
         for robot in self.robots.values():
             with contextlib.suppress(Exception):
                 robot.disconnect()

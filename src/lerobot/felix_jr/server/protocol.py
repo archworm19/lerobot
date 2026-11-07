@@ -13,7 +13,9 @@ from typing import Any
 import cv2
 import numpy as np
 
-PROTOCOL_VERSION = 4  # 4: arm_calibration; 3: motion commands, sessions; 2: capture(after=), head_* commands
+PROTOCOL_VERSION = (
+    5  # 5: wrist_capture; 4: arm_calibration; 3: motion commands, sessions; 2: capture(after=), head_*
+)
 DEFAULT_PORT = 5555
 
 

@@ -72,17 +72,17 @@ the IK smoke test is built on pen1).
     gripper closed to `gripper.pos` 2, which reads as "nothing between the jaws", and the close-up showed the pen at
     the very tips of the closed jaws, yet the person watching saw that it was held. The head camera sees the jaws
     from above and behind, at ~40 cm: a thin object between the jaw faces is mostly hidden by the jaws themselves, and
-    depth on it is patchy. The wrist cameras look along the jaws (the person is setting them up). TODO:
+    depth on it is patchy. The wrist cameras look along the jaws (the person is setting them up). bowl4 (2026-11-07)
+    made them the next step: the grasps are to be aligned at the hold from the wrist camera
+    (`object_grasping.md`, section 6). TODO:
 
-    **a. Intrinsics calibration procedure for the wrist cameras.**
+    **a-c. Built (2026-11-07), not yet run on the robot:** `setup.find_wrist_cameras` finds which USB camera is
+    which arm's (by unplugging each); the server reads them (`wrist_capture`, protocol 5); `calibration.wrist_camera` fits the
+    lens (a hand-held checkerboard) and the pose on the gripper (a fixed board seen from several arm poses: a
+    hand-eye fit), a separate step after the click calibration; both go into `calibration.urdf`
+    (`XleRobotModel.wrist_cameras`, `WristCamera`, `wrist_camera_pose`). README section 8b.
 
-    **b. Extrinsics calibration procedure** (the camera in the gripper frame). Open question: make it an optional
-    part of the current click calibration (`calibration/collect.py`), or a separate step?
-
-    **c. Carry it in the URDF:** the wrist cameras' frames (and intrinsics, or a pointer to them) in
-    `calibration.urdf`, so the model and `Capture` can use them like the head camera.
-
-    Then their frames in `Capture`. Signals besides the camera, worth trying: the gripper's load or current after
+    Still to do: their frames in the harness (`Capture` or a wrist capture tool). Signals besides the camera, worth trying: the gripper's load or current after
     closing; a capture after a small lift (is the object still in the cup?).
 
 ## Rendering

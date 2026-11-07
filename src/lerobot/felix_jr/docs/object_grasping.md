@@ -1,6 +1,6 @@
 # Object-centric grasping (experiment)
 
-**Status: phases A and B built; phase C's tools built, its robot session to come, 2026-11-06** (results below the phase table). Built: the primitives
+**Status: phases A-C built and tried on the robot (bowl3, bowl4); next, a coarse-to-fine redesign around the wrist cameras, 2026-11-07 (section 6)** (results below the phase table). Built: the primitives
 (`harness/primitives.py`), the claw mapping and the thin `grasp_candidates` (`harness/grasping.py`),
 `ArmIK.solve_frame` (`harness/reach.py`). It changes how the harness plans a grasp: today the model
 names a gripper pose (a point and pitch / heading / roll in the root frame) and searches for a good one itself; here
@@ -312,6 +312,39 @@ place until `plan_place` (phase D).
   `opening_for_width`, `jaw_radius`, `visibility`, `hidden_by`, `view_of` stay.
 - `scratch/session.py` (gitignored): `propose` (waypoints in cm at a pitch); `execute` keeps working on `Poses`.
 
+
+**Deprecated by the wrist-camera redesign** (2026-11-07, section 6). They keep working until the redesign replaces
+them; nothing new is built on them.
+
+*The arm's shapes* (they existed for the head camera's line of sight, which the wrist cameras replace; the wrist
+camera's own pose is calibrated instead, section 6):
+
+- `calibration/arm_shapes.py` (the whole script) and its tests (`test_arm_shapes.py`).
+- `calibration/xle_robot_model.py`: `ArmBox`, `BOX_PARTS`, `with_boxes`, `box_frame`, `boxes_root`, the `boxes`
+  record; `WristBoard`, `with_wrist_board`, `without_wrist_board`, `board_corners`, `wrist_board_link`,
+  `BOARD_THICKNESS_M`, `PLATE_MARGIN_M`, `segment_hits_box`; the plates' and boxes' outlines in `calibration/check.py`.
+  Their tests: `test_arm_model_shapes.py`, `test_calibration_check.py`'s plate and box cases.
+
+*The head camera's view of the grasp:*
+
+- `harness/grasping.py`: the stages "attack view" and "grasp view", `sight_blockers`, `Body`, `arm_bodies`,
+  `arm_boxes`, `finger_boxes`, `FINGER_*`, `SIGHT_STOP_M`, `SIGHT_MARGIN_M`; `GraspSettings.see_contacts`,
+  `see_at_grasp`, `see_at_attack`; `refine`'s view check. (bowl3 and bowl4 turned them off at every hold.)
+- `calibration/xle_robot_model.py`: `hidden_by`, `view_of`, `visibility` (as used for grasps; `views.py`'s check that
+  the head camera faces the pinch point stays: the click calibration needs it, without the plates).
+- `harness/reach.py` / `objects.py`: `FrameSolution` and `Poses`'s `visibility`, `hidden_by`, `seen`, `hidden`,
+  `camera_text`, `EDGE_ON_VISIBILITY` (the "camera: jaws seen / edge-on / hidden" reports).
+
+*Also changed or replaced:*
+
+- `plan_pick`'s attack point back along the grasp's approach: replaced by one back along the gripper's own axis (the
+  move in went crabwise, bowl4).
+- `arm_error` (the joints through the model) as the check at the hold: replaced by the wrist camera's measurement of
+  the object in the jaws' frame; `arm_error` stays as a diagnostic.
+- `protocols.md` rule 1, steps 1-3 (look with the head, re-locate, measure the arm): the alignment loop (section 6).
+- The smoke replays' checks of visibility (`test_grasp_replay_smoke.py::test_the_hidden_grasp_is_rejected_with_its_reason`,
+  `test_the_best_is_seen`, `test_the_view_filters_can_be_turned_off`).
+
 **Tests (`tests/felix_jr/`):**
 
 - `test_grasp.py`: rewritten for `to_claw` and the candidates (the claw geometry it checks stays true).
@@ -362,3 +395,69 @@ and occlusion scores, the clearance and swept move-in checks) were the prototype
 - **Frames in model-facing calls.** Whether the model ever needs to give a direction in the object's or the gripper's
   terms (e.g. "from the robot's side"), and how to name it so the frame is obvious, is open until the model uses
   `grasp_candidates`.
+
+## 6. Next: coarse to fine with the wrist cameras (2026-11-07)
+
+**Why.** bowl3 and bowl4 ([sessions.md](sessions.md)) put the error budget at 1-3 cm: the arm's sag (0.7-1 cm), the
+calibration under the arm, and a camera pose that depends on the head's (about 2 cm off at the head's home). The
+3D-printed parts' slop adds to it. A narrow object leaves about 1 cm of clearance, so planning from the head camera
+alone cannot be made accurate enough. Neither can a re-calibration alone (worth doing: check `calibration.check` at
+the home head pose first, then collect with views from it). And the head camera, ~60 cm away and behind the
+gripper, could not tell whether the jaws were lined up, with or without the visibility filters (bowl4's last two
+chapstick attempts: the person saw what the camera did not). So: accept a rough first move, and correct it close up
+with a camera that sees the object in the jaws' own frame. That measurement does not go through the URDF, the head
+or the arm's model at all.
+
+**The plan:**
+
+1. **Rough, from the head camera:** find the object and fit it (`fit_cylinder`), choose a grasp, go to an attack
+   point a few cm back along the gripper's own axis. The head camera's job ends here (and at the place).
+2. **Fine, from the wrist camera, at the hold:** find the object in the wrist image and measure it in the jaws' frame:
+   how far it sits across the jaws (off the midpoint between the tips), how far ahead, and the turn about the hinge
+   (pinch y) that would square the closing line on it. Correct with small joint moves, capture again, repeat until
+   it is centered within tolerance.
+3. **Straight in along the gripper's axis, close, check the grip** by the jaws' position (stopped near the object's
+   width: held; closed fully: missed) and by the wrist image.
+
+**Choosing grasps for it (replacing the head camera's visibility filters):**
+
+- **(a) The object in the wrist camera's view at the attack point:** inside its field of view, at a distance it can
+  focus and measure, not behind the fingers. This depends on the approach and the standoff, not on the head.
+- **(b) Corrections that do not fight each other:** prefer grasps whose closing line is square to the arm's vertical
+  plane (through the shoulder pan axis and the object). Then the joints split the corrections: the shoulder pan
+  moves the gripper across the jaws and, at a level grasp, turns it about the hinge (pinch y), both of which a side
+  grasp needs; the shoulder lift, elbow and wrist flex move it in and out and up and down; the wrist roll turns the
+  closing line. A preference in the ranking with a tolerance (tens of degrees), not a filter: an upright cylinder
+  loses nothing (any closing direction around it works); for an object that sets its closing direction (a lying
+  pen, a box) a level side grasp only fits when it lies along the arm's reach, while from above the wrist roll
+  turns the closing line anywhere. Otherwise: the other arm, or nudge the object first.
+- Kept: reach, the jaws' opening, the joint margin, the antipodal error (with a step: a few degrees off on a round
+  object do not matter), and the move in straight along the gripper's axis.
+
+**To build, in order:**
+
+1. **The wrist cameras on the robot** (`open_issues.md` 15): mount them; the server streams them; their
+   intrinsics; their pose in the gripper link (the extrinsics: replaces the plate's corner fit; the plate itself need
+   not be modeled once nothing checks the head camera's line of sight past it). **Built 2026-11-07, not yet run on
+   the robot:** `server --left-wrist-camera / --right-wrist-camera`, `calibration.wrist_camera` (README 8b).
+2. **A wrist capture in the harness:** `Capture` with the wrist camera's frame, and a tool to take one at a hold.
+3. **The measurement:** the object in the jaws' frame from a wrist capture (the same `fit_cylinder` marks, or a
+   simpler detector for the centering), as a tool that says how far off and which way.
+4. **The alignment step:** from that measurement, the small joint moves (pan across, roll for the closing line, the
+   arm's plane for in/out and up/down), each approved, until centered: a tool, so the model asks for it rather than
+   composing joint moves.
+5. **Grasp selection:** (a) and (b) in `grasp_candidates`, the head camera's view filters removed (section 4); the
+   attack point along the gripper's axis in `plan_pick`.
+6. **A session** (a bowl4-like scene: an upright bottle and a chapstick into a container), every grasp aligned at the
+   hold from the wrist camera.
+
+**Open questions:**
+
+- How far the wrist camera sees: its field of view against the attack standoff (5 cm today) and the jaws' opening;
+  the fingers in its picture.
+- Whether the pan's turn about the shoulder (about 45 cm back) is close enough to a shift across the jaws, or a
+  small re-solve per correction is needed.
+- The tolerance to stop at (how centered is centered for a narrow, light object), and whether to grip lower or
+  close slower as well (the fourth chapstick tipped when closed off center).
+- Whether to keep a head-camera check of anything at the hold (the hand's neighbors, the support) that the wrist
+  camera cannot see.

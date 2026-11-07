@@ -258,6 +258,41 @@ where the calibration puts the tips. (The boxes were first fitted to clicked out
 4. It writes `calibration.urdf` (the start with the boxes) and `arm_shapes.md` (the sizes and shifts) in the folder.
 5. The other arm: run again with `--start-from` the file just written. Then check the whole calibration (section 9).
 
+### 8b. Calibrate the wrist cameras (a checkerboard, needs the server)
+
+The wrist cameras (plain USB / UVC boards, one per arm, plugged into the Pi) are read by the server. Their lens
+(intrinsics) and their pose on the gripper (extrinsics) go into the calibration, so a wrist picture can be measured in
+the jaws' frame (`object_grasping.md`, section 6).
+
+1. **Find which camera is which arm's** (once, and again if a camera moves to another USB port): on the Pi, with
+   the server stopped, `uv run python -m lerobot.felix_jr.setup.find_wrist_cameras` (`--arms right` for one;
+   `--snapshot-dir ~/wrist_check` keeps a test frame from each to look at). For each arm it asks you to unplug that
+   arm's camera, sees which one vanished, waits for you to plug it back into the same port and takes a frame from it.
+   A camera is known by its USB port (generic camera boards have no serial number): keep each in its port. `--show`
+   prints what is saved.
+2. **Server:** started as usual, it opens the saved wrist cameras (640 x 480 MJPG at 30 fps); a saved camera that is
+   unplugged is left out with a warning. `--left-wrist-camera` / `--right-wrist-camera <device>` override,
+   `--no-wrist-cameras` skips them.
+3. **The board:** print a checkerboard with one odd and one even count of inner corners (the corners where four
+   squares meet, e.g. 9 x 6: with both odd or both even it looks the same turned around, and the script refuses it).
+   Tape it flat on something stiff and measure one square (printers scale).
+4. **On your computer, with the workspace clear:**
+   `uv run python -m lerobot.felix_jr.calibration.wrist_camera tcp://<pi>:5555 --start-from <calibration.urdf>
+   --out-dir <a scratch folder>` (`--arms right` for one arm; `--pattern 9x6 --square-mm 25` to skip the
+   questions; `--lens fisheye` for a lens wider than about 120 deg). For each arm in turn, after a `y` in the terminal,
+   the arm goes to a start pose (the gripper tilted 70 deg down, about 18 cm over the table) and a window shows its
+   wrist camera. Keys: arrows, `w` / `s` move the arm; `[` / `]` tilt it; `,` / `.` turn it about its axis;
+   space takes a view; `u` drops the last one; `c` goes on; `q` stops.
+   - **The lens:** hold the board under the camera and move it, tilted every way, near and far, into the picture's
+     corners. Views are kept by themselves; `c` once there are 12 (the RMS error should be well under 1 px).
+   - **The pose:** put the board flat on the table where it stays, `c`; then move the arm to see it from different
+     places, tilted and turned (both!), space for each view; `c` once there are 8 turned 15 deg about two axes.
+   - **The check:** the model's fingertips are drawn on the live picture (cyan the fixed tip, magenta the moving
+     one): they should sit on the real ones. `c` to finish the arm (`u` for more views).
+5. It writes `calibration.urdf` (the start with the wrist cameras) and `wrist_cameras.md` (the lens, the pose, the
+   errors) in the folder, and keeps the views: `wrist_camera --refit --start-from <urdf> --out-dir <folder>` fits
+   them again with no robot.
+
 ### 9. Check the calibration on the robot (no clicks, needs the server)
 
 Draws where the calibrated URDF puts both fingertips over the head camera, view after view, with the gripper at

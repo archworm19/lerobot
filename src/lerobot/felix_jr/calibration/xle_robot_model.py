@@ -336,6 +336,64 @@ class ArmBox:
     n_clicks: int = 0
 
 
+WRIST_CAMERA_MODELS = (
+    "rational",
+    "fisheye",
+)  # OpenCV's lens models: `cv2.CALIB_RATIONAL_MODEL`, `cv2.fisheye`
+
+
+@dataclass(frozen=True)
+class WristCamera:
+    """An arm's wrist camera: its lens (`calibration.wrist_camera`, intrinsics) and its pose on the gripper (extrinsics).
+
+    `width` x `height` the frame size calibrated at; `fx, fy, ppx, ppy` the pinhole part; `model` one of
+    `WRIST_CAMERA_MODELS` with its `coeffs` (OpenCV's order: rational `k1 k2 p1 p2 k3 k4 k5 k6`, fisheye `k1 k2 k3
+    k4`); `rms_px` the reprojection error over `n_views` views of the board. `gripper_from_camera` is the camera's
+    optical frame (x right, y down, z forward) in `<arm>_gripper_link`, row-major 4x4, None until the extrinsics are
+    calibrated; `extrinsics_rms_px` and `extrinsics_views` say what they were fitted to.
+    """
+
+    width: int
+    height: int
+    fx: float
+    fy: float
+    ppx: float
+    ppy: float
+    model: str
+    coeffs: tuple[float, ...]
+    rms_px: float | None = None
+    n_views: int = 0
+    gripper_from_camera: tuple[tuple[float, ...], ...] | None = None
+    extrinsics_rms_px: float | None = None
+    extrinsics_views: int = 0
+
+    def matrix(self) -> np.ndarray:
+        """The 3x3 camera matrix."""
+        return np.array([[self.fx, 0.0, self.ppx], [0.0, self.fy, self.ppy], [0.0, 0.0, 1.0]])
+
+    def project(self, points_camera: np.ndarray) -> np.ndarray:
+        """Pixels (N, 2) of points (N, 3) in the camera's optical frame, through the lens (`model`, `coeffs`).
+
+        Points behind the camera come out NaN.
+        """
+        import cv2
+
+        points = np.asarray(points_camera, dtype=np.float64).reshape(-1, 1, 3)
+        zero = np.zeros(3)
+        if self.model == "fisheye":
+            uv, _ = cv2.fisheye.projectPoints(points, zero, zero, self.matrix(), np.asarray(self.coeffs))
+        else:
+            uv, _ = cv2.projectPoints(points, zero, zero, self.matrix(), np.asarray(self.coeffs))
+        uv = uv.reshape(-1, 2)
+        uv[points[:, 0, 2] <= 1e-6] = np.nan
+        return uv
+
+
+def wrist_camera_link(arm: str) -> str:
+    """The link a wrist camera is fixed to."""
+    return f"{arm}_gripper_link"
+
+
 class RobotMismatchError(RuntimeError):
     """A calibration's copy of the robot's settings no longer matches the robot (`XleRobotModel.check_robot`)."""
 
@@ -370,6 +428,7 @@ class XleRobotModel:
         arm_calibration: Mapping[str, Mapping[str, Mapping[str, int]]] | None = None,
         wrist_boards: Mapping[str, WristBoard] | None = None,
         boxes: Mapping[str, Mapping[str, ArmBox]] | None = None,
+        wrist_cameras: Mapping[str, WristCamera] | None = None,
     ):
         """Build the model from URDF text (`from_urdf` reads a file).
 
@@ -381,7 +440,8 @@ class XleRobotModel:
         `gripper_maps`: per arm, how `gripper.pos` opens the jaws, where measured. `arm_calibration`: per arm, the
         LeRobot calibration (`arm_record`) its clicks were taken under, where known: the arm's estimates hold only
         under it. `wrist_boards`: per arm, its wrist camera's mount plate, where fitted (the URDF also carries it as a
-        link: `with_wrist_board`). `boxes`: per arm, its parts as boxes (`BOX_PARTS`), where fitted.
+        link: `with_wrist_board`). `boxes`: per arm, its parts as boxes (`BOX_PARTS`), where fitted. `wrist_cameras`:
+        per arm, its wrist camera, where calibrated (`WristCamera`).
         """
         require_package("pin", extra="kinematics", import_name="pinocchio")
         self.urdf = urdf
@@ -398,6 +458,7 @@ class XleRobotModel:
         self.arm_calibration = {arm: arm_record(motors) for arm, motors in (arm_calibration or {}).items()}
         self.wrist_boards = dict(wrist_boards or {})
         self.boxes = {arm: dict(parts) for arm, parts in (boxes or {}).items()}
+        self.wrist_cameras = dict(wrist_cameras or {})
         if not set(self.visible_side.values()) <= set(SIDES):
             raise ValueError(f"visible_side must be one of {SIDES}: {self.visible_side}")
         self.covariance: np.ndarray | None = None  # of the estimates, from the last fit
@@ -1162,6 +1223,7 @@ class XleRobotModel:
             self.arm_calibration,
             self.wrist_boards | {arm: board},
             self.boxes,
+            self.wrist_cameras,
         )
         model.set_estimates(self._estimates.copy())
         model.covariance = self.covariance
@@ -1192,6 +1254,7 @@ class XleRobotModel:
             self.arm_calibration,
             {other: board for other, board in self.wrist_boards.items() if other != arm},
             self.boxes,
+            self.wrist_cameras,
         )
         model.set_estimates(self._estimates.copy())
         model.covariance = self.covariance
@@ -1228,11 +1291,44 @@ class XleRobotModel:
             self.arm_calibration,
             self.wrist_boards,
             self.boxes | {arm: self.boxes.get(arm, {}) | dict(parts)},
+            self.wrist_cameras,
         )
         model.set_estimates(self._estimates.copy())
         model.covariance = self.covariance
         model.fit_info = dict(self.fit_info)
         return model
+
+    def with_wrist_camera(self, arm: str, camera: WristCamera) -> "XleRobotModel":
+        """A copy of the model with `arm`'s wrist camera `camera` (replacing an earlier one); saved in `<felix_calibration>`."""
+        if camera.model not in WRIST_CAMERA_MODELS:
+            raise ValueError(f"unknown lens model {camera.model!r}: one of {WRIST_CAMERA_MODELS}")
+        model = type(self)(
+            self.urdf,
+            self.head_signs,
+            self.head_refs,
+            self.intrinsics,
+            self.parameters,
+            self.floor_z,
+            self.visible_side,
+            self.gripper_maps,
+            self.arm_calibration,
+            self.wrist_boards,
+            self.boxes,
+            self.wrist_cameras | {arm: camera},
+        )
+        model.set_estimates(self._estimates.copy())
+        model.covariance = self.covariance
+        model.fit_info = dict(self.fit_info)
+        return model
+
+    def wrist_camera_pose(
+        self, arm: str, q: np.ndarray, theta: np.ndarray | Mapping[str, float] | None = None
+    ) -> np.ndarray:
+        """root_from_camera (4x4) of `arm`'s wrist camera (its optical frame) at `q`; needs its extrinsics."""
+        camera = self.wrist_cameras.get(arm)
+        if camera is None or camera.gripper_from_camera is None:
+            raise ValueError(f"no calibrated {arm} wrist camera pose: run calibration.wrist_camera")
+        return self.frame_pose(wrist_camera_link(arm), q, theta) @ np.array(camera.gripper_from_camera)
 
     def box_frame(
         self,
@@ -1295,6 +1391,7 @@ class XleRobotModel:
             "boxes": {
                 arm: {part: asdict(b) for part, b in parts.items()} for arm, parts in self.boxes.items()
             },
+            "wrist_cameras": {arm: asdict(c) for arm, c in self.wrist_cameras.items()},
             "parameters": [asdict(p) for p in self.parameters],
             "estimates": self._estimates.tolist(),
             "covariance": None if self.covariance is None else np.asarray(self.covariance).tolist(),
@@ -1348,6 +1445,18 @@ class XleRobotModel:
                     for part, b in parts.items()
                 }
                 for arm, parts in data.get("boxes", {}).items()
+            },
+            {  # none before the wrist cameras were calibrated
+                arm: WristCamera(
+                    **c
+                    | {
+                        "coeffs": tuple(c["coeffs"]),
+                        "gripper_from_camera": None
+                        if c["gripper_from_camera"] is None
+                        else tuple(map(tuple, c["gripper_from_camera"])),
+                    }
+                )
+                for arm, c in data.get("wrist_cameras", {}).items()
             },
         )
         if data.get("capsules"):  # the arms' shapes as capsules, before they were boxes (2026-11-06)
