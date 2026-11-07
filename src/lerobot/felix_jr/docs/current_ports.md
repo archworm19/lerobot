@@ -17,3 +17,9 @@ right_arm: /dev/ttyACM0 (serial:5AE6083730). Plug it back in.
 Saved to /home/zcecere/.cache/huggingface/lerobot/calibration/felix_jr/ports.json:
   /dev/ttyACM1 left_arm
   /dev/ttyACM0 right_arm
+
+
+
+Wrist camera
+left: /dev/v4l/by-path/platform-xhci-hcd.0-usb-0:1.1:1.0-video-index0
+right: /dev/v4l/by-path/platform-xhci-hcd.0-usb-0:1.2:1.0-video-index0

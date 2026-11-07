@@ -20,7 +20,9 @@ from lerobot.felix_jr.calibration.wrist_camera import (  # noqa: E402
     fingertips_in_wrist_image,
     is_new_view,
     parse_pattern,
+    pattern_hint,
     rotation_spread,
+    sharpness,
     view_signature,
 )
 from lerobot.felix_jr.calibration.xle_robot_model import (  # noqa: E402
@@ -131,8 +133,10 @@ def test_the_board_is_found_in_opencvs_order():
     assert parse_pattern("9x6") == (9, 6)
     with pytest.raises(ValueError):
         parse_pattern("2x6")
-    with pytest.raises(ValueError, match="one count odd"):
-        parse_pattern("8x6")
+    assert parse_pattern("8x6") == (
+        8,
+        6,
+    )  # both even: turned around it looks the same (`orient_views` handles it)
     turned = _pose(
         [0.1, -0.15, 0.05 + np.pi], [0.1, 0.06, 0.3]
     )  # the board turned around: the same first corner
@@ -146,6 +150,13 @@ def test_new_views_are_told_apart():
     nudged = view_signature(TRUE_CAMERA.project(BOARD.points() + [-0.099, -0.06, 0.3]), (640, 480), BOARD)
     moved = view_signature(TRUE_CAMERA.project(BOARD.points() + [-0.02, -0.06, 0.3]), (640, 480), BOARD)
     assert not is_new_view(nudged, [a]) and is_new_view(moved, [a])
+    turn = cv2.Rodrigues(np.array([0.0, 0.0, np.radians(30)]))[0]
+    turned = view_signature(
+        TRUE_CAMERA.project((BOARD.points() - [0.08, 0.05, 0]) @ turn.T + [-0.02, -0.01, 0.3]),
+        (640, 480),
+        BOARD,
+    )
+    assert abs(turned[5] - a[5]) > 25 and is_new_view(turned, [a])  # turned in the picture: a new view
 
 
 def synthetic_views(n: int, seed: int = 0, noise_px: float = 0.2) -> list[np.ndarray]:
@@ -181,7 +192,7 @@ def test_rotation_spread():
 
 
 def arm_views(
-    model: XleRobotModel, arm: str, root_from_board: np.ndarray, noise_px: float = 0.2
+    model: XleRobotModel, arm: str, root_from_board: np.ndarray, noise_px: float = 0.2, board: Board = BOARD
 ) -> list[ArmView]:
     """The board's corners as the true camera sees them, from arm poses around the start pose, tilted and rolled."""
     from types import SimpleNamespace
@@ -210,7 +221,7 @@ def arm_views(
         arm_pose = dict(poses.joints[0]) | {"gripper.pos": 1.0}
         q = model.joint_vector({arm: arm_pose})
         camera_from_board = np.linalg.inv(with_camera.wrist_camera_pose(arm, q)) @ root_from_board
-        uv = TRUE_CAMERA.project(BOARD.points() @ camera_from_board[:3, :3].T + camera_from_board[:3, 3])
+        uv = TRUE_CAMERA.project(board.points() @ camera_from_board[:3, :3].T + camera_from_board[:3, 3])
         if np.isfinite(uv).all() and (uv > 0).all() and (uv[:, 0] < 640).all() and (uv[:, 1] < 480).all():
             views.append(ArmView(arm_pose, (uv + rng.normal(0, noise_px, uv.shape)).tolist()))
     return views
@@ -267,3 +278,40 @@ def test_the_model_carries_the_wrist_camera(model, tmp_path):
     assert (
         tips.shape == (2, 2) and np.isfinite(tips).all()
     )  # the camera looks along the jaws: it sees the tips
+
+
+def test_sharpness_drops_with_blur():
+    camera_from_board = _pose([0.1, -0.15, 0.05], [-0.1, -0.06, 0.3])
+    sharp = render_board(TRUE_CAMERA, camera_from_board)
+    blurred = cv2.GaussianBlur(sharp, (0, 0), 6)
+    corners = find_board(sharp, BOARD)
+    assert sharpness(sharp, corners) > 10 * sharpness(blurred, corners)
+    assert sharpness(sharp) > 10 * sharpness(blurred)  # the middle of the picture, without the board
+
+
+BOARD_8X6 = Board(8, 6, 0.018)  # both counts even: it looks the same turned around
+
+
+def test_a_symmetric_board_read_from_either_end_still_gives_the_camera_pose(model):
+    """The detector may start a symmetric board from either end; the arm's motion tells which (`orient_views`)."""
+    root_from_board = board_under(model, "right")
+    views = arm_views(model, "right", root_from_board, board=BOARD_8X6)
+    assert len(views) >= 8
+    rng = np.random.default_rng(5)
+    flipped = [
+        ArmView(v.arm_pose, np.asarray(v.corners)[::-1].tolist()) if i > 0 and rng.random() < 0.5 else v
+        for i, v in enumerate(views)
+    ]
+    assert flipped != views
+    gripper_from_camera, _, errors = calibrate_extrinsics(model, "right", TRUE_CAMERA, flipped, BOARD_8X6)
+    np.testing.assert_allclose(gripper_from_camera[:3, 3], GRIPPER_FROM_CAMERA[:3, 3], atol=0.002)
+    assert errors.max() < 0.6
+
+
+def test_a_wrong_pattern_is_named():
+    """An 8 x 6 board asked for as 9 x 6 (wrist_cams2): the status line says what it looks like."""
+    camera_from_board = _pose([0.1, -0.15, 0.05], [-0.08, -0.05, 0.3])
+    image = render_board(TRUE_CAMERA, camera_from_board, BOARD_8X6)
+    hint = pattern_hint(image, Board(9, 6, 0.018))
+    assert hint is not None and "8 x 6" in hint and "--pattern 8x6" in hint
+    assert pattern_hint(image, BOARD_8X6) is None

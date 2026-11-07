@@ -74,12 +74,29 @@ def test_the_cache_and_resolve(tmp_path):
         resolve_wrist_camera("right", path, present=[LEFT, RIGHT])
 
 
-def test_video_devices_are_the_capture_nodes(tmp_path):
-    for name in ("usb-0:1:1.0-video-index0", "usb-0:1:1.0-video-index1", "usb-0:2:1.0-video-index0"):
-        (tmp_path / name).touch()
-    assert list_video_devices(tmp_path) == [
-        str(tmp_path / "usb-0:1:1.0-video-index0"),
-        str(tmp_path / "usb-0:2:1.0-video-index0"),
+def test_video_devices_are_one_name_per_usb_camera(tmp_path):
+    """As on the Pi: each USB camera under a usb- and a usbv2- name (one device), its metadata node, the Pi's own
+    codec node, and the RealSense's nodes."""
+    devices = tmp_path / "dev"
+    devices.mkdir()
+    for n in range(8):
+        (devices / f"video{n}").touch()
+    by_path = tmp_path / "by-path"
+    by_path.mkdir()
+    for name, target in [
+        ("platform-xhci-hcd.0-usb-0:1.1:1.0-video-index0", "video0"),
+        ("platform-xhci-hcd.0-usbv2-0:1.1:1.0-video-index0", "video0"),
+        ("platform-xhci-hcd.0-usb-0:1.1:1.0-video-index1", "video1"),
+        ("platform-xhci-hcd.0-usb-0:1.2:1.0-video-index0", "video2"),
+        ("platform-xhci-hcd.0-usbv2-0:1.2:1.0-video-index0", "video2"),
+        ("platform-1000800000.codec-video-index0", "video3"),
+        ("platform-xhci-hcd.1-usbv3-0:1:1.0-video-index0", "video4"),  # the RealSense: only a usbv3- name
+    ]:
+        (by_path / name).symlink_to(devices / target)
+    assert list_video_devices(by_path) == [
+        str(by_path / "platform-xhci-hcd.0-usb-0:1.1:1.0-video-index0"),
+        str(by_path / "platform-xhci-hcd.0-usb-0:1.2:1.0-video-index0"),
+        str(by_path / "platform-xhci-hcd.1-usbv3-0:1:1.0-video-index0"),
     ]
     assert list_video_devices(tmp_path / "missing") == []
 
@@ -99,3 +116,63 @@ def test_the_server_opens_the_given_cameras_else_the_saved_ones(monkeypatch, cap
     assert "starting without it" in caplog.text
     given = argparse.Namespace(left_wrist_camera="2", right_wrist_camera=RIGHT)
     assert wrist_devices(given) == {"left": 2, "right": RIGHT}
+
+
+def test_a_by_path_link_opens_by_its_video_number(tmp_path, monkeypatch):
+    from lerobot.felix_jr.server.hardware import video_index
+
+    assert video_index(3) == 3
+    link = tmp_path / "platform-xhci-hcd.0-usb-0:1.1:1.0-video-index0"
+    link.symlink_to("/dev/video7")  # a dangling link is fine: only its target's name is read
+    monkeypatch.setattr(
+        "os.path.realpath", lambda path: "/dev/video7" if str(path) == str(link) else str(path)
+    )
+    assert video_index(str(link)) == 7
+    with pytest.raises(ValueError, match="not a video device"):
+        video_index(str(tmp_path / "not-a-camera"))
+
+
+def test_a_camera_whose_frames_stop_is_reopened(monkeypatch):
+    """A USB drop (bowl4's wrist camera, 2026-11-07): the reader reopens the camera and frames come again."""
+    import time
+
+    import cv2
+    import numpy as np
+
+    from lerobot.felix_jr.server import hardware
+
+    opened: list = []
+
+    class FakeCapture:
+        def __init__(self, *args):
+            self.frames = 3 if not opened else 10**9  # the first one stops after 3 frames
+            opened.append(self)
+
+        def isOpened(self):  # noqa: N802 (OpenCV's name)
+            return True
+
+        def set(self, *args):
+            return True
+
+        def read(self):
+            if self.frames <= 0:
+                return False, None
+            self.frames -= 1
+            time.sleep(0.005)
+            return True, np.zeros((4, 4, 3), np.uint8)
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(cv2, "VideoCapture", FakeCapture)
+    monkeypatch.setattr(hardware, "REOPEN_AFTER_S", 0.05)
+    camera = hardware.UsbCamera(0)
+    try:
+        deadline = time.time() + 2.0
+        while camera.reopened == 0 and time.time() < deadline:
+            time.sleep(0.01)
+        assert camera.reopened == 1 and len(opened) == 2
+        frame, stamp = camera.get(after=time.time())  # frames again, from the reopened camera
+        assert frame.shape == (4, 4, 3)
+    finally:
+        camera.stop()

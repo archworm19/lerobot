@@ -2,34 +2,43 @@
 
   uv run python -m lerobot.felix_jr.calibration.wrist_camera tcp://<pi>:5555 --start-from <calibration.urdf>
       --out-dir <folder> [--arms left,right] [--pattern 9x6] [--square-mm 25] [--lens rational|fisheye]
-      [--only intrinsics|extrinsics] [--step-cm 2] [--max-vel 20]
+      [--only intrinsics|extrinsics] [--no-focus] [--step-cm 2] [--max-vel 20]
   uv run python -m lerobot.felix_jr.calibration.wrist_camera --refit --start-from <calibration.urdf> --out-dir <folder>
 
 The server must run with the wrist cameras (`server.server --left-wrist-camera ... --right-wrist-camera ...`). Without
 `--pattern` and `--square-mm` the terminal asks for the board: its inner corners (columns x rows: the corners where
-four squares meet, not the squares) and the size of one square in mm as printed (measure it: printers scale).
+four squares meet, one fewer each way than the squares: 9 x 7 squares are 8 x 6) and the size of one square in mm as
+printed (measure it: printers scale). A wrong count can still be "found", with a row on the paper's edge: the status
+line warns when the board looks like another count (`pattern_hint`).
 
-For each arm in `--arms` in turn (the other arm stays at rest), after one approval in the terminal, the arm goes to a
-start pose: the gripper tilted down as steeply as it reaches (70 deg on this robot: straight down is out of reach),
-about 18 cm above the table and 22 cm in front of the arm. A window shows its wrist
+After one approval in the terminal, both arms go to their start poses (the arms not calibrated too: out of the way of
+the board): the gripper tilted down as steeply as it reaches (70 deg on this robot: straight down is out of reach),
+about 18 cm above the table and 22 cm in front of the arm. They stay there until the end, when the robot goes to
+rest. Then for each arm in `--arms` in turn, a window shows its wrist
 camera; the keys move the arm (each a small move, the gripper's tip as the reference):
 
   arrow keys    move it over the table (root frame x and y) by --step-cm
   w / s         up / down
   [ / ]         tilt the gripper (pitch) by 10 deg
   , / .         turn it about its axis (roll) by 15 deg
+  n             camera pose: move the arm to the next suggested view (`POSE_VIEWS`) and take it
   space         take this view (the board must be found: its corners are drawn)
   u             drop the last view
   c             calibrate with the views so far, and go on
   q or Esc      stop (what is calibrated so far is written)
 
+0. **Focus.** First the window streams the camera with a sharpness score (`sharpness`: of the board where it is
+   found, else of the middle of the picture) and the best so far. Hold the board about 20 cm in front of the camera
+   (where the objects will be when grasping) and turn the lens until the score peaks: the board's corners are drawn
+   once it is sharp enough to be found. Enter, a click in the window or `c` accepts (`--no-focus` skips it).
 1. **Intrinsics.** Hold the board under the camera and move it: tilted every way, near and far, into the corners of
    the picture (the arm may move too). A view is taken by itself when the board is found in a pose unlike the ones
    kept (or with space); the corners of the picture covered so far are drawn. `c` fits the lens (OpenCV's rational
    model, or `--lens fisheye` for a lens wider than about 120 deg) once there are `MIN_INTRINSIC_VIEWS`.
-2. **Extrinsics.** Put the board flat on the table, where it stays, and press `c`. Then move the arm to see it from
-   different places and tilts (tilt and roll it: a view from straight above only, however many, leaves the camera's
-   pose undetermined) and take each with space. `c` fits, once there are `MIN_EXTRINSIC_VIEWS` spread over at least
+2. **Extrinsics.** Put the board flat on the table, where it stays, and press `c`. Then `n` again and again: the arm
+   moves to the next suggested view around the start pose (`POSE_VIEWS`: tilted, turned, shifted; views from one
+   direction only, however many, leave the camera's pose undetermined) and takes it if the board is in view; or move
+   the arm by keys and take a view with space. `c` fits, once there are `MIN_EXTRINSIC_VIEWS` spread over at least
    `MIN_SPREAD_DEG` about two axes, the camera's pose in `<arm>_gripper_link` and the board's on the table together
    (`cv2.calibrateRobotWorldHandEye`, then refined on the corners' pixels). The model's fingertips are then drawn on
    the live picture: they should sit on the real ones.
@@ -43,14 +52,19 @@ with no robot. The script runs inside a client session, so on Ctrl+C or a crash 
 
 import argparse
 import json
+import os
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-import cv2
-import numpy as np
+# OpenCL off for the whole process (not only this thread): on macOS its kernels fail with alarming but harmless errors
+os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
+
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
 
 from lerobot.felix_jr.calibration.live_view import decode_key
 from lerobot.felix_jr.calibration.xle_robot_model import (
@@ -63,7 +77,7 @@ from lerobot.felix_jr.calibration.xle_robot_model import (
     wrist_camera_link,
 )
 from lerobot.felix_jr.server.client import FelixClient, WristCapture
-from lerobot.felix_jr.server.protocol import DEFAULT_PORT
+from lerobot.felix_jr.server.protocol import DEFAULT_PORT, ServerError
 from lerobot.utils.import_utils import _scipy_available, require_package
 
 if TYPE_CHECKING or _scipy_available:
@@ -82,12 +96,33 @@ MIN_SPREAD_DEG = 15.0  # the views' turns must spread this far about two axes fo
 START_AHEAD_M = 0.22
 START_HEIGHTS_M = (0.12, 0.08, 0.04)
 START_PITCHES_DEG = (-90.0, -80.0, -70.0, -60.0, -50.0, -40.0)
-PITCH_STEP_DEG = 10.0
-ROLL_STEP_DEG = 15.0
-NEW_VIEW_PX = (
-    0.08  # a found board counts as a new view when it moved this much (of the picture's size) or ...
+# the suggested views for the camera's pose (`n`), from the start pose: (dx, dy, dz) m in the root frame (+x back
+# toward the robot), then the pitch's change (deg, + less steep: steeper is out of reach) and the roll (deg). Turns
+# about two axes (the pitch, the roll) and the pan the shifts in y bring, the board under the start pose kept in view
+POSE_VIEWS = (
+    (0.0, 0.0, 0.0, 0.0, 0.0),
+    (0.02, 0.0, 0.0, 10.0, 0.0),
+    (0.0, 0.03, 0.0, 0.0, 30.0),
+    (0.0, -0.03, 0.0, 0.0, -30.0),
+    (0.03, 0.0, 0.01, 20.0, 0.0),
+    (0.02, 0.02, 0.0, 10.0, 45.0),
+    (0.02, -0.02, 0.0, 10.0, -45.0),
+    (0.0, 0.02, 0.02, 0.0, 60.0),
+    (0.0, -0.02, 0.02, 0.0, -60.0),
+    (0.03, 0.03, 0.01, 20.0, 20.0),
+    (0.03, -0.03, 0.01, 20.0, -20.0),
+    (0.0, 0.0, 0.03, 5.0, 0.0),
 )
-NEW_VIEW_TILT = 0.15  # ... its apparent tilt changed this much from every view kept
+PITCH_STEP_DEG = 10.0
+MOVE_TOL_DEG = (
+    3.0  # a move ends once every joint is this close (the views use the measured joints, not the targets)
+)
+ROLL_STEP_DEG = 15.0
+# a found board counts as a new view when, against every view kept, it moved or resized this much (of the picture's
+# size), or its apparent tilt changed this much, or it turned this far in the picture
+NEW_VIEW_PX = 0.05
+NEW_VIEW_TILT = 0.08
+NEW_VIEW_TURN_DEG = 20.0
 KEY_ACTIONS = {
     ord("w"): "up_z",
     ord("s"): "down_z",
@@ -98,10 +133,20 @@ KEY_ACTIONS = {
     ord(" "): "take",
     ord("u"): "undo",
     ord("c"): "calibrate",
+    ord("n"): "next",
     ord("q"): "quit",
     27: "quit",
+    13: "accept",  # Enter
+    10: "accept",
 }
 FINGERTIP_COLORS = ((0, 255, 255), (255, 0, 255))  # RGB: the pinch point (fixed tip), the moving tip
+LAST_FRAME_FILE = (
+    "last_frame.png"  # the latest frame the board was not found in (to see why), every few seconds
+)
+LAST_FRAME_EVERY_S = 2.0
+SHARP_ENOUGH = (
+    100.0  # a sharpness (`sharpness`) above this reads as in focus; the out-of-focus lenses read ~2
+)
 
 
 # ---- the board ----------------------------------------------------------------------------------------------
@@ -115,6 +160,15 @@ class Board:
     rows: int
     square_m: float
 
+    @property
+    def symmetric(self) -> bool:
+        """Whether the board looks the same turned around: both counts even, or both odd.
+
+        Then which end its corners start from cannot be told from the picture (`find_board`), only from the arm's
+        motion (`orient_views`).
+        """
+        return self.cols % 2 == self.rows % 2
+
     def points(self) -> np.ndarray:
         """The inner corners in the board's frame (N, 3), row by row, z = 0: OpenCV's order."""
         grid = np.mgrid[0 : self.cols, 0 : self.rows].T.reshape(-1, 2)
@@ -122,14 +176,10 @@ class Board:
 
 
 def parse_pattern(text: str) -> tuple[int, int]:
-    """`"9x6"` -> (9, 6): inner corners, columns x rows; one odd and one even (`find_board`)."""
+    """`"9x6"` -> (9, 6): inner corners, columns x rows (one fewer each way than the squares)."""
     cols, rows = (int(v) for v in text.lower().replace(" ", "").split("x"))
     if cols < 3 or rows < 3:
         raise ValueError("a board needs at least 3 x 3 inner corners")
-    if cols % 2 == rows % 2:
-        raise ValueError(
-            f"{cols} x {rows}: one count odd and one even (e.g. 9 x 6), or the board looks the same turned around"
-        )
     return cols, rows
 
 
@@ -138,7 +188,8 @@ def find_board(image: np.ndarray, board: Board) -> np.ndarray | None:
 
     In OpenCV's order (row by row), started from the end whose outer square, diagonally past the first corner, is
     dark: the detector may start from either end, and a fixed board must keep one frame across the views (the
-    extrinsics). With one odd and one even count the two ends' outer squares differ in color (`parse_pattern`).
+    extrinsics). With one odd and one even count the two ends' outer squares differ in color; a symmetric board
+    (`Board.symmetric`) is left as found, and `orient_views` tells its ends apart from the arm's motion.
     """
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     found, corners = cv2.findChessboardCornersSB(
@@ -147,6 +198,8 @@ def find_board(image: np.ndarray, board: Board) -> np.ndarray | None:
     if not found:
         return None
     corners = corners.reshape(-1, 2).astype(np.float64)
+    if board.symmetric:  # both ends alike: left as found (`calibrate_extrinsics` sorts it out)
+        return corners
     first, last = _outer_brightness(gray, corners, board, 0), _outer_brightness(gray, corners, board, -1)
     if first is not None and last is not None:
         flip = first > last
@@ -157,6 +210,30 @@ def find_board(image: np.ndarray, board: Board) -> np.ndarray | None:
     else:
         flip = False
     return corners[::-1].copy() if flip else corners
+
+
+def pattern_hint(image: np.ndarray, board: Board) -> str | None:
+    """A warning when the board in `image` looks like another count of inner corners than `board`'s, else None.
+
+    Asked for one row or column too many, the detector can still "find" the board, with the extra row on the paper's
+    edge (wrist_cams2, 2026-11-07: an 8 x 6 board found as 9 x 6, every view 30-40 px off): so a board also found one
+    row or column smaller is suspect, and a board not found at all is tried one larger and smaller.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+
+    def found(cols: int, rows: int) -> bool:
+        return bool(cv2.findChessboardCornersSB(gray, (cols, rows), flags=cv2.CALIB_CB_NORMALIZE_IMAGE)[0])
+
+    smaller = [(board.cols - 1, board.rows), (board.cols, board.rows - 1)]
+    larger = [(board.cols + 1, board.rows), (board.cols, board.rows + 1)]
+    candidates = smaller if found(board.cols, board.rows) else smaller + larger
+    for cols, rows in candidates:
+        if min(cols, rows) >= 3 and found(cols, rows):
+            return (
+                f"the board looks like {cols} x {rows} inner corners, not {board.cols} x {board.rows} "
+                f"(count the squares, less one each way): restart with --pattern {cols}x{rows}"
+            )
+    return None
 
 
 def _outer_brightness(gray: np.ndarray, corners: np.ndarray, board: Board, end: int) -> float | None:
@@ -170,11 +247,28 @@ def _outer_brightness(gray: np.ndarray, corners: np.ndarray, board: Board, end: 
     return float(gray[int(v) - 1 : int(v) + 2, int(u) - 1 : int(u) + 2].mean())
 
 
-def view_signature(corners: np.ndarray, size: tuple[int, int], board: Board) -> np.ndarray:
-    """Where the board is in the picture, how big and how tilted: (center x, center y, scale, tilt x, tilt y).
+def sharpness(image: np.ndarray, corners: np.ndarray | None = None) -> float:
+    """How sharp an RGB image is: the variance of its Laplacian (higher is sharper).
 
-    Positions and scale as fractions of the picture; the tilts are how much the board's far rows / columns shrink
-    against its near ones (0 for a board square to the camera).
+    Over the board (`corners`' hull), else the middle half of the picture. It depends on the scene, so compare it
+    while turning the lens.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+    if corners is not None:
+        mask = np.zeros(gray.shape, np.uint8)
+        cv2.fillConvexPoly(mask, cv2.convexHull(corners.astype(np.int32)), 1)
+        return float(laplacian[mask > 0].var())
+    height, width = gray.shape
+    return float(laplacian[height // 4 : 3 * height // 4, width // 4 : 3 * width // 4].var())
+
+
+def view_signature(corners: np.ndarray, size: tuple[int, int], board: Board) -> np.ndarray:
+    """Where the board is in the picture, how big, how tilted and turned.
+
+    (center x, center y, scale, tilt x, tilt y, turn): positions and scale as fractions of the picture; the tilts are
+    how much the board's far rows / columns shrink against its near ones (0 for a board square to the camera); the turn
+    is the direction of its first row in the picture (deg; the corners' order fixes it, `find_board`).
     """
     width, height = size
     grid = corners.reshape(board.rows, board.cols, 2)
@@ -184,15 +278,21 @@ def view_signature(corners: np.ndarray, size: tuple[int, int], board: Board) -> 
     left, right = np.linalg.norm(grid[-1, 0] - grid[0, 0]), np.linalg.norm(grid[-1, -1] - grid[0, -1])
     tilt_x = (top - bottom) / max(top + bottom, 1e-9)
     tilt_y = (left - right) / max(left + right, 1e-9)
-    return np.array([center[0], center[1], scale, tilt_x, tilt_y])
+    row = grid[0, -1] - grid[0, 0]
+    turn = float(np.degrees(np.arctan2(row[1], row[0])))
+    return np.array([center[0], center[1], scale, tilt_x, tilt_y, turn])
 
 
 def is_new_view(signature: np.ndarray, kept: Sequence[np.ndarray]) -> bool:
-    """Whether a view differs from every kept one: moved or resized by `NEW_VIEW_PX`, or tilted by `NEW_VIEW_TILT`."""
+    """Whether a view differs from every kept one.
+
+    It does when it moved or resized by `NEW_VIEW_PX`, tilted by `NEW_VIEW_TILT` or turned by `NEW_VIEW_TURN_DEG`.
+    """
     for other in kept:
         moved = np.linalg.norm(signature[:3] - other[:3])
-        tilted = np.abs(signature[3:] - other[3:]).max()
-        if moved < NEW_VIEW_PX and tilted < NEW_VIEW_TILT:
+        tilted = np.abs(signature[3:5] - other[3:5]).max()
+        turned = abs((signature[5] - other[5] + 180.0) % 360.0 - 180.0)
+        if moved < NEW_VIEW_PX and tilted < NEW_VIEW_TILT and turned < NEW_VIEW_TURN_DEG:
             return False
     return True
 
@@ -298,7 +398,10 @@ def calibrate_extrinsics(
         raise ValueError(f"{len(views)} views: too few for the extrinsics")
     link = wrist_camera_link(arm)
     root_from_gripper = [model.frame_pose(link, model.joint_vector({arm: v.arm_pose})) for v in views]
-    camera_from_board = [board_pose(camera, np.asarray(v.corners), board) for v in views]
+    observed = [np.asarray(v.corners) for v in views]
+    if board.symmetric:
+        observed = orient_views(camera, observed, root_from_gripper, board)
+    camera_from_board = [board_pose(camera, corners, board) for corners in observed]
     gripper_from_root = [np.linalg.inv(p) for p in root_from_gripper]
     r_base2world, t_base2world, r_gripper2cam, t_gripper2cam = cv2.calibrateRobotWorldHandEye(
         [p[:3, :3] for p in camera_from_board],
@@ -313,7 +416,6 @@ def calibrate_extrinsics(
     start_gc, start_rb = np.linalg.inv(camera_from_gripper), np.linalg.inv(board_from_root)
 
     points = board.points()
-    observed = [np.asarray(v.corners) for v in views]
 
     def unpack(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         return _pose(x[:3], x[3:6]), _pose(x[6:9], x[9:12])
@@ -335,6 +437,32 @@ def calibrate_extrinsics(
     gripper_from_camera, root_from_board = unpack(result.x)
     errors = np.array([float(np.sqrt(np.mean(np.sum(r**2, axis=1)))) for r in per_view(result.x)])
     return gripper_from_camera, root_from_board, errors
+
+
+def orient_views(
+    camera: WristCamera, corners: Sequence[np.ndarray], root_from_gripper: Sequence[np.ndarray], board: Board
+) -> list[np.ndarray]:
+    """Each view's corners started from the same end of a symmetric board as the first view's.
+
+    The camera turns between two views as the gripper does (hand-eye: the same angle, about axes the camera's pose
+    relates), so of a view's two readings, as found and reversed, the right one turns from the first view by the
+    gripper's angle; the other is off by about 180 deg.
+    """
+
+    def angle(rotation: np.ndarray) -> float:
+        return float(np.degrees(np.arccos(np.clip((np.trace(rotation) - 1.0) / 2.0, -1.0, 1.0))))
+
+    first = board_pose(camera, corners[0], board)
+    out = [np.asarray(corners[0])]
+    for view, root_gripper in zip(corners[1:], root_from_gripper[1:], strict=True):
+        arm_turn = angle(root_from_gripper[0][:3, :3].T @ root_gripper[:3, :3])
+        readings = [np.asarray(view), np.asarray(view)[::-1].copy()]
+        errors = [
+            abs(angle(first[:3, :3] @ board_pose(camera, reading, board)[:3, :3].T) - arm_turn)
+            for reading in readings
+        ]
+        out.append(readings[int(np.argmin(errors))])
+    return out
 
 
 def _pose(rotvec: np.ndarray, translation: np.ndarray) -> np.ndarray:
@@ -379,6 +507,7 @@ class ArmRecord:
     arm_calibration: dict[str, Any]
     intrinsic_views: list[list[list[float]]] = field(default_factory=list)
     extrinsic_views: list[ArmView] = field(default_factory=list)
+    focus_sharpness: float | None = None  # the sharpness when the focus was accepted
 
     def save(self, directory: Path) -> None:
         """Write `<arm>_views.json` in `directory`."""
@@ -397,6 +526,7 @@ class ArmRecord:
             arm_calibration=data["arm_calibration"],
             intrinsic_views=data["intrinsic_views"],
             extrinsic_views=[ArmView(**v) for v in data["extrinsic_views"]],
+            focus_sharpness=data.get("focus_sharpness"),
         )
 
 
@@ -415,6 +545,10 @@ def fit_record(model: XleRobotModel, record: ArmRecord) -> tuple[WristCamera | N
         camera, lens_line = model.wrist_cameras.get(record.arm), "(the calibration's, not refitted)"
     if camera is None:
         return None, [*lines, "Too few views for the lens: not calibrated.", ""]
+    if record.focus_sharpness is not None:
+        lines.append(
+            f"- focus accepted at sharpness {record.focus_sharpness:.0f} (in focus above {SHARP_ENOUGH:.0f})"
+        )
     lines += [
         f"- lens: {camera.model}, {camera.width} x {camera.height}, fx {camera.fx:.1f} fy {camera.fy:.1f}, "
         f"center ({camera.ppx:.1f}, {camera.ppy:.1f}); RMS {camera.rms_px or 0:.2f} px over {camera.n_views} views "
@@ -511,8 +645,12 @@ class WristCameraSession:
         step_m: float = 0.02,
         max_vel: float = 20.0,
         only: str | None = None,
+        focus: bool = True,
     ):
-        """Set up the session; `only` is "intrinsics" or "extrinsics" (the latter needs the lens in `model`)."""
+        """Set up the session; `only` is "intrinsics" or "extrinsics" (the latter needs the lens in `model`).
+
+        With `focus`, it starts by streaming the camera for the lens to be focused (accepted with `accept`).
+        """
         self.client, self.model, self.arm, self.board, self.out_dir, self.show = (
             client,
             model,
@@ -527,10 +665,18 @@ class WristCameraSession:
         self.camera: WristCamera | None = model.wrist_cameras.get(arm) if only == "extrinsics" else None
         if only == "extrinsics" and self.camera is None:
             raise ValueError(f"no {arm} wrist camera lens in the calibration: calibrate the intrinsics first")
-        self.phase = "extrinsics" if only == "extrinsics" else "intrinsics"
+        self.first_phase = "extrinsics" if only == "extrinsics" else "intrinsics"
+        self.phase = "focus" if focus else self.first_phase
         self.only = only
+        self.sharpness = 0.0  # of the current frame
+        self.seen = ""  # what became of the board in the current frame (the status line says)
+        self.hint: str | None = None  # the board looks like another pattern (`pattern_hint`)
+        self.last_frame_saved = 0.0
+        self.best_sharpness = 0.0  # in the focus phase
         self.signatures: list[np.ndarray] = []
         self.board_fixed = False  # extrinsics: the person put the board down and pressed c
+        self.start_target: tuple[np.ndarray, float, float] | None = None  # the start pose (tip, pitch, roll)
+        self.next_view = 0  # into `POSE_VIEWS`
         self.target: tuple[np.ndarray, float, float] | None = (
             None  # the tip's position, pitch and roll asked for
         )
@@ -575,23 +721,28 @@ class WristCameraSession:
         if dry_run:
             return True
         target = dict(poses.joints[0]) | {"gripper.pos": current.get("gripper.pos", 0.0)}
-        status = self.client.move_joints({self.arm_id: target}, max_vel=self.max_vel)
+        # a few degrees short is fine: every view keeps the joints measured with it
+        status = self.client.move_joints({self.arm_id: target}, max_vel=self.max_vel, tol=MOVE_TOL_DEG)
         if status["state"] != "done":
             self.message = f"the move ended as {status['state']}: {status.get('reason', '')}"
             return False
         self.target = (np.asarray(position, dtype=np.float64), pitch, roll)
         return True
 
-    def start(self) -> bool:
-        """Move to the first start pose the arm reaches (the caller has the person approve it first)."""
+    def go_to_start(self) -> bool:
+        """Move to the first start pose the arm reaches (the caller has the person approve it first); no frame taken."""
         for position, pitch, roll in self.start_poses():
             if self.move_to(position, pitch, roll, dry_run=True):
-                ok = self.move_to(position, pitch, roll)
-                self.refresh()
-                return ok
+                self.start_target = (position, pitch, roll)
+                return self.move_to(position, pitch, roll)
         self.message = "no start pose in reach"
-        self.refresh()
         return False
+
+    def start(self) -> bool:
+        """Move to the start pose (`go_to_start`; nothing moves if the arm is there already) and show the camera."""
+        ok = self.go_to_start()
+        self.refresh()
+        return ok
 
     def jog(self, action: str) -> None:
         """One key's small move from the pose last asked for."""
@@ -618,15 +769,42 @@ class WristCameraSession:
 
     def refresh(self) -> None:
         """Take a new wrist frame, find the board in it, keep it as a view if it is a new one (intrinsics), show it."""
-        self.frame = self.client.wrist_capture(self.arm)
+        try:
+            self.frame = self.client.wrist_capture(self.arm)
+        except ServerError as e:  # e.g. the camera dropped for a moment: the server reopens it
+            self.message = f"no frame from the camera ({e}); retrying"
+            self.corners = None
+            if self.frame is not None:
+                self.render()
+            return
         height, width = self.frame.color.shape[:2]
         if self.record.size == (0, 0):
             self.record.size = (width, height)
         self.corners = find_board(self.frame.color, self.board)
+        self.sharpness = sharpness(self.frame.color, self.corners)
+        if self.phase == "focus":
+            self.best_sharpness = max(self.best_sharpness, self.sharpness)
+            self.hint = pattern_hint(self.frame.color, self.board)
+        if self.corners is None:
+            n = self.board.cols * self.board.rows
+            self.seen = f"board NOT found (all {n} inner corners must show; frame saved as {LAST_FRAME_FILE})"
+            if time.time() - self.last_frame_saved > LAST_FRAME_EVERY_S:
+                cv2.imwrite(
+                    str(self.out_dir / LAST_FRAME_FILE), cv2.cvtColor(self.frame.color, cv2.COLOR_RGB2BGR)
+                )
+                self.last_frame_saved = time.time()
+        else:
+            self.seen = "board found"
         if self.phase == "intrinsics" and self.corners is not None:
             signature = view_signature(self.corners, self.record.size, self.board)
             if is_new_view(signature, self.signatures):
-                self._keep_intrinsic(signature)
+                self.hint = pattern_hint(self.frame.color, self.board)
+                if self.hint is None:
+                    self._keep_intrinsic(signature)
+                else:
+                    self.seen = "not kept: the pattern looks wrong"
+            else:
+                self.seen = "board found, like a kept view: tilt, turn or move it (space keeps it)"
         self.render()
 
     def _keep_intrinsic(self, signature: np.ndarray) -> None:
@@ -643,29 +821,49 @@ class WristCameraSession:
 
     def status(self) -> list[str]:
         """The status lines drawn on the picture."""
-        if self.phase == "intrinsics":
+        if self.phase == "focus":
+            verdict = "in focus" if self.sharpness >= SHARP_ENOUGH else "blurred"
+            lines = [
+                f"{self.arm} FOCUS: hold the board ~20 cm away, turn the lens until the number peaks",
+                f"sharpness {self.sharpness:.0f} ({verdict}; best {self.best_sharpness:.0f})"
+                + (" | board found" if self.corners is not None else "")
+                + " | Enter or click: accept",
+            ]
+        elif self.phase == "intrinsics":
             n = len(self.record.intrinsic_views)
             lines = [
-                f"{self.arm} INTRINSICS: move the board (or the arm) for new views: {n} kept"
-                + (" | c: fit" if n >= MIN_INTRINSIC_VIEWS else f" (c from {MIN_INTRINSIC_VIEWS})"),
+                f"{self.arm} LENS: tilt, turn, raise the board for new views (space: keep this one): "
+                f"{n} of {MIN_INTRINSIC_VIEWS} kept",
             ]
+            if n >= MIN_INTRINSIC_VIEWS:
+                lines.append(
+                    "ENOUGH: c fits the lens; next, the board goes flat on the table (more views first: fine)"
+                )
         elif self.phase == "extrinsics" and not self.board_fixed:
-            lines = [f"{self.arm} EXTRINSICS: put the board flat on the table, where it stays; then c"]
+            lines = [
+                f"{self.arm} CAMERA POSE: lay the board flat on the table under the camera (its corners drawn here),",
+                "where it stays from now on; then c.",
+            ]
         elif self.phase == "extrinsics":
             n = len(self.record.extrinsic_views)
             spread = self.spread()
             lines = [
-                f"{self.arm} EXTRINSICS: space takes a view: {n} | turns {spread[0]:.0f} / {spread[1]:.0f} deg"
-                + (
-                    " | c: fit"
-                    if self.can_fit_extrinsics()
-                    else f" (c from {MIN_EXTRINSIC_VIEWS}, {MIN_SPREAD_DEG:.0f} deg x2)"
-                ),
+                f"{self.arm} CAMERA POSE: the board stays put; the arm looks at it from several poses",
+                f"n: the arm moves to suggested view {min(self.next_view + 1, len(POSE_VIEWS))} of {len(POSE_VIEWS)} "
+                "and takes it | space: take this view (after moving the arm by keys)",
+                f"{n} of {MIN_EXTRINSIC_VIEWS} views; turns {spread[0]:.0f} and {spread[1]:.0f} deg "
+                f"(need {MIN_SPREAD_DEG:.0f} each)",
             ]
+            if self.can_fit_extrinsics():
+                lines.append("ENOUGH: c fits the camera's pose (more views first: fine)")
         else:
             lines = [
                 f"{self.arm} CHECK: the drawn fingertips should sit on the real ones | c: done, u: more views"
             ]
+        if self.hint:
+            lines.append(self.hint)
+        if self.seen and self.phase != "focus":
+            lines.append(self.seen)
         lines.append("arrows / w s: move | [ ]: pitch | , .: roll | u: undo | q: quit")
         if self.message:
             lines.append(self.message)
@@ -752,7 +950,7 @@ class WristCameraSession:
                 else:
                     self.phase = "extrinsics"
         elif self.phase == "extrinsics" and not self.board_fixed:
-            self.board_fixed, self.message = True, "board down: move the arm, space for each view"
+            self.board_fixed, self.message = True, "board down: n for the first suggested view"
         elif self.phase == "extrinsics":
             if not self.can_fit_extrinsics():
                 self.message = (
@@ -778,11 +976,52 @@ class WristCameraSession:
             self.done = True
         self.render()
 
+    def accept_focus(self) -> None:
+        """Enter / a click in the focus phase: keep the lens as it is and go on to the views."""
+        if self.phase == "focus":
+            self.record.focus_sharpness = self.sharpness
+            self.record.save(self.out_dir)
+            self.phase = self.first_phase
+            self.message = f"focus accepted at sharpness {self.sharpness:.0f}"
+            self.refresh()  # the board in view now: the first view
+            return
+        self.render()
+
+    def suggested_view(self) -> None:
+        """`n`: move the arm to the next of `POSE_VIEWS` and take the view if the board is found there."""
+        if self.phase != "extrinsics" or not self.board_fixed or self.start_target is None:
+            self.message = "n moves the arm to suggested views once the board lies on the table (c)"
+            self.render()
+            return
+        while self.next_view < len(POSE_VIEWS):
+            dx, dy, dz, dpitch, roll = POSE_VIEWS[self.next_view]
+            self.next_view += 1
+            position, pitch, _ = self.start_target
+            if self.move_to(position + [dx, dy, dz], pitch + dpitch, roll):
+                break
+            # out of reach: try the next one
+        else:
+            self.message = "no more suggested views: move the arm by keys and take views with space, or c"
+            self.render()
+            return
+        self.refresh()
+        if self.corners is None:
+            self.message = (
+                "the board is not (all) in view here: move the arm by keys, then space; or n to skip"
+            )
+            self.render()
+            return
+        self.take()
+
     def handle(self, action: str) -> bool:
         """Do one action from `decode_key`. Returns False when the person quits."""
         if action == "quit":
             return False
-        if action == "take":
+        if action == "accept" or (action == "calibrate" and self.phase == "focus"):
+            self.accept_focus()
+        elif action == "next":
+            self.suggested_view()
+        elif action == "take":
             self.take()
         elif action == "undo":
             self.undo()
@@ -852,6 +1091,9 @@ def main() -> None:
         choices=("intrinsics", "extrinsics"),
         help="one step (extrinsics: the lens from --start-from)",
     )
+    parser.add_argument(
+        "--no-focus", action="store_true", help="skip the focus step (the lenses are focused)"
+    )
     parser.add_argument("--step-cm", type=float, default=2.0, help="each key's move, cm (2)")
     parser.add_argument("--max-vel", type=float, default=20.0, help="arm speed limit, deg/s (20)")
     parser.add_argument("--refit", action="store_true", help="no robot: fit --out-dir's saved views again")
@@ -875,6 +1117,12 @@ def main() -> None:
     def show(image: np.ndarray) -> None:
         cv2.imshow(window, cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
 
+    clicks: list[int] = []
+
+    def on_mouse(event: int, *_: Any) -> None:
+        if event == cv2.EVENT_LBUTTONDOWN:
+            clicks.append(1)
+
     records: list[ArmRecord] = []
     with FelixClient(args.endpoint, timeout_s=20.0) as client, client.session():
         model.check_robot(client)
@@ -884,8 +1132,9 @@ def main() -> None:
                 f"the server has no {', '.join(sorted(missing))} wrist camera: start it with --<arm>-wrist-camera"
             )
         try:
-            for arm in arms:
-                session = WristCameraSession(
+            # every arm goes to its start pose first, the ones not calibrated too: out of the way of the board
+            sessions = {
+                arm: WristCameraSession(
                     client,
                     model,
                     arm,
@@ -896,24 +1145,36 @@ def main() -> None:
                     args.step_cm / 100,
                     args.max_vel,
                     args.only,
+                    focus=not args.no_focus,
                 )
-                answer = input(
-                    f"the {arm} arm goes to its start pose (gripper down, ~30 cm over the table): go? [y/N] "
-                )
-                if answer.strip().lower() != "y":
-                    break
+                for arm in ARMS
+            }
+            answer = input(
+                "both arms go to their start poses (grippers tilted down, ~18 cm over the table, in front of each "
+                "arm): go? [y/N] "
+            )
+            if answer.strip().lower() == "y":
+                for arm, session in sessions.items():
+                    if not session.go_to_start():
+                        raise SystemExit(f"the {arm} arm did not reach its start pose: {session.message}")
+            else:
+                arms = []
+            for arm in arms:
+                session = sessions[arm]
                 session.start()
+                cv2.setMouseCallback(window, on_mouse)
                 keep_going = True
                 while keep_going and not session.done:
                     key = cv2.waitKeyEx(30)
-                    action = decode_key(key, KEY_ACTIONS)
+                    action = "accept" if clicks and session.phase == "focus" else decode_key(key, KEY_ACTIONS)
+                    clicks.clear()
                     if action is None:
                         session.refresh()
                         continue
                     keep_going = session.handle(action)
                 records.append(session.record)
-                model = session.model
-                client.home(arms=[f"{arm}_arm"])
+                for other in sessions.values():  # the next arm's model has this arm's camera
+                    other.model = session.model
                 if not keep_going:
                     break
         finally:

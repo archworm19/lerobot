@@ -264,6 +264,9 @@ The wrist cameras (plain USB / UVC boards, one per arm, plugged into the Pi) are
 (intrinsics) and their pose on the gripper (extrinsics) go into the calibration, so a wrist picture can be measured in
 the jaws' frame (`object_grasping.md`, section 6).
 
+0. **Let your user read the cameras** (once per Pi): `groups` must list `video`; if not,
+   `sudo usermod -aG video $USER`, then log in again (or reboot, if the server runs as a service). Without it a
+   camera is found but does not open. (The RealSense works without it: librealsense reaches it over USB directly.)
 1. **Find which camera is which arm's** (once, and again if a camera moves to another USB port): on the Pi, with
    the server stopped, `uv run python -m lerobot.felix_jr.setup.find_wrist_cameras` (`--arms right` for one;
    `--snapshot-dir ~/wrist_check` keeps a test frame from each to look at). For each arm it asks you to unplug that
@@ -273,9 +276,11 @@ the jaws' frame (`object_grasping.md`, section 6).
 2. **Server:** started as usual, it opens the saved wrist cameras (640 x 480 MJPG at 30 fps); a saved camera that is
    unplugged is left out with a warning. `--left-wrist-camera` / `--right-wrist-camera <device>` override,
    `--no-wrist-cameras` skips them.
-3. **The board:** print a checkerboard with one odd and one even count of inner corners (the corners where four
-   squares meet, e.g. 9 x 6: with both odd or both even it looks the same turned around, and the script refuses it).
-   Tape it flat on something stiff and measure one square (printers scale).
+3. **The board:** a printed checkerboard, taped flat on something stiff. Count its inner corners, the corners where
+   four squares meet: one fewer each way than the squares (9 x 7 squares are 8 x 6), and measure one square
+   (printers scale). Asked for a wrong count, the detector can still "find" the board with a row on the paper's edge,
+   so the status line warns when the board looks like another count. Any count works; with one odd and one even
+   (e.g. 9 x 6) the board's two ends look different, otherwise the script tells them apart from the arm's motion.
 4. **On your computer, with the workspace clear:**
    `uv run python -m lerobot.felix_jr.calibration.wrist_camera tcp://<pi>:5555 --start-from <calibration.urdf>
    --out-dir <a scratch folder>` (`--arms right` for one arm; `--pattern 9x6 --square-mm 25` to skip the
@@ -283,10 +288,21 @@ the jaws' frame (`object_grasping.md`, section 6).
    the arm goes to a start pose (the gripper tilted 70 deg down, about 18 cm over the table) and a window shows its
    wrist camera. Keys: arrows, `w` / `s` move the arm; `[` / `]` tilt it; `,` / `.` turn it about its axis;
    space takes a view; `u` drops the last one; `c` goes on; `q` stops.
-   - **The lens:** hold the board under the camera and move it, tilted every way, near and far, into the picture's
-     corners. Views are kept by themselves; `c` once there are 12 (the RMS error should be well under 1 px).
-   - **The pose:** put the board flat on the table where it stays, `c`; then move the arm to see it from different
-     places, tilted and turned (both!), space for each view; `c` once there are 8 turned 15 deg about two axes.
+   - **The focus:** the window streams the camera with a sharpness score and the best so far. Hold the board about
+     20 cm in front of the camera and turn the lens (it screws in and out of its holder) until the score peaks:
+     "in focus" from about 100 (out-of-focus lenses read ~2), and the board's corners are drawn once it is found.
+     Enter or a click in the window accepts (`--no-focus` skips this, once the lenses are focused).
+   - **The lens:** pick the board up and hold it in front of the camera, at 20-40 cm, tilted 20-45 deg every way
+     (toward each side, top and bottom), turned, and into each part of the picture. A view is kept by itself when the
+     board is found in a pose unlike the kept ones (moved, resized, tilted or turned); space keeps one anyway. Views
+     of the board flat on the table differ only in where it is: they leave the focal length trading off with the
+     distance, and the camera's pose then comes out a few mm off along its axis. `c` once there are 12 (the RMS error
+     should be well under 1 px).
+   - **The camera's pose:** lay the board flat on the table under the camera (its corners drawn), where it stays
+     from now on, and press `c`. Then `n`, again and again: each moves the arm to the next of 12 suggested views
+     around the start pose (tilted, turned, shifted) and takes it if the board is in view (if not, move the arm by
+     the keys and press space, or `n` to skip). The status line counts the views and how far they turn; `c` once it
+     says ENOUGH (8 views turned 15 deg about two axes).
    - **The check:** the model's fingertips are drawn on the live picture (cyan the fixed tip, magenta the moving
      one): they should sit on the real ones. `c` to finish the arm (`u` for more views).
 5. It writes `calibration.urdf` (the start with the wrist cameras) and `wrist_cameras.md` (the lens, the pose, the

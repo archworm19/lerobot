@@ -31,6 +31,7 @@ DEFAULT_LIBREALSENSE_BUILD = "/home/zcecere/CodeRepository/librealsense/build"
 # A frame is only trusted to show the scene after a move once it arrived this long (seconds) after the move
 # finished: the camera's exposure and the USB transfer both lag the frame's arrival time.
 FRAME_LATENCY_S = 0.1
+REOPEN_AFTER_S = 1.0  # a wrist camera that gives no frame this long is reopened (`UsbCamera`)
 
 
 @dataclass
@@ -507,22 +508,20 @@ class UsbCamera:
     fit on the Pi's USB); it may give another size: `size` is what it gives.
     """
 
-    def __init__(self, device: str | int, width: int = 640, height: int = 480, fps: int = 30):
+    def __init__(
+        self,
+        device: str | int,
+        width: int = 640,
+        height: int = 480,
+        fps: int = 30,
+        open_timeout_s: float = 5.0,
+    ):
         """Open the camera and start reading; raises RuntimeError if it does not open or give a frame."""
-        import cv2
-
-        index = video_index(device)
-        # OpenCV's V4L2 backend opens a device by its number, not by a link to it ("can't be used to capture by name")
-        self._capture = (
-            cv2.VideoCapture(index, cv2.CAP_V4L2) if isinstance(device, str) else cv2.VideoCapture(index)
-        )
-        if not self._capture.isOpened():
-            raise RuntimeError(f"wrist camera {device!r} (video{index}) does not open")
-        self._capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        self._capture.set(cv2.CAP_PROP_FPS, fps)
         self.device = device
+        self._settings = (width, height, fps)
+        self._open_timeout_s = open_timeout_s
+        self._capture = self._open()
+        self.reopened = 0  # times the camera was reopened after its frames stopped
         self._lock = threading.Lock()
         self._latest: tuple[np.ndarray, float] | None = None
         self._stop = threading.Event()
@@ -530,17 +529,61 @@ class UsbCamera:
         self._thread.start()
         self.get(wait_s=10.0)  # warm up
 
-    def _run(self) -> None:
+    def _open(self) -> Any:
+        """Open the device (by its current /dev/videoN: after a USB drop it may come back with another number)."""
         import cv2
 
+        index = video_index(self.device)
+        # OpenCV's V4L2 backend opens a device by its number, not by a link to it ("can't be used to capture by name")
+        deadline = time.time() + self._open_timeout_s  # a camera just plugged in takes a moment to be ready
+        while True:
+            capture = (
+                cv2.VideoCapture(index, cv2.CAP_V4L2)
+                if isinstance(self.device, str)
+                else cv2.VideoCapture(index)
+            )
+            if capture.isOpened():
+                break
+            capture.release()
+            if time.time() > deadline:
+                raise RuntimeError(
+                    f"wrist camera {self.device!r} (/dev/video{index}) does not open: is another program using it "
+                    f"(`fuser /dev/video{index}`; a server running?), and may this user read it (in the `video` "
+                    f"group: `ls -l /dev/video{index}`, `groups`)?"
+                )
+            time.sleep(0.5)
+        width, height, fps = self._settings
+        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        capture.set(cv2.CAP_PROP_FPS, fps)
+        return capture
+
+    def _run(self) -> None:
+        """Read frames; if none come for `REOPEN_AFTER_S` (a USB drop, the cable tugged), reopen the camera."""
+        import cv2
+
+        last_frame = time.time()
         while not self._stop.is_set():
             ok, bgr = self._capture.read()
             if ok:
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                last_frame = time.time()
                 with self._lock:
-                    self._latest = (rgb, time.time())
-            else:
+                    self._latest = (rgb, last_frame)
+                continue
+            if time.time() - last_frame < REOPEN_AFTER_S:
                 time.sleep(0.01)
+                continue
+            log.warning("wrist camera %s: no frame for %.0f s, reopening it", self.device, REOPEN_AFTER_S)
+            with contextlib.suppress(Exception):
+                self._capture.release()
+            try:
+                self._capture = self._open()
+                self.reopened += 1
+            except (RuntimeError, ValueError) as e:  # still gone (unplugged?): keep trying
+                log.warning("wrist camera %s: %s", self.device, e)
+            last_frame = time.time()
 
     def get(self, after: float | None = None, wait_s: float = 5.0) -> tuple[np.ndarray, float]:
         """The newest (RGB frame, arrival time); with `after`, one that arrived `FRAME_LATENCY_S` after it."""
