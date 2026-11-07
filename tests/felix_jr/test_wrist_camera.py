@@ -19,6 +19,8 @@ from lerobot.felix_jr.calibration.wrist_camera import (  # noqa: E402
     find_board,
     fingertips_in_wrist_image,
     is_new_view,
+    lens_coverage_missing,
+    lens_settled,
     parse_pattern,
     pattern_hint,
     rotation_spread,
@@ -315,3 +317,46 @@ def test_a_wrong_pattern_is_named():
     hint = pattern_hint(image, Board(9, 6, 0.018))
     assert hint is not None and "8 x 6" in hint and "--pattern 8x6" in hint
     assert pattern_hint(image, BOARD_8X6) is None
+
+
+def test_flat_views_at_one_distance_are_not_enough_for_the_lens():
+    """wrist_cams5 (2026-11-07): 47 views of the board flat on the table left the focal length free."""
+
+    def signature(rotvec, center):
+        pose = _pose(rotvec, center)
+        corners = TRUE_CAMERA.project((BOARD.points() - [0.07, 0.045, 0]) @ pose[:3, :3].T + pose[:3, 3])
+        return view_signature(corners, (640, 480), BOARD)
+
+    flat = [signature([0, 0, a], [x, 0.0, 0.3]) for a, x in [(0, 0), (0.5, 0.02), (1.0, -0.02), (2.0, 0.01)]]
+    assert set(lens_coverage_missing(flat)) == {
+        "with its top edge nearer",
+        "with its bottom edge nearer",
+        "with its left edge nearer",
+        "with its right edge nearer",
+        "nearer and farther",
+    }
+    tilted = flat + [
+        signature(r, c)
+        for r, c in [
+            ([0.7, 0, 0], [0, 0, 0.2]),
+            ([-0.7, 0, 0], [0, 0, 0.2]),
+            ([0, 0.7, 0], [0, 0, 0.4]),
+            ([0, -0.7, 0], [0, 0, 0.4]),
+        ]
+    ]
+    assert lens_coverage_missing(tilted) == []
+
+
+def test_the_lens_is_settled_by_varied_views_and_not_by_flat_ones():
+    good = synthetic_views(16)
+    focal, spread = lens_settled(good, BOARD, (640, 480))
+    assert focal == pytest.approx(401.0, rel=0.02) and spread < 0.03
+    rng = np.random.default_rng(2)
+    flat = []
+    for _ in range(16):  # the board flat to the camera at one distance, moved and turned about (wrist_cams5)
+        pose = _pose([0.0, 0.0, rng.uniform(-3, 3)], [rng.uniform(-0.06, 0.0), rng.uniform(-0.05, 0.0), 0.3])
+        flat.append(
+            TRUE_CAMERA.project(BOARD.points() @ pose[:3, :3].T + pose[:3, 3]) + rng.normal(0, 0.2, (54, 2))
+        )
+    _, flat_spread = lens_settled(flat, BOARD, (640, 480))
+    assert flat_spread > 0.03

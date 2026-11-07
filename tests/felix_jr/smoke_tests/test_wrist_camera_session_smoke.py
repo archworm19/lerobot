@@ -24,6 +24,7 @@ from test_wrist_camera import (
 from lerobot.felix_jr.calibration.wrist_camera import (  # noqa: E402
     POSE_VIEWS,
     WristCameraSession,
+    lens_coverage_missing,
     refit,
     write,
 )
@@ -92,14 +93,14 @@ def test_a_session_calibrates_the_lens_and_the_pose_by_keys(robot, model, tmp_pa
         # intrinsics: the person holds the board in front of the camera, tilted, turned and moved about; each new
         # pose found is kept by itself
         rng = np.random.default_rng(3)
-        for _ in range(60):
+        for _ in range(150):
             turn = rng.uniform([-0.6, -0.6, -0.8], [0.6, 0.6, 0.8])
             center = rng.uniform([-0.06, -0.04, 0.22], [0.06, 0.04, 0.38])
             pose = _pose(turn, center)
             pose[:3, 3] -= pose[:3, :3] @ [4 * BOARD.square_m, 2.5 * BOARD.square_m, 0.0]  # centered there
             held["camera_from_board"] = pose
             session.refresh()
-            if len(session.record.intrinsic_views) >= 12:
+            if len(session.record.intrinsic_views) >= 12 and not lens_coverage_missing(session.signatures):
                 break
         held["camera_from_board"] = None  # put down flat on the table
         assert len(session.record.intrinsic_views) >= 12
@@ -126,6 +127,10 @@ def test_a_session_calibrates_the_lens_and_the_pose_by_keys(robot, model, tmp_pa
     assert written.gripper_from_camera is not None and (out / "wrist_cameras.md").is_file()
     assert (out / "right_views.json").is_file() and any((out / "images").iterdir())
     assert shown and shown[-1].shape == (480, 640, 3)
+    # --resume keeps the saved views
+    resumed = WristCameraSession(client, start, "right", BOARD, out, shown.append, resume=True)
+    assert len(resumed.record.intrinsic_views) == len(session.record.intrinsic_views)
+    assert len(resumed.signatures) == len(resumed.record.intrinsic_views) and "resumed" in resumed.message
     # the saved views refit with no robot to the same camera
     start_path = tmp_path / "start.urdf"
     start.save(start_path)

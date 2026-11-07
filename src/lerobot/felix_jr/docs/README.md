@@ -296,8 +296,10 @@ the jaws' frame (`object_grasping.md`, section 6).
      (toward each side, top and bottom), turned, and into each part of the picture. A view is kept by itself when the
      board is found in a pose unlike the kept ones (moved, resized, tilted or turned); space keeps one anyway. Views
      of the board flat on the table differ only in where it is: they leave the focal length trading off with the
-     distance, and the camera's pose then comes out a few mm off along its axis. `c` once there are 12 (the RMS error
-     should be well under 1 px).
+     distance (wrist_cams5: anywhere from 314 to 3700 px). The status line suggests what would help. `c` once there are
+     12: the lens is fitted on random halves of the views first and accepted when they agree within 3% (they did at
+     1.9% for views held up in a cramped workspace); if not, it says so and wants more views.
+   - **Resuming:** the views are saved as they are taken; `--resume` (same `--out-dir`) keeps them and adds to them.
    - **The camera's pose:** lay the board flat on the table under the camera (its corners drawn), where it stays
      from now on, and press `c`. Then `n`, again and again: each moves the arm to the next of 12 suggested views
      around the start pose (tilted, turned, shifted) and takes it if the board is in view (if not, move the arm by

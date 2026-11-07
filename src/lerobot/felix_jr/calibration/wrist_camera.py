@@ -88,6 +88,17 @@ ARMS = ("left", "right")
 CALIBRATION_FILE = "calibration.urdf"
 REPORT_FILE = "wrist_cameras.md"
 MIN_INTRINSIC_VIEWS = 12
+# the lens views should include the board tilted toward each side (its far side shrunk by this much) and
+# at different distances (`LENS_SCALE_RATIO`), shown as guidance; what decides is `lens_settled`. Flat views at one
+# distance leave the focal length
+# trading off with the distance (wrist_cams5, 2026-11-07: 47 flat views, fx anywhere from 314 to 3733)
+LENS_TILT = 0.07  # ~20-25 deg for a 25 x 17 cm board at 25-35 cm (flat views read under 0.05)
+LENS_SCALE_RATIO = 1.3  # the nearest view's board at least this much bigger than the farthest's (flat: 1.09)
+LENS_SETTLED = (
+    0.03  # the lens is accepted when its focal length, fitted on random halves of the views, agrees this well
+)
+LENS_SPLITS = 12  # how many random halves (`lens_settled`)
+FOCAL_RANGE = (0.2, 3.0)  # a focal length (px) outside this range times the picture's width is refused
 MIN_EXTRINSIC_VIEWS = 8
 MIN_SPREAD_DEG = 15.0  # the views' turns must spread this far about two axes for the extrinsics
 # the start pose: the gripper's tip this far in front of the arm's base, the first of these heights above the base
@@ -298,6 +309,48 @@ def is_new_view(signature: np.ndarray, kept: Sequence[np.ndarray]) -> bool:
 
 
 # ---- the fits ------------------------------------------------------------------------------------------------
+
+
+def lens_coverage_missing(signatures: Sequence[np.ndarray]) -> list[str]:
+    """What the lens views still lack (`LENS_TILT`, `LENS_SCALE_RATIO`), in words; empty when they have it all."""
+    if not signatures:
+        return ["views"]
+    sigs = np.asarray(signatures)
+    missing = [
+        name
+        for name, column, sign in (
+            # the board's edge nearer the camera (it looks longer), as seen in the window
+            ("with its top edge nearer", 3, 1.0),
+            ("with its bottom edge nearer", 3, -1.0),
+            ("with its left edge nearer", 4, 1.0),
+            ("with its right edge nearer", 4, -1.0),
+        )
+        if not (sign * sigs[:, column] > LENS_TILT).any()
+    ]
+    if sigs[:, 2].max() < LENS_SCALE_RATIO * sigs[:, 2].min():
+        missing.append("nearer and farther")
+    return missing
+
+
+def lens_settled(
+    views: Sequence[np.ndarray], board: Board, size: tuple[int, int], seed: int = 0
+) -> tuple[float, float]:
+    """How well the views pin the focal length down: its mean and its spread (relative) over fits on random halves.
+
+    Views that do not constrain it (wrist_cams5: flat, at one distance) give halves that disagree; good views agree
+    within a few percent (wrist_cams6, held up in a cramped workspace: 342 +- 2.4%). Plain 5-coefficient fits, quick.
+    """
+    rng = np.random.default_rng(seed)
+    objects = board.points().astype(np.float32).reshape(-1, 1, 3)
+    images = [np.asarray(v, np.float32).reshape(-1, 1, 2) for v in views]
+    focal = []
+    for _ in range(LENS_SPLITS):
+        half = rng.choice(len(images), size=max(len(images) // 2, 3), replace=False)
+        _, matrix, *_ = cv2.calibrateCamera(
+            [objects] * len(half), [images[i] for i in half], size, None, None
+        )
+        focal.append(0.5 * (matrix[0, 0] + matrix[1, 1]))
+    return float(np.mean(focal)), float(np.std(focal) / np.mean(focal))
 
 
 def calibrate_intrinsics(
@@ -584,13 +637,19 @@ def fit_record(model: XleRobotModel, record: ArmRecord) -> tuple[WristCamera | N
     return camera, [*lines, ""]
 
 
-def refit(start_from: Path, out_dir: Path) -> Path | None:
-    """Fit every `<arm>_views.json` in `out_dir` again, with no robot; write the calibration and the report."""
+def refit(start_from: Path, out_dir: Path, square_m: float | None = None) -> Path | None:
+    """Fit every `<arm>_views.json` in `out_dir` again, with no robot; write the calibration and the report.
+
+    `square_m` replaces the square size the views were taken with (measured again: a printer may scale the page). The
+    lens does not depend on it; the camera's distance to the board, and so its pose, scale with it.
+    """
     model = XleRobotModel.load(start_from)
     report = ["# Wrist cameras (refitted from the saved views)", ""]
     fitted = False
     for path in sorted(out_dir.glob("*_views.json")):
         record = ArmRecord.load(path)
+        if square_m is not None:
+            record.board = replace(record.board, square_m=square_m)
         if (
             record.arm in model.arm_calibration
             and model.arm_calibration[record.arm] != record.arm_calibration
@@ -646,10 +705,12 @@ class WristCameraSession:
         max_vel: float = 20.0,
         only: str | None = None,
         focus: bool = True,
+        resume: bool = False,
     ):
         """Set up the session; `only` is "intrinsics" or "extrinsics" (the latter needs the lens in `model`).
 
-        With `focus`, it starts by streaming the camera for the lens to be focused (accepted with `accept`).
+        With `focus`, it starts by streaming the camera for the lens to be focused (accepted with `accept`). With
+        `resume`, the views saved in `out_dir` for this arm (`<arm>_views.json`) are kept and added to.
         """
         self.client, self.model, self.arm, self.board, self.out_dir, self.show = (
             client,
@@ -685,6 +746,14 @@ class WristCameraSession:
         self.message = ""
         self.done = False
         (out_dir / "images").mkdir(parents=True, exist_ok=True)
+        saved = out_dir / f"{arm}_views.json"
+        if resume and saved.is_file():
+            old = ArmRecord.load(saved)
+            if old.board != board or old.arm_calibration != self.record.arm_calibration:
+                raise ValueError(f"{saved} was taken with another board or arm calibration: a new --out-dir")
+            self.record = old
+            self.signatures = [view_signature(np.asarray(v), old.size, board) for v in old.intrinsic_views]
+            self.message = f"resumed: {len(old.intrinsic_views)} lens views, {len(old.extrinsic_views)} pose views (c fits)"
 
     # ---- moving -----------------------------------------------------------------------------------------------
 
@@ -835,9 +904,12 @@ class WristCameraSession:
                 f"{self.arm} LENS: tilt, turn, raise the board for new views (space: keep this one): "
                 f"{n} of {MIN_INTRINSIC_VIEWS} kept",
             ]
+            missing = lens_coverage_missing(self.signatures)
+            if missing:
+                lines.append(f"would help: the board {'; '.join(missing)} (held up, tilted)")
             if n >= MIN_INTRINSIC_VIEWS:
                 lines.append(
-                    "ENOUGH: c fits the lens; next, the board goes flat on the table (more views first: fine)"
+                    "c: fit the lens (if the views pin it down; then the board goes flat on the table)"
                 )
         elif self.phase == "extrinsics" and not self.board_fixed:
             lines = [
@@ -937,14 +1009,31 @@ class WristCameraSession:
     def calibrate(self) -> None:
         """`c`: fit this phase and go on (intrinsics -> extrinsics -> check -> done)."""
         if self.phase == "intrinsics":
-            if len(self.record.intrinsic_views) < MIN_INTRINSIC_VIEWS:
+            views = [np.asarray(v) for v in self.record.intrinsic_views]
+            if len(views) < MIN_INTRINSIC_VIEWS:
                 self.message = f"{MIN_INTRINSIC_VIEWS} views first"
-            else:
-                views = [np.asarray(v) for v in self.record.intrinsic_views]
-                self.camera, errors = calibrate_intrinsics(
-                    views, self.board, self.record.size, self.record.lens
+                self.render()
+                return
+            focal, spread = lens_settled(views, self.board, self.record.size)
+            if spread > LENS_SETTLED:
+                missing = lens_coverage_missing(self.signatures)
+                self.message = (
+                    f"not settled: the focal length ({focal:.0f} px) varies {spread * 100:.0f}% across the views (under "
+                    f"{LENS_SETTLED * 100:.0f}%): more views"
+                    + (f", the board {'; '.join(missing)}" if missing else ", tilted and nearer / farther")
                 )
-                self.message = f"lens fitted: RMS {self.camera.rms_px:.2f} px (worst view {errors.max():.2f})"
+            else:
+                camera, errors = calibrate_intrinsics(views, self.board, self.record.size, self.record.lens)
+                low, high = (f * self.record.size[0] for f in FOCAL_RANGE)
+                if not (low <= camera.fx <= high and low <= camera.fy <= high):
+                    self.message = (
+                        f"the lens fit is implausible (fx {camera.fx:.0f} px): take more views, tilted and at "
+                        "different distances (u drops bad ones), then c"
+                    )
+                    self.render()
+                    return
+                self.camera = camera
+                self.message = f"lens fitted: fx {camera.fx:.0f} px (halves agree within {spread * 100:.1f}%), RMS {camera.rms_px:.2f} px (worst view {errors.max():.2f})"
                 if self.only == "intrinsics":
                     self.done = True
                 else:
@@ -1094,14 +1183,23 @@ def main() -> None:
     parser.add_argument(
         "--no-focus", action="store_true", help="skip the focus step (the lenses are focused)"
     )
+    parser.add_argument(
+        "--resume", action="store_true", help="keep the views saved in --out-dir and add to them"
+    )
     parser.add_argument("--step-cm", type=float, default=2.0, help="each key's move, cm (2)")
     parser.add_argument("--max-vel", type=float, default=20.0, help="arm speed limit, deg/s (20)")
-    parser.add_argument("--refit", action="store_true", help="no robot: fit --out-dir's saved views again")
+    parser.add_argument(
+        "--refit",
+        action="store_true",
+        help="no robot: fit --out-dir's saved views again (with --square-mm: a square size measured again)",
+    )
     args = parser.parse_args()
     if (args.out_dir / CALIBRATION_FILE).resolve() == args.start_from.resolve():
         parser.error("--out-dir would overwrite --start-from: pick another folder")
     if args.refit:
-        path = refit(args.start_from, args.out_dir)
+        path = refit(
+            args.start_from, args.out_dir, None if args.square_mm is None else args.square_mm / 1000.0
+        )
         if path is None:
             parser.error(f"no saved views to fit in {args.out_dir}")
         print(f"Wrote {path}\n{(args.out_dir / REPORT_FILE).read_text()}")
@@ -1146,6 +1244,7 @@ def main() -> None:
                     args.max_vel,
                     args.only,
                     focus=not args.no_focus,
+                    resume=args.resume,
                 )
                 for arm in ARMS
             }
