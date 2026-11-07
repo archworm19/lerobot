@@ -10,6 +10,8 @@ LeRobot's availability check reports it as not installed and the camera class re
 import contextlib
 import glob
 import logging
+import os
+import re
 import sys
 import threading
 import time
@@ -486,6 +488,17 @@ class _LatestFrames:
         self._thread.join(timeout=3.0)
 
 
+def video_index(device: str | int) -> int:
+    """The `/dev/videoN` number of a camera given by index or by path (a `/dev/v4l/by-path/...` link is followed)."""
+    if isinstance(device, int):
+        return device
+    real = os.path.realpath(device)
+    match = re.fullmatch(r"/dev/video(\d+)", real)
+    if match is None:
+        raise ValueError(f"{device!r} is not a video device (it points to {real!r})")
+    return int(match.group(1))
+
+
 class UsbCamera:
     """A USB / UVC camera read with OpenCV on a thread, keeping only the newest frame (a wrist camera).
 
@@ -498,11 +511,13 @@ class UsbCamera:
         """Open the camera and start reading; raises RuntimeError if it does not open or give a frame."""
         import cv2
 
+        index = video_index(device)
+        # OpenCV's V4L2 backend opens a device by its number, not by a link to it ("can't be used to capture by name")
         self._capture = (
-            cv2.VideoCapture(device, cv2.CAP_V4L2) if isinstance(device, str) else cv2.VideoCapture(device)
+            cv2.VideoCapture(index, cv2.CAP_V4L2) if isinstance(device, str) else cv2.VideoCapture(index)
         )
         if not self._capture.isOpened():
-            raise RuntimeError(f"wrist camera {device!r} does not open")
+            raise RuntimeError(f"wrist camera {device!r} (video{index}) does not open")
         self._capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
