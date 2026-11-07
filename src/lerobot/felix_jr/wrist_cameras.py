@@ -18,14 +18,24 @@ ARMS = ("left", "right")
 
 
 def list_video_devices(by_path: Path = BY_PATH) -> list[str]:
-    """The USB cameras present, each by its port's stable name.
+    """The USB cameras present, one stable name each.
 
-    That is the `...-video-index0` entry (the capture node; a camera also shows a metadata node, `-video-index1`).
-    Empty where there is no `/dev/v4l/by-path` (not Linux, or no camera).
+    The capture nodes (`...-video-index0`; a camera also shows a metadata node, `-video-index1`) of USB devices (not the
+    Pi's own codec and ISP nodes). Newer udev gives each USB camera two names for the same device, `...-usb-0:1.1:...`
+    and `...-usbv2-0:1.1:...`: they count as one camera, by its `usb-` name. Empty where there is no
+    `/dev/v4l/by-path` (not Linux, or no camera).
     """
     if not by_path.is_dir():
         return []
-    return sorted(str(p) for p in by_path.iterdir() if p.name.endswith("-video-index0"))
+    by_device: dict[str, list[str]] = {}
+    for entry in by_path.iterdir():
+        if entry.name.endswith("-video-index0") and "-usb" in entry.name:
+            by_device.setdefault(str(entry.resolve()), []).append(entry.name)
+    names = []
+    for aliases in by_device.values():
+        plain = [a for a in aliases if "-usb-" in a]  # the usb- name, not usbv2- / usbv3-
+        names.append(str(by_path / min(plain or aliases, key=len)))
+    return sorted(names)
 
 
 def save_wrist_cameras(cameras: dict[str, str], path: Path = WRIST_CAMERAS_FILE) -> None:
