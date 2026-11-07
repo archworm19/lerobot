@@ -312,34 +312,28 @@ class WristBoard:
         return pose, np.array([np.linalg.norm(e1), np.linalg.norm(e2), self.thickness])
 
 
-CAPSULE_PARTS = ("fixed_finger", "moving_finger", "gripper_body", "wrist", "forearm")  # in the order clicked
+# an arm's parts, as boxes (`ArmBox`), in the order clicked; no wrist (the wrist roll servo): mostly hidden, and covered by
+# its neighbours for the line of sight
+BOX_PARTS = ("fixed_finger", "moving_finger", "gripper_body", "forearm")
 
 
 @dataclass(frozen=True)
-class Capsule:
-    """A part of an arm as a capsule (`calibration.arm_shapes`): every point within `radius` of the segment `a`-`b`.
+class ArmBox:
+    """A part of an arm as a box (`calibration.arm_shapes`), square to its parent link's axes.
 
-    `a` and `b` are in `parent`'s frame (m). With `moving`, the parent is the pinch frame and the capsule turns with
-    the moving jaw: `a` and `b` are where they are with the jaws closed, and `XleRobotModel.capsules_root` turns them
-    by the opening (`moving_jaw`). `rms_px` and `n_clicks` say what it was fitted to.
+    `center` is in `parent`'s frame, `size` (m) along its x, y and z: six numbers, the part being bolted square to the
+    link (the gripper's servo housing to the gripper link, the forearm along its link). With `moving`, the parent is
+    the pinch frame and the box turns with the moving jaw: `center` is where it is with the jaws closed, and
+    `XleRobotModel.box_frame` turns it by the opening (`moving_jaw`). `rms_px` and `n_clicks` say what it was fitted to
+    (none for a stand-in).
     """
 
     parent: str
-    a: tuple[float, float, float]
-    b: tuple[float, float, float]
-    radius: float
+    center: tuple[float, float, float]
+    size: tuple[float, float, float]
     moving: bool = False
     rms_px: float | None = None
     n_clicks: int = 0
-
-
-def segment_distance(points: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Distance (m) of each point (N, 3) to the segment from `a` to `b`; minus a radius, the distance to a capsule."""
-    points = np.atleast_2d(points)
-    e = b - a
-    length2 = float(e @ e)
-    s = np.zeros(len(points)) if length2 < 1e-18 else np.clip((points - a) @ e / length2, 0.0, 1.0)
-    return np.linalg.norm(points - (a + s[:, None] * e), axis=1)
 
 
 class RobotMismatchError(RuntimeError):
@@ -375,7 +369,7 @@ class XleRobotModel:
         gripper_maps: Mapping[str, GripperMap] | None = None,
         arm_calibration: Mapping[str, Mapping[str, Mapping[str, int]]] | None = None,
         wrist_boards: Mapping[str, WristBoard] | None = None,
-        capsules: Mapping[str, Mapping[str, Capsule]] | None = None,
+        boxes: Mapping[str, Mapping[str, ArmBox]] | None = None,
     ):
         """Build the model from URDF text (`from_urdf` reads a file).
 
@@ -387,7 +381,7 @@ class XleRobotModel:
         `gripper_maps`: per arm, how `gripper.pos` opens the jaws, where measured. `arm_calibration`: per arm, the
         LeRobot calibration (`arm_record`) its clicks were taken under, where known: the arm's estimates hold only
         under it. `wrist_boards`: per arm, its wrist camera's mount plate, where fitted (the URDF also carries it as a
-        link: `with_wrist_board`). `capsules`: per arm, its parts as capsules (`CAPSULE_PARTS`), where fitted.
+        link: `with_wrist_board`). `boxes`: per arm, its parts as boxes (`BOX_PARTS`), where fitted.
         """
         require_package("pin", extra="kinematics", import_name="pinocchio")
         self.urdf = urdf
@@ -403,7 +397,7 @@ class XleRobotModel:
         self.gripper_maps = dict(gripper_maps or {})
         self.arm_calibration = {arm: arm_record(motors) for arm, motors in (arm_calibration or {}).items()}
         self.wrist_boards = dict(wrist_boards or {})
-        self.capsules = {arm: dict(parts) for arm, parts in (capsules or {}).items()}
+        self.boxes = {arm: dict(parts) for arm, parts in (boxes or {}).items()}
         if not set(self.visible_side.values()) <= set(SIDES):
             raise ValueError(f"visible_side must be one of {SIDES}: {self.visible_side}")
         self.covariance: np.ndarray | None = None  # of the estimates, from the last fit
@@ -1167,7 +1161,37 @@ class XleRobotModel:
             self.gripper_maps,
             self.arm_calibration,
             self.wrist_boards | {arm: board},
-            self.capsules,
+            self.boxes,
+        )
+        model.set_estimates(self._estimates.copy())
+        model.covariance = self.covariance
+        model.fit_info = dict(self.fit_info)
+        return model
+
+    def without_wrist_board(self, arm: str) -> "XleRobotModel":
+        """A copy of the model with no wrist camera plate on `arm` (taken off the robot).
+
+        Its link and joint go from the URDF and from `wrist_boards`. The same model if it has none.
+        """
+        if arm not in self.wrist_boards:
+            return self
+        link, joint = wrist_board_link(arm), f"{arm}_wrist_camera_joint"
+        root = ET.fromstring(self.urdf)
+        for element in [*root.findall("link"), *root.findall("joint")]:
+            if element.get("name") in (link, joint):
+                root.remove(element)
+        model = type(self)(
+            '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode") + "\n",
+            self.head_signs,
+            self.head_refs,
+            self.intrinsics,
+            self.parameters,
+            self.floor_z,
+            self.visible_side,
+            self.gripper_maps,
+            self.arm_calibration,
+            {other: board for other, board in self.wrist_boards.items() if other != arm},
+            self.boxes,
         )
         model.set_estimates(self._estimates.copy())
         model.covariance = self.covariance
@@ -1184,14 +1208,14 @@ class XleRobotModel:
         frame = self.frame_pose(board.parent, q, theta)
         return board.face_corners() @ frame[:3, :3].T + frame[:3, 3]
 
-    def with_capsules(self, arm: str, parts: Mapping[str, Capsule]) -> "XleRobotModel":
-        """A copy of the model with `arm`'s capsules `parts` added, replacing earlier ones of the same parts.
+    def with_boxes(self, arm: str, parts: Mapping[str, ArmBox]) -> "XleRobotModel":
+        """A copy of the model with `arm`'s boxes `parts` added, replacing earlier ones of the same parts.
 
-        They live in `capsules` only (saved in `<felix_calibration>`): each is fixed to a link the URDF has.
+        They live in `boxes` only (saved in `<felix_calibration>`): each is fixed to a link the URDF has.
         """
-        unknown = set(parts) - set(CAPSULE_PARTS)
+        unknown = set(parts) - set(BOX_PARTS)
         if unknown:
-            raise ValueError(f"unknown parts {sorted(unknown)}: one of {CAPSULE_PARTS}")
+            raise ValueError(f"unknown parts {sorted(unknown)}: one of {BOX_PARTS}")
         model = type(self)(
             self.urdf,
             self.head_signs,
@@ -1203,44 +1227,44 @@ class XleRobotModel:
             self.gripper_maps,
             self.arm_calibration,
             self.wrist_boards,
-            self.capsules | {arm: self.capsules.get(arm, {}) | dict(parts)},
+            self.boxes | {arm: self.boxes.get(arm, {}) | dict(parts)},
         )
         model.set_estimates(self._estimates.copy())
         model.covariance = self.covariance
         model.fit_info = dict(self.fit_info)
         return model
 
-    def capsule_frame(
+    def box_frame(
         self,
-        capsule: Capsule,
+        box: ArmBox,
         arm: str,
         q: np.ndarray,
         opening_deg: float = 0.0,
         theta: np.ndarray | Mapping[str, float] | None = None,
     ) -> np.ndarray:
-        """root_from_parent (4x4) of one of `arm`'s capsules.
+        """root_from_box (4x4) of one of `arm`'s boxes: its center, its axes its parent's.
 
-        Its link's pose; for the moving finger, the pinch frame turned by the jaws' opening (`opening_deg`, 0 closed).
+        The parent's pose; for the moving finger, the pinch frame turned by the jaws' opening (`opening_deg`, 0 closed).
         """
-        frame = self.frame_pose(capsule.parent, q, theta)
-        if capsule.moving:
+        frame = self.frame_pose(box.parent, q, theta)
+        if box.moving:
             frame = frame @ self.moving_jaw(arm, max(opening_deg, 0.0), theta)
-        return frame
+        out = frame.copy()
+        out[:3, 3] = frame[:3, :3] @ np.asarray(box.center) + frame[:3, 3]
+        return out
 
-    def capsules_root(
+    def boxes_root(
         self,
         arm: str,
         q: np.ndarray,
         opening_deg: float = 0.0,
         theta: np.ndarray | Mapping[str, float] | None = None,
-    ) -> dict[str, tuple[np.ndarray, np.ndarray, float]]:
-        """`arm`'s capsules at `q` (the moving finger at `opening_deg`): part -> (a_root, b_root, radius)."""
-        out = {}
-        for part, capsule in self.capsules.get(arm, {}).items():
-            frame = self.capsule_frame(capsule, arm, q, opening_deg, theta)
-            a_root, b_root = (frame[:3, :3] @ np.asarray(p) + frame[:3, 3] for p in (capsule.a, capsule.b))
-            out[part] = (a_root, b_root, capsule.radius)
-        return out
+    ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        """`arm`'s boxes at `q` (the moving finger at `opening_deg`): part -> (root_from_box, half its size (3,))."""
+        return {
+            part: (self.box_frame(box, arm, q, opening_deg, theta), 0.5 * np.asarray(box.size, dtype=float))
+            for part, box in self.boxes.get(arm, {}).items()
+        }
 
     def save(self, path: str | Path) -> None:
         """Write the calibrated URDF: `to_urdf()` plus a `<felix_calibration>` element holding everything else.
@@ -1268,8 +1292,8 @@ class XleRobotModel:
             "gripper_maps": {arm: asdict(m) for arm, m in self.gripper_maps.items()},
             "arm_calibration": self.arm_calibration,
             "wrist_boards": {arm: asdict(b) for arm, b in self.wrist_boards.items()},
-            "capsules": {
-                arm: {part: asdict(c) for part, c in parts.items()} for arm, parts in self.capsules.items()
+            "boxes": {
+                arm: {part: asdict(b) for part, b in parts.items()} for arm, parts in self.boxes.items()
             },
             "parameters": [asdict(p) for p in self.parameters],
             "estimates": self._estimates.tolist(),
@@ -1320,11 +1344,16 @@ class XleRobotModel:
             },
             {  # none before the arms' shapes were fitted
                 arm: {
-                    part: Capsule(**c | {"a": tuple(c["a"]), "b": tuple(c["b"])}) for part, c in parts.items()
+                    part: ArmBox(**b | {"center": tuple(b["center"]), "size": tuple(b["size"])})
+                    for part, b in parts.items()
                 }
-                for arm, parts in data.get("capsules", {}).items()
+                for arm, parts in data.get("boxes", {}).items()
             },
         )
+        if data.get("capsules"):  # the arms' shapes as capsules, before they were boxes (2026-11-06)
+            log.warning(
+                "%s: its capsules are left out (the arms' shapes are boxes now): fit them again", path
+            )
         model.set_estimates(np.array(data["estimates"], dtype=float))
         if data["covariance"] is not None:
             model.covariance = np.array(data["covariance"], dtype=float)

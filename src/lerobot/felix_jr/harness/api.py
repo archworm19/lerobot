@@ -19,6 +19,7 @@ not a boundary: a snippet could import the robot client and bypass the runner. F
 before unattended runs, the robot server must enforce approval itself (`docs/open_issues.md`).
 """
 
+import dataclasses
 import enum
 import functools
 import inspect
@@ -33,7 +34,14 @@ import numpy as np
 
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 
-from . import execute as _execute, look as _look, reach as _reach, scan as _scan, tools as _tools
+from . import (
+    execute as _execute,
+    grasping as _grasping,
+    look as _look,
+    reach as _reach,
+    scan as _scan,
+    tools as _tools,
+)
 from .objects import (
     ArmError,
     ArmPath,
@@ -42,6 +50,7 @@ from .objects import (
     Focus,
     Grid,
     HeldObject,
+    Object,
     Points,
     Poses,
     TableEstimate,
@@ -53,7 +62,7 @@ from .workspace import Workspace
 if TYPE_CHECKING:
     from lerobot.felix_jr.server.client import FelixClient
 
-MODEL = Path(__file__).parents[1] / "urdfs" / "xle_calib_11052026.urdf"
+MODEL = Path(__file__).parents[1] / "urdfs" / "xle_calib_11072026.urdf"
 ENDPOINT = "tcp://ikeabot.local:5555"
 
 
@@ -75,18 +84,23 @@ class Tool:
     fn: Callable[..., Any]
     effect: Effect
     records: bool  # is the result an object for the workspace? (queries return text and are only logged)
+    deprecated: str = (
+        ""  # what replaces it, if it is on its way out (shown in `describe_tools`, logged when called)
+    )
 
 
 TOOLS: dict[str, Tool] = {}
 
 
-def tool(effect: Effect, records: bool = True) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Register the decorated function as a tool with `effect`."""
+def tool(
+    effect: Effect, records: bool = True, deprecated: str = ""
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Register the decorated function as a tool with `effect`; `deprecated` says what replaces it, if anything."""
 
     def register(fn: Callable[..., Any]) -> Callable[..., Any]:
         if not fn.__doc__:
             raise ValueError(f"tool {fn.__name__} needs a docstring: it is the model's documentation")
-        TOOLS[fn.__name__] = Tool(fn.__name__, fn, effect, records)
+        TOOLS[fn.__name__] = Tool(fn.__name__, fn, effect, records, deprecated)
         return fn
 
     return register
@@ -101,6 +115,10 @@ class Policy:
 
 SAFE = Policy(frozenset({Effect.MOVE_HEAD, Effect.MOVE_ARM}))  # the default
 UNATTENDED = Policy(frozenset())  # for tests against fake hardware
+
+
+class NotStartedError(ValueError):
+    """A tool that moves refused its input before anything moved (it is stale, say): nothing becomes stale."""
 
 
 class RefusedError(RuntimeError):
@@ -175,6 +193,8 @@ class Harness:
             "kwargs": {k: self.ws._summarize(v) for k, v in kwargs.items()},
             "time": time.time(),
         }
+        if spec.deprecated:
+            entry["deprecated"] = spec.deprecated
         self.calls.append(entry)
         if self.ended:
             entry["outcome"] = "refused: the session has ended"
@@ -188,12 +208,16 @@ class Harness:
 
         @functools.wraps(spec.fn)
         def run(*a: Any, **k: Any) -> Any:
+            started = True
             try:
                 return spec.fn(self, *a, **k)
+            except NotStartedError:
+                started = False  # refused before anything moved: what was seen is still fresh
+                raise
             finally:
                 if (
-                    spec.effect is Effect.MOVE_ARM
-                ):  # before the result is recorded, so an after-capture is fresh
+                    started and spec.effect is Effect.MOVE_ARM
+                ):  # before the result is recorded: an after-capture is fresh
                     self.ws.moved()
 
         try:
@@ -272,7 +296,8 @@ def describe_tools() -> str:
     for name, spec in TOOLS.items():
         params = list(inspect.signature(spec.fn).parameters.values())[1:]
         signature = re.sub(r"\b(?:[a-z_]\w*\.)+(?=\w)", "", f"{name}({', '.join(str(p) for p in params)})")
-        blocks.append(f"{signature}  [{spec.effect.value}]\n{inspect.cleandoc(spec.fn.__doc__ or '')}")
+        note = f"DEPRECATED: {spec.deprecated}\n" if spec.deprecated else ""
+        blocks.append(f"{signature}  [{spec.effect.value}]\n{note}{inspect.cleandoc(spec.fn.__doc__ or '')}")
     return "\n\n".join(blocks)
 
 
@@ -335,7 +360,10 @@ def locate_grid(h: Harness, grid: Grid, xy: np.ndarray, labels: Sequence[str] | 
 def render(h: Harness, view: View, *overlays: Any, labels: bool = True) -> np.ndarray:
     """The view's image with the overlays you choose drawn on it.
 
-    Overlays: `Grid`, `Points`, `TableEstimate`, `Poses`, `ArmPath`.
+    Overlays: `Grid`, `Points`, `TableEstimate`, `Poses`, `ArmPath`, `Object`, `GraspCandidates`.
+
+    An `Object` is drawn as its cylinder (orange: the two end circles and lines along the side), labeled with its
+    width; `GraspCandidates` as the gripper at each candidate's grasp, labeled A, B, ... (as `Poses`, below).
 
     `Poses` are drawn as the path through them (in order) and a gripper at each, open as for the approach: the fixed
     finger pink, the moving one cyan, turned about the hinge behind them (a claw, so the gap is a wedge, widest at the
@@ -345,7 +373,11 @@ def render(h: Harness, view: View, *overlays: Any, labels: bool = True) -> np.nd
     the gripper carries. Pick what helps: poses alone, poses with the arm, a grid to read positions;
     `labels=False` drops the text. Nothing is checked against the depth: judge clearance from the images.
     """
-    return _render(view, *overlays, labels=labels)
+    drawn = [
+        _grasping.candidates_as_poses(h.model, o) if isinstance(o, _grasping.GraspCandidates) else o
+        for o in overlays
+    ]
+    return _render(view, *drawn, labels=labels)
 
 
 @tool(Effect.SOFTWARE)
@@ -359,7 +391,10 @@ def contact_sheet(
 # ---- software: where the arm can put its gripper ----------------------------------------------------------------
 
 
-@tool(Effect.SOFTWARE)
+@tool(
+    Effect.SOFTWARE,
+    deprecated="to grasp, use fit_cylinder, grasp_candidates and plan_pick; still for a carry or a place, until plan_place (docs/object_grasping.md, phase D)",
+)
 def solve_pose(
     h: Harness,
     arm: str,
@@ -415,7 +450,10 @@ def solve_pose(
     )
 
 
-@tool(Effect.SOFTWARE)
+@tool(
+    Effect.SOFTWARE,
+    deprecated="plan_pick gives a pick's poses whole; still for joining a carry or a place, until plan_place",
+)
 def join_poses(h: Harness, *poses: Poses) -> Poses:
     """Solved poses as one path, in the order given (same arm, capture, object width and margin; labels unique).
 
@@ -430,7 +468,7 @@ def select_poses(h: Harness, poses: Poses, *labels: str) -> Poses:
     return _reach.select_poses(poses, *labels)
 
 
-@tool(Effect.SOFTWARE)
+@tool(Effect.SOFTWARE, deprecated="plan_pick gives the attack point (pick.back) and the lift")
 def approach(
     h: Harness, pose: Poses, back: float = 0.05, up: float = 0.05, order: Sequence[str] = ("back", "at", "up")
 ) -> Poses:
@@ -454,7 +492,10 @@ def prepare_execution(
     `execute` counts a labeled pose reached when every joint is within `pose_tol_deg` (the ~1 cm steps between
     them: 4 deg); a loaded, extended arm sags further than 2.5 deg, so loosen it (e.g. 4) for a carry.
     """
-    if h.ws.is_stale(poses):
+    # solved from a capture taken before the arm moved? (the capture, not the poses' node: `refine`'s poses are solved
+    # from the hold's capture but descend from candidates found before the move)
+    solved_from = poses.capture if h.ws.id_of(poses.capture) is not None else poses
+    if h.ws.is_stale(solved_from):
         raise ValueError(
             "these poses come from before the arm last moved: capture again and solve them again"
         )
@@ -474,6 +515,145 @@ def arm_error(h: Harness, poses: Poses, capture: Capture, label: str | None = No
     return _execute.arm_error(h.model, poses, capture, label)
 
 
+def _settings(
+    changes: Mapping[str, Any], base: "_grasping.GraspSettings | None" = None
+) -> "_grasping.GraspSettings":
+    """`base` (default the defaults) with `changes` by field name; an unknown name is refused."""
+    known = set(_grasping.GraspSettings.__dataclass_fields__)
+    if set(changes) - known:
+        raise ValueError(f"unknown settings {sorted(set(changes) - known)}: {sorted(known)}")
+    changes = dict(changes)
+    if "rotation_bounds_deg" in changes:
+        changes["rotation_bounds_deg"] = tuple(float(b) for b in changes["rotation_bounds_deg"])
+    return dataclasses.replace(base or _grasping.GraspSettings(), **changes)
+
+
+def _fresh(h: Harness, obj: Any, what: str) -> None:
+    """Refuse `obj` if it comes from before the arm last moved."""
+    if h.ws.id_of(obj) is not None and h.ws.is_stale(obj):
+        raise ValueError(f"{what} comes from before the arm last moved: capture again (and fit again)")
+
+
+@tool(Effect.SOFTWARE)
+def fit_cylinder(
+    h: Harness,
+    view: View,
+    uv: np.ndarray,
+    axis: str = "up",
+    label: str = "object",
+    radius: float | None = None,
+) -> Object:
+    """An object as a cylinder, fitted to the depth where you mark it in `view` (pixels `uv`, (N, 2)).
+
+    Mark only the part that may be grasped (a pen above the cup's rim, above the book): the tool knows nothing else of
+    the object, so nothing else of it is grasped. A few marks around it, or a line of marks along a thin one: the
+    region is their convex hull, and what in it is not the object (the table, what is behind) is dropped.
+    `axis="up"` for an object standing on the table (its axis vertical); `"free"` for one lying or leaning (a pen, a
+    handle). `radius` (m) if you know it (a pen: 0.0045): thin objects' fitted radius comes out short. The description
+    gives its points, residual and how much of its side the camera saw: a narrow arc means a biased fit, so mark it
+    in a view that shows more of it. A view looking straight down on an upright object is refused (no side to fit).
+    Draw it with `render`. Nothing moves.
+    """
+    if axis not in ("up", "free"):
+        raise ValueError(f"axis is 'up' or 'free', not {axis!r}")
+    return _tools.fit_cylinder(view, np.asarray(uv, dtype=np.float64), axis, label, radius=radius)  # type: ignore[arg-type]
+
+
+@tool(Effect.SOFTWARE)
+def grasp_candidates(
+    h: Harness,
+    target: Object,
+    capture: Capture,
+    arms: Sequence[str] = ("right", "left"),
+    where: Mapping[str, Sequence[float]] | None = None,
+    n: int = 5,
+    part: str | None = None,
+    **settings: Any,
+) -> _grasping.GraspCandidates:
+    """The best grasps of `target` (from `fit_cylinder`), ranked and named A, B, ...: you choose one by name.
+
+    Every antipodal grasp of the cylinder (the jaws closing straight across it) on a grid, for each arm in `arms` and
+    either jaw on either side, kept if the arm reaches the attack point (5 cm back) and the grasp, and the head
+    camera (as in `capture`, the arms where it saw them) sees the grasp's center and contacts past both arms. Ranked
+    by how close to a true antipodal grip the arm gets, then by how far its joints stay from their limits. Each says
+    its arm, pitch, heading and roll, how antipodal, and its joint margin; the rejected are counted by reason.
+
+    Nothing about the scene is checked: say from where. `where` narrows the grasps, in the cylinder's terms: "t" (m
+    along its axis from its bottom end), "phi" (deg: the side the jaws come from, around the axis; for an upright one
+    0 is the robot's side), "psi" (deg: the approach's tilt down the axis: 0 level, 90 from above, -90 from below),
+    each (low, high), e.g. {"psi": (0, 90)} for an object in a book or a cup (not from below, through the support).
+    `**settings` change what is assumed (`GraspSettings`, printed with the result): `rotation_bounds_deg` (how far
+    the arm may turn off the exact grasp, about the closing line, the approach, the hinge; default 45 each: narrow
+    the approach for a slippery object), `position_bound_m`, `rank_step_deg`, `see_contacts`, `see_at_grasp`,
+    `margin` (the fixed jaw's clearance, m), `attack` (m). Draw them with `render`. Nothing moves.
+    """
+    _fresh(h, capture, "the capture")
+    _fresh(h, target, "the object")
+    ranges = {k: (float(v[0]), float(v[1])) for k, v in (where or {}).items()}
+    return _grasping.grasp_candidates(
+        target,
+        h.model,
+        capture,
+        tuple(arms),
+        ranges or None,
+        n=n,
+        part=part,
+        settings=_settings(settings),
+    )
+
+
+@tool(Effect.SOFTWARE)
+def plan_pick(
+    h: Harness,
+    candidates: _grasping.GraspCandidates,
+    name: str = "A",
+    stage_up: float = 0.06,
+    lift: float = 0.03,
+) -> Poses:
+    """The chosen candidate (`name`) as the poses of a pick: "stage", "pick.back", "pick", "lift".
+
+    "stage" is `stage_up` m above the attack point, "pick.back" the attack point, "pick" the grasp, "lift" `lift` m
+    above it.
+    For `prepare_execution` with grip {"start": "open", "pick": "close"}, or a part of it: following the protocol,
+    first `select_poses(pick, "stage", "pick.back")` and hold there, then `refine` before going in. Nothing moves.
+    """
+    if candidates.capture is None:
+        raise ValueError("these candidates have no capture")
+    _fresh(
+        h, candidates.capture, "the candidates' capture"
+    )  # not the candidates: `refine`'s come from older ones
+    return _grasping.plan_pick(h.model, candidates[name], candidates.capture, stage_up, lift)
+
+
+@tool(Effect.SOFTWARE)
+def refine(
+    h: Harness,
+    candidates: _grasping.GraspCandidates,
+    name: str,
+    target: Object,
+    capture: Capture,
+    error: ArmError | None = None,
+    part: str | None = None,
+    **settings: Any,
+) -> _grasping.GraspCandidates:
+    """The chosen grasp (`name` of `candidates`) again, at the attack hold, from what it shows (protocol rule 1).
+
+    At the hold (the arm at "pick.back"): look at the grasp (`look_at`), fit the object again in that capture
+    (`target`, `fit_cylinder`), measure the arm (`error`, `arm_error(pick, capture, "pick.back")`); this re-solves the
+    same grasp (side, tilt, jaw, height on the object) on the object where it is now, from where the arm is, aimed to
+    cancel the arm's measured error, and checks again that the camera sees it. One candidate, "A", or none and why.
+    Then `plan_pick` it and run "pick.back" -> "pick" -> "lift" with grip {"pick": "close"}. `**settings` change the
+    chosen candidate's (as for `grasp_candidates`): e.g. `see_at_grasp=False` when the look, from behind the gripper,
+    cannot see between the jaws at the grasp but saw the object and the jaws at the attack point. Nothing moves.
+    """
+    _fresh(h, capture, "the capture")
+    _fresh(h, target, "the object")
+    chosen = candidates[name]
+    offset = None if error is None else error.offset
+    changed = _settings(settings, chosen.settings)
+    return _grasping.refine(h.model, chosen, target, capture, offset, part, changed)
+
+
 @tool(Effect.SOFTWARE)
 def arm_path(h: Harness, execution: Execution, every: int = 5) -> ArmPath:
     """The arm's body along an execution, to draw with `render`: where the shoulder, elbow, wrist and gripper go.
@@ -484,7 +664,10 @@ def arm_path(h: Harness, execution: Execution, every: int = 5) -> ArmPath:
     return _execute.arm_path(h.model, execution, every)
 
 
-@tool(Effect.SOFTWARE)
+@tool(
+    Effect.SOFTWARE,
+    deprecated="still for a carry, until plan_place knows the object's pose in the jaws (phase D)",
+)
 def held_object(
     h: Harness,
     poses: Poses,
@@ -599,8 +782,11 @@ def execute(
     names the capture taken there: look, and re-plan from it. With `step`, a person confirms each move. Moves the
     arm: a person approves first, seeing every move.
     """
-    if h.ws.is_stale(execution):
-        raise ValueError("this execution comes from before the arm last moved: capture again and plan again")
+    capture = execution.poses.capture  # what it was solved from (see `prepare_execution`)
+    if h.ws.is_stale(capture if h.ws.id_of(capture) is not None else execution):
+        raise NotStartedError(
+            "this execution comes from before the arm last moved: capture again and plan again"
+        )
     confirm = h.confirm if step else None
     return _execute.run_execution(h.client, h.model, execution, max_vel, confirm=confirm, hold=hold)
 

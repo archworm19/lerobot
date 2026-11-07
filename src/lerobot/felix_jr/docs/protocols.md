@@ -20,6 +20,10 @@ along the gripper axis), hold there, and before going in:
    stands on or in, its neighbors).
 5. **Re-solve the grasp from this capture**, aimed to cancel the measured error, then go in and close.
 
+With the grasp tools (`docs/object_grasping.md`): 1 is `look_at`, 2 `fit_cylinder` in that capture, 3 `arm_error`,
+5 `refine` (the same grasp on the object as fitted again, from where the arm is, aimed to cancel its error), then
+`plan_pick` of its result from "pick.back". Check 4, what the move in passes, is yours, from the image.
+
 If a check cannot be made (the jaws or the object hidden, no depth on it) or fails, do not go in: clear the arm and
 look again, or re-plan the attack (higher, another pitch, another side, the other arm).
 

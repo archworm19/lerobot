@@ -13,7 +13,8 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .objects import ArmPath, Grid, Points, Poses, TableEstimate, View
+from .objects import ArmPath, Grid, Object, Points, Poses, TableEstimate, View
+from .primitives import Cylinder
 
 REACHED_COLOR, MISSED_COLOR = (0, 200, 0), (230, 30, 30)
 PATH_COLOR = (255, 255, 255)
@@ -21,6 +22,7 @@ ARM_COLOR = (90, 200, 255)
 GRID_COLOR = (255, 230, 0)
 POINT_COLOR = (0, 220, 255)
 TABLE_COLOR = (0, 160, 255)
+OBJECT_COLOR = (255, 150, 0)  # orange: an object as the model described it (`fit_cylinder`)
 FINGER_M = 0.03  # how long the fingers are drawn, back from their tips along the gripper axis
 WRIST_M = 0.03  # and the body behind them, toward the wrist
 FIXED_JAW_COLOR, MOVING_JAW_COLOR = (255, 60, 220), (0, 230, 255)  # pink, cyan
@@ -30,7 +32,7 @@ GRIPPER_BODY_COLOR = (200, 200, 200)  # neutral, so only the fingers carry color
 def render(view: View, *overlays: Any, labels: bool = True) -> np.ndarray:
     """The view's image with `overlays` drawn in order.
 
-    Overlays: `Grid`, `Points`, `TableEstimate`, `Poses`, `ArmPath`.
+    Overlays: `Grid`, `Points`, `TableEstimate`, `Poses`, `ArmPath`, `Object`.
 
     Text goes on last, laid out so labels don't cover each other or the markers (`_Layout`); `labels=False` leaves
     out all but the footers, for an uncluttered picture. Only geometry is drawn: nothing here judges whether a path
@@ -53,6 +55,8 @@ def render(view: View, *overlays: Any, labels: bool = True) -> np.ndarray:
             _draw_poses(out, view, overlay, layout)
         elif isinstance(overlay, ArmPath):
             _draw_arm(out, view, overlay)
+        elif isinstance(overlay, Object):
+            _draw_object(out, view, overlay, layout)
         else:
             raise TypeError(f"cannot render a {type(overlay).__name__}")
     layout.draw(out, labels)
@@ -363,6 +367,25 @@ def _draw_poses(img: np.ndarray, view: View, poses: Poses, layout: "_Layout") ->
     pitches = {round(t[0]) for t in poses.targets}
     footer = f"{poses.arm} arm" + (f", pitch {pitches.pop():+d} deg" if len(pitches) == 1 else "")
     layout.label(footer, (8, img.shape[0] - 30), priority=0, fixed=True)
+
+
+def _draw_object(img: np.ndarray, view: View, obj: Object, layout: "_Layout") -> None:
+    """Each cylinder of `obj`: its two end circles and four lines between them, labeled at its top."""
+    for name, part in obj.parts.items():
+        if not isinstance(part, Cylinder):
+            continue
+        frame = part.root_from_obj[:3, :3]
+        angles = np.radians(np.arange(0, 361, 15))
+        ring = part.radius * (np.outer(np.cos(angles), frame[:, 0]) + np.outer(np.sin(angles), frame[:, 1]))
+        bottom, top = part.bottom_root + ring, part.top_root + ring
+        _polyline(img, view.project(bottom), OBJECT_COLOR, 2)
+        _polyline(img, view.project(top), OBJECT_COLOR, 2)
+        for k in range(0, len(angles) - 1, 6):  # four lines along the side
+            _polyline(img, view.project(np.array([bottom[k], top[k]])), OBJECT_COLOR, 1)
+        c = view.project(part.top_root)
+        if _inside(img, c):
+            text = obj.label if len(obj.parts) == 1 else f"{obj.label} {name}"
+            layout.label(f"{text} ({part.radius * 200:.1f} cm wide)", _pixel(c), gap=13)
 
 
 def _draw_arm(img: np.ndarray, view: View, path: ArmPath) -> None:

@@ -10,17 +10,35 @@ import pytest
 pytest.importorskip("pinocchio")
 pytest.importorskip("scipy")
 
-from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel  # noqa: E402
+from lerobot.felix_jr.calibration.xle_robot_model import (  # noqa: E402
+    ArmBox,
+    GripperMap,
+    XleRobotModel,
+)
+from lerobot.felix_jr.harness.execute import prepare_execution  # noqa: E402
 from lerobot.felix_jr.harness.grasping import (  # noqa: E402
+    ATTACK_M,
+    FINGER_LENGTH_M,
+    FINGER_THICKNESS_M,
+    FINGER_WIDTH_M,
+    LIFT_M,
+    PICK_GRIP,
+    STAGE_UP_M,
     STAGES,
+    Body,
     GraspCandidate,
+    GraspSettings,
+    arm_boxes,
+    finger_boxes,
     grasp_candidates,
-    off_arm_plane_deg,
+    plan_pick,
+    refine,
+    sight_blockers,
     to_claw,
 )
-from lerobot.felix_jr.harness.objects import angles_of  # noqa: E402
+from lerobot.felix_jr.harness.objects import Object, angles_of  # noqa: E402
 from lerobot.felix_jr.harness.primitives import Cylinder  # noqa: E402
-from lerobot.felix_jr.harness.reach import ArmIK  # noqa: E402
+from lerobot.felix_jr.harness.reach import select_poses  # noqa: E402
 
 URDF = Path(__file__).parent / "reference" / "pen1_calibration_10312026.urdf"
 JAR = Cylinder.upright(np.array([-0.344, -0.107, 0.714]), 0.079, 0.020)  # bowl1's jar, the hand fit
@@ -154,8 +172,8 @@ def test_candidates_are_ranked_and_named(model):
     assert all(r.stage in STAGES and r.reason for r in found.rejected)
     assert found.passed >= 1
     assert [c.name for c in found.candidates] == ["A", "B", "C", "D"][: len(found.candidates)]
-    costs = [c.cost for c in found.candidates]
-    assert costs == sorted(costs)
+    keys = [c.rank_key() for c in found.candidates]
+    assert keys == sorted(keys)
     for c in found.candidates:
         assert c.attack.ok and c.grasp.ok
     assert found["A"] is found.candidates[0]
@@ -175,32 +193,168 @@ def test_too_wide_is_rejected_before_solving(model):
     assert all(r.claw is None and r.stage == "jaws" for r in found.rejected)
 
 
-def test_off_arm_plane(model):
-    ik = ArmIK(model, "right", BOWL1_ARMS)
-    pan = model.frame_pose("right_shoulder_link", ik.q)[:3, 3]
-    target = np.array([-0.35, -0.10, 0.75])
-    radial = (target - pan)[:2] / np.linalg.norm((target - pan)[:2])
-    for angle in (0.0, 30.0, 90.0):  # the gripper axis turned out of the plane, horizontal
-        a = np.radians(angle)
-        axis = np.array([*(np.cos(a) * radial + np.sin(a) * np.array([-radial[1], radial[0]])), 0.0])
-        frame = np.eye(4)
-        frame[:3, 2], frame[:3, 3] = axis, target
-        assert off_arm_plane_deg(model, ik, frame) == pytest.approx(angle, abs=1e-6)
-    frame[:3, 2] = [0.0, 0.0, -1.0]  # straight down: any heading will do
-    assert off_arm_plane_deg(model, ik, frame) == pytest.approx(0.0, abs=1e-6)
+def test_rank_antipodal_first_then_joint_margin():
+    def solved(about_approach: float, about_hinge: float):
+        return SimpleNamespace(rotation_error_deg=np.array([10.0, about_approach, about_hinge]))
 
+    def candidate(
+        about_approach: float, about_hinge: float, limit: float, cost: float = 0.0
+    ) -> GraspCandidate:
+        return GraspCandidate("", None, None, solved(about_approach, about_hinge), limit, cost)  # type: ignore[arg-type]
 
-def test_rank_tiers():
-    def candidate(visibility: float, limit: float, cost: float) -> GraspCandidate:
-        return GraspCandidate("", None, None, None, visibility, limit, cost)  # type: ignore[arg-type]
-
-    best = candidate(-0.35, 20.0, 1.0)
     order = [
-        best,
-        candidate(-0.36, 20.0, 2.0),  # seen as squarely: the cost decides
-        candidate(-0.25, 20.0, 0.0),  # seen less squarely: lower, whatever the cost
-        candidate(-0.90, 2.0, 0.0),  # a joint near its bound: below every one that is not
-        candidate(+0.05, 30.0, 0.0),  # edge-on: last
+        candidate(1.0, 2.0, 30.0),  # within the first 5 deg step: the joint margin decides
+        candidate(4.0, 0.0, 20.0),
+        candidate(0.0, 6.0, 50.0),  # the second step (about the hinge counts too), whatever its joints
+        candidate(12.0, 0.0, 60.0),
     ]
-    shuffled = [order[i] for i in (3, 0, 4, 2, 1)]
+    shuffled = [order[i] for i in (3, 0, 2, 1)]
     assert sorted(shuffled, key=GraspCandidate.rank_key) == order
+    assert order[2].antipodal_error_deg == 6.0
+    coarse = GraspSettings(
+        rank_step_deg=10.0
+    )  # the caller's step: now the first three tie, the joints decide
+    regraded = [GraspCandidate("", None, None, c.grasp, c.limit_margin_deg, 0.0, coarse) for c in order]  # type: ignore[arg-type]
+    assert [c.limit_margin_deg for c in sorted(regraded, key=GraspCandidate.rank_key)] == [
+        50.0,
+        30.0,
+        20.0,
+        60.0,
+    ]
+
+
+def test_a_box_in_the_line_of_sight_hides_a_point(model):
+    q = model.joint_vector({"right": BOWL1_ARMS["right"]})
+    camera = model.camera_pose(q)[:3, 3]
+    point = camera + np.array([-0.3, 0.0, -0.3])
+    middle = np.eye(4)
+    middle[:3, 3] = 0.5 * (camera + point)
+    half = np.array([0.02, 0.05, 0.02])
+    beside = middle.copy()
+    beside[:3, 3] += [0.0, 0.0, 0.05]
+    in_the_way, off = Body("right forearm", middle, half), Body("right forearm", beside, half)
+    assert sight_blockers(model, q, [off, in_the_way], {"center": point}) == {"center": "right forearm"}
+    assert sight_blockers(model, q, [off], {"center": point}) == {}
+    # a plate hides what passes within its margin too
+    assert sight_blockers(model, q, [Body("right plate", beside, half, 0.04)], {"center": point}) == {
+        "center": "right plate"
+    }
+
+
+# boxes about where `urdfs/xle_calib_11062026.urdf`'s capsules had the right arm's parts (`calibration.arm_shapes`)
+RIGHT_BOXES = {
+    "gripper_body": ArmBox("right_gripper_link", (-0.002, -0.0017, -0.029), (0.077, 0.045, 0.045)),
+    "forearm": ArmBox("right_lower_arm_link", (-0.054, -0.020, 0.020), (0.20, 0.067, 0.067)),
+}
+LID = {"t": (0.069, 0.069), "psi": (0.0, 90.0)}
+
+
+@pytest.fixture(scope="module")
+def shaped(model):
+    return model.with_boxes("right", RIGHT_BOXES)
+
+
+def test_stand_in_fingers_run_from_the_tips_to_the_body(shaped, model):
+    fingers = finger_boxes(shaped, "right")
+    fixed, moving = fingers["fixed_finger"], fingers["moving_finger"]
+    assert fixed.size[:2] == moving.size[:2] == pytest.approx((FINGER_THICKNESS_M, FINGER_WIDTH_M))
+    assert not fixed.moving and moving.moving
+    # the inner faces are on the tips' plane (the pinch frame's x = 0), on either side of it, from the tips back
+    for box, side in ((fixed, 1.0), (moving, -1.0)):
+        assert box.center[0] - side * box.size[0] / 2 == pytest.approx(0.0, abs=1e-12)
+        assert box.center[2] + box.size[2] / 2 == pytest.approx(0.0, abs=1e-12)
+    assert 0.02 < fixed.size[2] < 0.12  # back to the gripper body's box
+    q = shaped.joint_vector()
+    root_from_body, half = shaped.boxes_root("right", q)["gripper_body"]
+    back = shaped.box_frame(fixed, "right", q) @ np.array([0.0, 0.0, -fixed.size[2] / 2, 1.0])
+    gap = np.abs(np.linalg.inv(root_from_body)[:3] @ back) - half  # the fingers' back: on the body's surface
+    assert gap.max() == pytest.approx(0.0, abs=0.012)
+    assert set(arm_boxes(shaped, "right")) == {"fixed_finger", "moving_finger", "gripper_body", "forearm"}
+    assert arm_boxes(model, "right") == {}  # none fitted: none at all
+    assert finger_boxes(model, "right")["fixed_finger"].size[2] == FINGER_LENGTH_M
+
+
+# ---- objects and the pick plan ----------------------------------------------------------------------------------
+
+
+def test_an_object_names_its_parts():
+    jar = Object("jar", {"body": JAR})
+    assert jar.part() is JAR and jar.part("body") is JAR
+    pan = Object("pan", {"handle": Cylinder.between(np.zeros(3), np.array([0.1, 0, 0]), 0.01), "body": JAR})
+    with pytest.raises(ValueError, match="say which"):
+        pan.part()
+    with pytest.raises(ValueError, match="no part"):
+        pan.part("lid")
+    with pytest.raises(ValueError, match="no parts"):
+        Object("nothing", {})
+    assert jar.describe().startswith("jar: body: cylinder")
+
+
+@pytest.fixture(scope="module")
+def gripped(model):
+    with_map = XleRobotModel.load(URDF)
+    with_map.gripper_maps["right"] = GripperMap(
+        -1.37, 1.2718, {"drive_mode": 0, "homing_offset": -860, "range_min": 2046, "range_max": 3493}
+    )
+    return with_map
+
+
+def test_plan_pick_runs_through_the_existing_execution(gripped):
+    jar = Object("jar", {"body": JAR})
+    one = {"t": (0.069, 0.069), "phi": (60.0, 60.0), "psi": (45.0, 45.0)}  # bowl1's grasp
+    found = grasp_candidates(jar, gripped, BOWL1_CAPTURE, arms=("right",), where=one)
+    best = found["A"]
+    pick = plan_pick(gripped, best, BOWL1_CAPTURE)
+    assert pick.labels == ("stage", "pick.back", "pick", "lift") and pick.ok.all()
+    assert pick.width == pytest.approx(JAR.radius * 2) and pick.margin == best.claw.margin
+    stage, back, at, lift = pick.points
+    np.testing.assert_allclose(
+        at, best.claw.grasp.center_root, atol=1e-9
+    )  # the aim point on the grasp's center
+    np.testing.assert_allclose(back, at - ATTACK_M * best.claw.grasp.approach_root, atol=1e-9)
+    np.testing.assert_allclose(stage - back, [0, 0, STAGE_UP_M], atol=1e-9)
+    np.testing.assert_allclose(lift - at, [0, 0, LIFT_M], atol=1e-9)
+    np.testing.assert_allclose(pick.frames[2], best.grasp.root_from_pinch)  # as grasp_candidates solved it
+    whole = prepare_execution(gripped, pick, PICK_GRIP)
+    assert whole.moves[0].label.startswith("start: gripper open")
+    assert any("pick: gripper close" in move.label for move in whole.moves)
+    hold = prepare_execution(gripped, select_poses(pick, "stage", "pick.back"))  # rule 1 stops here
+    assert hold.moves[-1].label.startswith("pick.back")
+
+
+def test_settings_are_the_callers(model):
+    """A narrow bound about the approach (a slippery object) rejects what the generous default accepts, and the
+    result says what was assumed."""
+    one = {"t": (0.069, 0.069), "phi": (30.0, 60.0), "psi": (30.0, 45.0)}
+    loose = grasp_candidates(JAR, model, BOWL1_CAPTURE, arms=("right",), where=one)
+    narrow = grasp_candidates(
+        JAR,
+        model,
+        BOWL1_CAPTURE,
+        arms=("right",),
+        where=one,
+        settings=GraspSettings(rotation_bounds_deg=(45, 0.01, 45)),
+    )
+    assert loose.passed > narrow.passed
+    assert "approach 0.01" in narrow.describe() and "approach 45" in loose.describe()
+    for c in loose.candidates:
+        assert c.grasp.ok and max(c.grasp.rotation_error_deg) <= 45.0
+
+
+def test_refine_aims_to_cancel_the_arms_error(model):
+    """At the hold the arm was measured 1 cm low: the same grasp, re-solved from there, is aimed 1 cm higher; the
+    object (moved 5 mm) is where the new fit says."""
+    one = {"t": (0.069, 0.069), "phi": (60.0, 60.0), "psi": (45.0, 45.0)}  # bowl1's grasp
+    found = grasp_candidates(JAR, model, BOWL1_CAPTURE, arms=("right",), where=one)
+    chosen = found["A"]
+    moved = Cylinder.upright(JAR.bottom_root + np.array([0.005, 0.0, 0.0]), JAR.length, JAR.radius)
+    offset = np.array([0.0, 0.0, -0.01])  # measured minus planned: low
+    again = refine(model, chosen, moved, BOWL1_CAPTURE, offset)
+    assert again.passed == 1 and again["A"].claw.fixed_side == chosen.claw.fixed_side
+    expected = chosen.claw.root_from_pinch[:3, 3] + np.array([0.005, 0.0, 0.0]) - offset
+    np.testing.assert_allclose(again["A"].claw.root_from_pinch[:3, 3], expected, atol=1e-6)
+    np.testing.assert_allclose(
+        again["A"].claw.grasp.center_root, chosen.claw.grasp.center_root + [0.005, 0, 0], atol=1e-9
+    )
+    with pytest.raises(ValueError, match="cylinder"):
+        refine(model, chosen, object(), BOWL1_CAPTURE)  # type: ignore[arg-type]

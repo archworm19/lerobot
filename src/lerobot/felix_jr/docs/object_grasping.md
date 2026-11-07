@@ -1,6 +1,6 @@
 # Object-centric grasping (experiment)
 
-**Status: phase A built, phase B steps 1-2 built, 2026-11-06** (results below the phase table). Built: the primitives
+**Status: phases A and B built; phase C's tools built, its robot session to come, 2026-11-06** (results below the phase table). Built: the primitives
 (`harness/primitives.py`), the claw mapping and the thin `grasp_candidates` (`harness/grasping.py`),
 `ArmIK.solve_frame` (`harness/reach.py`). It changes how the harness plans a grasp: today the model
 names a gripper pose (a point and pitch / heading / roll in the root frame) and searches for a good one itself; here
@@ -47,7 +47,7 @@ until B passes: the `Primitive` protocol is shaped by what the claw mapping and 
 |---|---|---|
 | A | `AntipodalGrasp`, the `Primitive` protocol, `Cylinder` (an axis, any direction); `to_claw`; the thinnest `grasp_candidates` (`ArmIK`, two checks: reaches, opening fits; ranked) | unit tests of the geometry; `to_claw` puts the pinch point where `grasp_offset` does today; **offline replay of bowl1's jar** from its hand-fit cylinder: the roll -60 grasp (the fixed jaw inside the jar) is rejected, and the grasp that worked is among the candidates (choosing it over the others is B's, with the scores) |
 | B | the other checks (attack point and move in clear, no joint jump) and scores (visibility, `hidden_by`, joint-limit margin, depth); `Object`, `plan_pick`; then `fit_cylinder` last | **offline replay** (no robot) of bowl1, container1's body, pen2: the top candidate is like the grasp that worked (bowl1's jar: `test_grasp_replay_smoke.py::test_the_best_is_seen`, an expected failure until then); pen2's edge-on pick and its forearm-hidden pick are rejected or ranked low, with the reason; `fit_cylinder` fits bowl1's three objects and pen2's pen from the recorded captures within ~0.5 cm of the hand fits |
-| C | the attack hold folded in: `refine` (re-locate, `arm_error`, re-solve the chosen candidate, check the move in) | a robot session (bowl1-like) with no hand-written snippets, every grasp from `grasp_candidates` |
+| C | the attack hold folded in: `refine` (re-locate, `arm_error`, re-solve the chosen candidate, check the view again); the tools model-facing (`api.py`: `fit_cylinder`, `grasp_candidates`, `plan_pick`, `refine`; `render` draws objects and candidates). **Tools built 2026-11-06** (`test_grasp_tools.py`) | a robot session (bowl1-like) with no hand-written snippets, every grasp from `grasp_candidates` |
 | D | the rim primitive (container1's pinch); the object-centric place (`plan_place`) | container1 and bowl1 replayed end to end, places included |
 | E | `harness.md` 1.L written; section 4's removals done | phases A-D pass |
 
@@ -72,24 +72,107 @@ until B passes: the `Primitive` protocol is shaped by what the claw mapping and 
 
 **Phase B progress (2026-11-06).** Built in order: (1) the rejected kept (`GraspCandidates.rejected`: each claw target
 with the stage it failed, the reason and its solves; `rejected_by_reason`, `nearest_misses`), and the arm-plane prune;
-(2) the camera check and the tiered ranking. To come: (3) the clearance checks and their geometry (capsules for the
-gripper and forearm: the URDF has no collision geometry; `calibration.arm_shapes` fits them from outline clicks,
-built 2026-11-06, not yet run on the robot), (4) `Object` and `plan_pick`, (5) the pen2 and
-container1 replays, (6) `fit_cylinder`.
+(2) the camera check and the tiered ranking; (3) the clearance checks: the gripper body and forearm as fitted by
+`calibration.arm_shapes` into `urdfs/xle_calib_11062026.urdf` (`api.MODEL` until 11-07's measured boxes), and stand-in fingers
+(then capsules; boxes since, below: `finger_boxes`). (4) `Object` and `plan_pick`; (5) pen2 replayed, which led to the redesign below, and
+container1's tub; (6) `fit_cylinder`. Phase B is built; its tools are not model-facing yet (`api.py`: phase C).
+
+- **`fit_cylinder`** (`tools.py`, step 6; `test_fit_cylinder.py`, on rendered scenes). The marks' convex hull (a few
+  marks around an object, or a line along a thin one) is lifted from depth. `axis="up"`: the vertical side first (the
+  points stacked over a range of heights in plan cells: a table or a lid puts one height in a place), then the circle
+  with the most of them on it (a search through triples), then a robust fit; the top from anything over its footprint
+  (a lid, a cap); a view looking down on the object barely shows its side and is refused. `axis="free"`: from the line
+  through the marks' own depths, keeping what is near it. `radius=` holds a known radius (thin objects: their fitted
+  radius comes out short). On the sessions' own marks (checked by hand: the captures are gitignored): bowl1's jar,
+  white container and chapstick within 0.4 cm of the session's widths and 0.1 cm of its tops, the jar's center 0.4 cm
+  from its own; the two looks down from the attack holds refused; pen2's leaning pen, free, 52-55 deg from vertical
+  (56), its axis 0.36 cm behind the marked surface; the pen in the book, up with its radius given, its top within
+  0.1 cm and its axis 0.3 cm of the session's (free: 8 deg off vertical, and one capture failed: `up` for an object
+  standing up).
+
+- **The redesign: the tool measures, the model judges** (2026-11-06, after pen2; `harness.md` 1.K). The tool held
+  heuristics that were the model's to choose; now:
+  - **What it is told is what may be grasped.** The model describes only the graspable part (the pen above the rim,
+    above the book) and, where it matters, from where (`where`: e.g. `{"psi": (0, 90)}`, level or from above). The
+    tool knows nothing of the rest of the object or the scene: **no collision checks** (the clearance stage,
+    `Surroundings` and the book's `Box` are removed); `protocols.md` rule 1, at the attack hold, is the check.
+  - **Generous filters, settable:** `GraspSettings` (printed with every result): the accepted turn about each axis
+    (default 45 deg each), the grasp point's miss (0.5 cm), what the camera must see, the margin and the attack
+    distance. The solve still *prefers* the exact antipodal pose (`ROTATION_SCALES_DEG`, the closing line kept square
+    most); `ArmIK.solve_frame` now separates those weights from the bounds it accepts.
+  - **No arm-plane prune** (it was a heuristic tied to the old bounds; the cost is speed: the jar's lid 32 s, pen2's
+    cup with both arms 77 s).
+  - **The ranking:** the antipodal error (the turn about the approach: the closing line off the object's normal;
+    about the hinge: the contacts slid along the approach), in `rank_step_deg` steps (default 5), then the joint
+    margin (the closest any joint comes to its bound), then the solve's cost.
+  - **Filters kept:** the jaws open wide enough; the arm reaches the attack point and the grasp; the head camera's
+    line of sight past both arms' plates and boxes (the stand-in fingers too: they are what catches jaws seen
+    edge-on).
+- **Replayed under the redesign:** *bowl1's jar lid:* the grasp that worked first (pitch -44, heading -129,
+  antipodal within 2 deg, joints >= 50 deg); the one bowl1 turned down rejected for the plate. *pen2's cup* (the pen
+  above the rim): 178 pass, the best all left-arm, pitch -26 to -33, heading 148, within 5 deg of antipodal, joints
+  >= 45 deg: within about 10 deg of the session's left pick, which clipped the pen's shaft below the rim (what the
+  tool no longer knows: rule 1's hold must catch it). *pen2's book* (the pen above it): unrestricted, the best come
+  **from below** (pitch +26 to +51, through the book, joints 1-12 deg from their bounds), nearly antipodal: trimming
+  the cylinder does not help (the gripper's bulk is behind the jaws, never in the cylinder); with
+  `where={"psi": (0, 90)}` the best are the session's own grasp (pitch 1, heading 163, roll 180) and one 13 deg lower,
+  joints >= 39 deg (`test_grasp_replay_pen2_smoke.py`). So "from where" is part of what the model must say.
+- **container1's tub body** (not a test): 131 of 1560 right-arm targets pass across the 11 cm tub (pitch -30 to -42),
+  the jaws open 13.8 cm: near the model's widest (15 cm), which is itself extrapolated (the gripper map was measured to
+  `gripper.pos` 85). The session pinched the rim instead, judging the body too wide; whether a fingertip grip across
+  a clear 11 cm tub holds is the model's call. TODO: a settable widest opening (`GraspSettings`), and the rim (phase D).
+- **The arm's shapes are boxes** (2026-11-06, after bowl2). The gripper body's capsule fitted its box-like servo
+  housing poorly, so every part is now an `ArmBox`: square to its link, a center and three sizes. The stand-in fingers
+  are boxes too (`finger_boxes`: 1 cm thick (guessed), 1 inch wide, from the tip back to the gripper body's box). A
+  calibration with capsules loads without them (a warning). Fitting the boxes to clicked outlines proved fragile:
+  clicks on edges inside the outline (the forearm's top ridge) flattened three of four boxes to the size bound, and
+  the forearm's soft sleeve, which runs into the upper arm's at the elbow, fits no rigid shape better than ~1 cm. So
+  (2026-11-07) `calibration.arm_shapes` takes the sizes from a ruler and checks the box drawn over the head camera's
+  frame, shifted by hand until it sits on the part. TODO: the plates as rotated `ArmBox`es, so one shape is left.
+- *The entries below describe the design before the redesign (kept for its findings).*
+
+- **The stand-in fingers:** computed, not clicked: each from its tip (where the calibration puts it) back along the
+  gripper axis to the gripper body's capsule (7.1 cm on both arms), its inner face on the contact line, the moving
+  one turned by the jaws' opening; radius 1.27 cm, half of "about 1 inch across at the widest" (an estimate, not
+  measured: generous, a finger is thinner than it is wide). They may come 3 mm from the table (to take something
+  lying on it), 1 cm from neighbours. TODO: measure the fingers if a check turns on them; keep contacts half a finger
+  in from an object's ends (`t` still runs to the jar's rim).
 
 - **The prune:** a claw target whose gripper axis is more than 25 deg out of the arm's vertical plane (through the
   shoulder pan axis and the target) is not solved: passes reach 18 deg (the jar and a lying pen, both arms), and it
   skips about half the failing solves (225 of 504 at the jar's lid; 18 s to 11.5 s).
-- **The camera check is hard:** a wrist camera plate hiding the jaws at the attack point or the grasp rejects it
-  (`protocols.md` rule 1 must look there). The pitch -30 grasp, best by the IK alone, is rejected for the right plate,
-  bowl1's own reason; three such are the nearest misses.
-- **The tiers:** jaws not edge-on; then no joint within 5 deg of its bound; then how squarely the camera sees the jaws
-  (steps of 0.1); then the IK cost.
-- **Not yet the grasp that worked:** the best now come low (pitch -16 to -31) from phi 30, the fixed jaw on the far
-  side (roll near 180), seen at +0.47 to +0.69; the grasp that worked (pitch -44, seen -0.35) ranks next. The low
-  ones cross where the jar's neighbours stood, which the clearance checks will judge; whether those or the
-  visibility tier should decide is open (`test_grasp_replay_smoke.py::test_the_best_is_like_the_grasp_that_worked`,
-  an expected failure).
+- **Filters, then one ranking** (2026-11-06, replacing the visibility tiers: visibility was in three places, a plate
+  filter, an edge-on tier and a "seen squarely" tier). Filters, cheapest first where one does not need another's
+  result (`STAGES`): the jaws open wide enough; the arm plane; the attack point solves; **attack view**: the head
+  camera's line of sight to the grasp's center and both contacts passes no arm surface (both arms' plates, 5 mm
+  margin, and capsules, the stand-in fingers too: `sight_blockers`); the grasp solves; **grasp view**: the same for
+  the center; **clearance**. Jaws seen edge-on hide the center behind a finger, so they fail a view filter. Then
+  **one ranking:** how far the joints stay from their bounds (the IK's cost breaks ties).
+- **Timed** (`GraspCandidates.timing`, bowl1's jar, 504 claw targets): the attack point's solve 34 ms each (279 run,
+  9.6 s: nearly all of it), the grasp's 17 ms (39), attack view 2.0 ms (66), grasp view 1.8 ms (39), clearance
+  6.9 ms (14), the arm plane 0.2 ms (504). The view at the attack point runs before the grasp's solve and spares it
+  for those it rejects.
+- **bowl1's jar, replayed:** the best is the grasp that worked (pitch -44, heading -129, every joint >= 50 deg from
+  its bound); the grasp bowl1 turned down (pitch -30, the right plate in the way) is rejected at the attack view for
+  the plate; the low, face-on grasps the visibility tiers had put first (pitch -16, joints >= 18 deg) rank below.
+  The clearance checks reject nothing here (the chapstick and the white container were already in the bowl behind
+  the jar when it was picked; an earlier note here had them beside it): the jar does not test them.
+- **Planned and executable:** bowl1's best, through `plan_pick`, runs through the harness's own
+  `prepare_execution` (dense straight steps re-solved by the old solver, no joint jumps, the gripper commands): the
+  bridge to phase C. Its attack point and grasp are within 1 cm of bowl1's executed plan
+  (`test_grasp_replay_smoke.py`).
+- **pen2 replayed** (step 5, 2026-11-06; `test_grasp_replay_pen2_smoke.py`). *The book:* the left arm's first grasp
+  (pitch 0, heading 163, roll 180, the pen above the book) is found as a candidate; the same pose lower, the fingers
+  over the book's edge, is rejected for the book (what the session's deeper re-grasp hit); the best take the pen above
+  the edge, clear of it. The book is a `Box` (only something to clear: its grasps are not built). *The cup* (not a
+  test yet): nothing passes for either arm. The right arm's session poses (pitch -40 / roll +40 edge-on, pitch -70 /
+  roll -100 behind the forearm) are not even reached: they closed at 75-79 deg to the pen, and the cylinder's family
+  closes square to it with 5 deg allowed about the approach; at 20 deg the right arm finds 8 grasps, every one with a
+  joint at its bound (the corner pen2 was in), and the session's poses fail about the closing line instead. The left
+  arm's poses there are rejected for the cup (the gripper body over its rim: modelled solid). Open: the tolerance about
+  the approach (TODO below).
+- **The sight margin is on the plates only.** With 5 mm on the capsules too, the gripper body "hid" the center of the
+  grasp that worked; a capsule's radius was fitted to the outline as seen.
 
 Out of scope for now: grasps sampled from raw point clouds (the interfaces allow it), multi-part objects beyond a part
 plus the whole's extent (a pan: a handle cylinder plus its body), two-arm grasps.
@@ -120,7 +203,7 @@ section 4 removes most of it).
 |---|---|
 | `fit_cylinder(view, uv, axis="up" \| "free", label) -> Object` | a cylinder from depth at the pixels the model marks on it (or along it): axis, radius, extent along the axis; its residual and point count in the description. `axis="up"` holds the axis vertical (an upright object on the table), `"free"` fits it (a pen, a handle). |
 | `fit_rim(view, uv, label) -> Object` (phase D) | a circle in a horizontal plane (container1's fit, as a tool), with an assumed wall thickness. |
-| `Object` | a named object: `parts` (name -> primitive), the whole's extent (for clearance while carried), a rough center of mass, the capture it came from (freshness, `harness.md` 1.C). Drawn by `render`. |
+| `Object` | a named object: `parts` (name -> primitive), the whole's extent (for clearance while carried), a rough center of mass, the capture it came from (freshness, `harness.md` 1.C). Drawn by `render`. **Built** (`objects.Object(label, parts, capture)`: parts and capture; not yet the extent or center of mass, for carrying: phase D). `grasp_candidates` takes one (and its `part`); `Surroundings.of(table_z, objects)` makes the rest what the gripper must clear. |
 
 **Primitives (internal):**
 
@@ -137,8 +220,8 @@ section 4 removes most of it).
 |---|---|
 | `to_claw(grasp, model, arm, fixed_side, margin, attack) -> ClawTarget` | `root_from_pinch` putting the fixed tip on contact `fixed_side` (`margin` clear of it) and the moving tip, at the grasp's opening, on the other: the real tip-to-tip line (it tilts 5-19 deg off the pinch -x with the opening, which the roll-based poses ignore) along the closing line, the hinge square to the closing and the approach; `root_from_attack`, `attack` back along the approach; how far apart the tips open and close (`OPEN_CLEARANCE_M`, `SQUEEZE_M`; `prepare_execution` turns them into `gripper.pos`). Uses `XleRobotModel.grasp_offset`, which it agrees with. **Built.** Not yet: `depth` (contacts deeper than the tips: the claw's opening for a width changes there), the close as an overshoot past contact (`tuning_notes.md` 3.9). |
 | `ArmIK` (kept, from `reach.py`) | `solve_frame(root_from_pinch, axes_root, rotation_tols_deg)`: the joints for a whole target pinch frame, the rotation's error split about three axes, each weighted by its tolerance; still one local least-squares solve. `grasping` uses the grasp's closing line 20 deg (keeps the contacts: the missing sixth joint gives way here), approach 5 (rolls the closing line off the object), hinge 10. **Built.** |
-| `Check` / `Score` | functions of (candidate, scene) -> (passed or value, a short text). Checks: reaches; opening fits; attack point clear; straight move in clear (swept at the arm's measured error when one is given); no joint jump on the way; not hidden (`hidden_by`, later the forearm). Scores: jaws visible (`XleRobotModel.visibility`), joint-limit margin, depth in the jaws. **Built so far** (inline in `grasp_candidates`, stages `STAGES`): opening fits, the arm plane, reaches (attack, then grasp from its joints: no joint jump), not hidden by a plate; the visibility and joint-limit scores, ranked in tiers (`GraspCandidate.rank_key`). |
-| `Scene` | what the checks test against: the table plane, the other `Object`s, the robot model (links, plates), and the capture's depth for anything not modelled. |
+| `Check` / `Score` | **Redesigned** (phase B progress): filters `STAGES` (the jaws, reach, the head camera's line of sight past the arms' plates and boxes) with generous, settable bounds (`GraspSettings`); the score is the antipodal error, then the joint margin. No collision checks: the model describes only the graspable part, and from where. |
+| `Scene` | **Not built, by design** (phase B redesign): the tool is told only what may be grasped and from where; the scene is the model's to judge, and rule 1's hold checks it. (`Surroundings`, built and removed, 2026-11-06.) |
 
 **Planning (model-facing tools):**
 
@@ -146,7 +229,7 @@ section 4 removes most of it).
 |---|---|
 | `grasp_candidates(obj, part=None, arm=None, where=None, n=5) -> GraspCandidates` | **Built, thin** (`grasp_candidates(primitive, model, capture, arms, where, spacing, margin, attack, n)`; the checks and tiers of `Check` / `Score`; every rejected target kept, with its stage and reason; `Object` and `render` not yet). generate -> claw -> IK -> checks -> ranked; `arm=None` tries both. `where` narrows the family in object terms ("top 2 cm", "from above"). Returns the best `n` named A, B, ... plus a count of the rejected by reason. Drawn by `render` (each candidate's jaws, colored by rank). |
 | `GraspCandidate` | one ranked grasp: the `ClawTarget`, the solved `Poses` for attack and grasp, every check and score, `describe()`: "A: right arm, from the robot's side 40 deg down, jaws level; seen (-0.40); move in clear >= 0.8 cm; 7.6 cm from `white`; reaches". |
-| `plan_pick(candidate, lift=0.03) -> Poses` | stage, attack point, grasp, lift, with the grip actions, ready for `prepare_execution` (kept). |
+| `plan_pick(candidate, lift=0.03) -> Poses` | stage, attack point, grasp, lift, with the grip actions, ready for `prepare_execution` (kept). **Built** (`plan_pick(model, candidate, capture, stage_up=0.06, lift=0.03)`): "stage" 6 cm above the attack point, "pick.back", "pick", "lift", as the harness's `Poses` (the new solver's frames and joints, its achieved angles as targets), so `prepare_execution` runs it unchanged with `PICK_GRIP`; rule 1 stops at `select_poses(pick, "stage", "pick.back")`. |
 | `refine(candidate, capture, error=None) -> GraspCandidates` (phase C) | at the attack hold: the same family member re-solved from the new capture, the object re-fitted, aimed to cancel `arm_error` (kept), the move in re-checked. |
 | `plan_place(pick, onto, pose="upright", at=None) -> Poses` (phase D) | carry and place: the object's pose in the jaws is known from the grasp, so the gripper pose comes from where the object should end; lift height from the object's extent over what is between; release height above what is below. |
 
@@ -155,39 +238,35 @@ Kept as they are: `Capture`, `View`, `Grid`, `Points`, `TableEstimate`, `Focus`,
 
 ## 3. Grasp solving flow
 
-bowl1's jar, as it would go (the model's calls; the tool's work in comments):
+bowl1's jar, as the model calls it now (`harness.api`, phase C; the tool's work in comments; numbers from the
+replays):
 
 ```python
-# perception: the model marks pixels on the jar in a view
+# perception: the model marks the part it may grasp in a view (a few marks around it, or a line along a thin one)
 jar = fit_cylinder(view, uv=[[214, 250], [262, 252], [238, 300], ...], axis="up", label="jar")
-#   -> Object jar: cylinder, axis vertical at (-34.4, -10.7) cm, radius 2.0, z 71.4..79.3; residual 0.2 cm, 812 points
-bowl = fit_rim(view, uv=[...], label="bowl")
+#   -> jar: body: cylinder, radius 2.0 cm, from (-34.3, -11.1, 72.5) cm, 6.7 cm along the vertical
+#      (fitted to 2641 of 7835 points where marked, residual 0.16 cm, the side seen over 180 deg of it)
 
-# candidates: generate -> claw -> IK -> checks -> rank
-cands = grasp_candidates(jar, where="top 2 cm", arm="right")
-#   Cylinder.antipodal_grasps: t in the top 2 cm x phi every 30 deg x psi in {0, -20, -40} -> 108 grasps
-#   to_claw: x 2 fixed sides -> 216 targets (opening = diameter 4.0 cm along the real closing line)
-#   ArmIK: 216 solves, ~15 ms each
-#   checks: 61 reach; 44 with the attack point and the move in clear of the jar, the table and `white`
-#   scores: visibility, hidden_by (the right plate hides 9), joint-limit margin
-#   -> A: right, from the robot's side, 40 deg down, jaws level; seen (-0.40); move in clear >= 0.8 cm; ...
-#      B: right, from the right, 20 deg down; seen (-0.54); 3.1 cm from the bowl's rim at the attack point
-#      ... rejected: 155 out of reach, 17 move in hits the jar or the table, 9 hidden by the right wrist camera plate
-render(view, jar, bowl, cands)          # the model looks, picks A
+# candidates: generate -> claw -> filters (jaws, reach, the head camera's line of sight) -> rank
+cands = grasp_candidates(jar, capture, arms=["right"], where={"psi": (0, 90)})  # level to from above
+#   -> settings: accepted: turns up to (closing line 45, approach 45, hinge 45) deg, ...
+#      A: right arm, ... gripper at pitch -44, heading -129, roll -6; antipodal error 2 deg ...; joints >= 50 deg
+#      ... rejected: ... attack point: the plate hides the grasp from the head camera ...
+render(view, jar, cands)                 # the model looks, picks A
 
 # pick: stage and attack, hold
-pick = plan_pick(cands["A"])            # stage, pick.back, pick, lift1, with "start": open, "pick": close
-execute(prepare_execution(select_poses(pick, "stage", "pick.back")), hold=True)
+pick = plan_pick(cands, "A")             # stage, pick.back, pick, lift
+execute(prepare_execution(select_poses(pick, "stage", "pick.back"), {"start": "open"}), hold=True)
 
-# rule 1 at the hold (protocols.md), now three calls
-look = look_at(cands["A"])
-err = arm_error(pick, look, "pick.back")
-a2 = refine(cands["A"], look, error=err)  # re-fit the jar, re-solve A, re-check the move in at the measured pose
-execute(prepare_execution(select_poses(plan_pick(a2["A"]), "pick.back", "pick", "lift1")), hold=True)
+# rule 1 at the hold (protocols.md)
+look = look_at(pick.points[2])                                  # the grasp, centered (head only)
+jar2 = fit_cylinder(full_view(look), uv=[...], axis="up", label="jar")   # where it is now
+err = arm_error(pick, look, "pick.back")                        # where the arm really is
+a2 = refine(cands, "A", jar2, look, err)  # the same grasp on jar2, from the arm's pose, aimed to cancel err
+pick2 = plan_pick(a2, "A")
+execute(prepare_execution(select_poses(pick2, "pick.back", "pick", "lift"), {"pick": "close"}), hold=True)
 
-# carry and place
-place = plan_place(pick, onto=bowl, pose="upright")
-execute(prepare_execution(place), hold=True)
+# carry and place: phase D (plan_place)
 ```
 
 How the pieces call each other inside `grasp_candidates`:
@@ -208,6 +287,11 @@ grasp_candidates(obj, where, arm)
 If the experiment proves out (phase E), these go. Until then they stay and keep working.
 
 **Model-facing tools (`harness/api.py`):**
+
+Marked deprecated (2026-11-06: `@tool(..., deprecated=...)`: `describe_tools` shows the model what replaces each,
+and a call to one is logged as deprecated). `solve_pose`, `join_poses` and `held_object` still plan a carry and a
+place until `plan_place` (phase D).
+
 
 - `solve_pose`: replaced by `grasp_candidates` and `plan_pick` / `plan_place`. The model no longer names a pitch,
   heading and roll.
@@ -233,7 +317,7 @@ If the experiment proves out (phase E), these go. Until then they stay and keep 
 - `test_grasp.py`: rewritten for `to_claw` and the candidates (the claw geometry it checks stays true).
 - `test_harness.py`: the `solve_pose` / `approach` / `held_object` cases.
 - `smoke_tests/test_ik_smoke.py`: rebuilt on `grasp_candidates` over pen1's and bowl1's recorded scenes.
-- `test_arm_shapes.py` (was `test_wrist_camera_board.py`): `test_solved_poses_say_what_the_camera_sees_of_the_grasp` moves to the scores.
+- `test_arm_model_shapes.py` (from `test_arm_shapes.py`, was `test_wrist_camera_board.py`): `test_solved_poses_say_what_the_camera_sees_of_the_grasp` moves to the scores.
 
 **Docs:**
 
@@ -256,12 +340,21 @@ and occlusion scores, the clearance and swept move-in checks) were the prototype
   model gets right most often against the hand fits, and keep that one (or two) as the model-facing form.
 - **Speed.** 27 ms per solve with a finite-difference Jacobian; the model has the analytic one
   (`XleRobotModel.frame_pose_jacobian`), unused by both `ArmIK.solve` and `solve_frame` (`jac="2-point"`). Also
-  cheaper: solve once per (phi, psi) and shift along `t`. (The arm-plane prune is in: phase B progress.)
+  cheaper: solve once per (phi, psi) and shift along `t`. (The arm-plane prune was removed in the redesign: it
+  skipped half the solves, but was a heuristic tied to the bounds.)
 - **Families against the arm's five joints.** The heading follows the shoulder, so a 30 deg `phi` grid leaves most
-  sides unreachable; the prune skips them unsolved. A cylinder is symmetric about its axis, so `phi` could instead be
+  sides unreachable, each a failed solve. A cylinder is symmetric about its axis, so `phi` could instead be
   solved for (set by the heading the arm reaches); whether a primitive should declare its symmetries for that is open.
-- **Visibility as a tier.** Ranking by how squarely the jaws are seen prefers low, face-on grasps; bowl1's landed at
-  -0.37 to -0.66, so past the edge-on threshold it may matter little. Revisit once the clearance checks are in.
+- **How far a grip may tilt is the model's call** (settled by the redesign): the width a tilted closing line needs
+  (diameter / cos(a)) and the friction cone (tan(a) < mu) depend on the object; the default accepts 45 deg and ranks
+  the most antipodal first, and the model narrows `GraspSettings.rotation_bounds_deg` for a slippery one.
+- **Ends that are not free.** "From level or above" (pen2's book) could be said as a fact about the object instead:
+  a cylinder's end that is buried or attached, ruling out approaches from it. Try if the model finds `where` awkward.
+- **Joints at their bounds rank high when antipodal.** On the jar, grasps with a joint at its bound (pitch 0) are in
+  the top 8, after the ones that worked, inside the first 5 deg step. If they reach the top in a session, a bound on the
+  joint margin (in `GraspSettings`) is the setting to add.
+- **Ranking beyond antipodal and the joint margin.** To add when a session shows the need: the arm's expected sag
+  (it grows with a level reach: `open_issues.md` 16), depth in the jaws.
 - **The camera's pose.** The checks use the capture's head pose; rule 1 looks from the `look_at` pose at the attack
   point, which sees the grasp from a little elsewhere. Check from that pose instead.
 - **Contacts at an edge.** `t` runs to the cylinder's very ends (the jar's top rim); the fingers have width, so a

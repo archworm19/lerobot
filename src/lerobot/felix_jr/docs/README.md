@@ -233,32 +233,29 @@ radius r. It needs a calibrated URDF from section 6 (the model's radius is the s
    stored measurements with no robot. A camera calibration started from this file (`collect` /
    `xle_fit --start-from`) keeps the maps.
 
-### 8. Fit the arm's shapes: plates and capsules (clicks, needs the server)
+### 8. Measure the arm's shapes: the gripper body and the forearm as boxes (a ruler, needs the server)
 
-From the head camera, the wrist camera's plate can hide the jaws (pen2, `sessions.md`), and the grasping's clearance
-checks (`object_grasping.md`) need the gripper's and the forearm's shape. This adds them to a calibration from clicks,
-view after view (the rest of the calibration stays as it is): the plate as a box, from three of its corners; the
-fixed and moving fingers, the gripper body, the wrist and the forearm (with its sleeve) as capsules, from points on
-their outlines.
+The grasping's line-of-sight checks (`object_grasping.md`) need the gripper's and the forearm's shape. Each is a box
+square to its link: measure it with a ruler, type the sizes, and check it drawn over the head camera's picture (the
+rest of the calibration stays as it is). The fingers are not measured: the grasping puts 1 cm x 1 inch stand-in boxes
+where the calibration puts the tips. (The boxes were first fitted to clicked outlines: fragile, 2026-11-06.)
 
-1. Put small numbered marks (1, 2, 3) on three corners of the plate's back (the side the head camera sees), going
-   around it so that 2 is between 1 and 3. Same on both arms. (Only for the plate: the capsules need no marks.)
+1. Measure each part with a ruler, in cm:
+   - **gripper body:** its length from the wrist toward the tips, its width across the jaws (the way they close),
+     its depth along the jaws' hinge;
+   - **forearm** (with its sleeve): its length from the elbow toward the wrist, its width side to side (along the
+     elbow's axis), its height from the line through the elbow's and the wrist's axes down to its bottom.
 2. Server on the Pi with the arm (and the head): as for section 6.
 3. On your computer, with the workspace clear:
-   `uv run python -m lerobot.felix_jr.calibration.arm_shapes tcp://<pi>:5555 --arm right
-   --start-from <calibration.urdf> --out-dir <a scratch folder>`
-   (`--parts fixed_finger,moving_finger,gripper_body,wrist,forearm` for the capsules only, e.g. with the plates
-   already fitted).
-   `n` moves to the next view: 12 from the plate's side of the gripper, then 8 from the jaws' side (`--n`,
-   `--n-other`), the jaws opened about 3 cm. The status line asks for one thing at a time: plate corners 1, 2, 3 in
-   order (plate-side views only), then each part's outline: click 2-4 points on its edge against the background,
-   on both sides of it, then `s` for the next part (`s` with no clicks skips a part that is hidden). When a part is
-   out of the picture (the forearm often is, and it is close to the camera), the head turns to it first; if it
-   cannot, the arrow keys turn the head. `u` undoes. Fitted shapes are drawn as they come (the plate yellow, the
-   capsules orange) and should sit on the real ones. `q` fits and writes `calibration.urdf` and `arm_shapes.md` in
-   the folder.
-4. Read `arm_shapes.md`: the pixel RMS per shape (a few px); the plate's two fitted edges (equal, at 90 deg, its
-   size); each capsule's length and radius (check them with a ruler).
+   `uv run python -m lerobot.felix_jr.calibration.arm_shapes tcp://<pi>:5555 --start-from <calibration.urdf>
+   --out-dir <a scratch folder>` (`--arm right` to skip the question). For each part, the head turns to it and the
+   terminal asks for its sizes (Enter keeps the ones shown: the calibration's box, if it has one). The box is then
+   drawn orange over the frame, with an arrow from its center along each direction (also saved as
+   `<arm>_<part>.png`), and the terminal asks: `y` it sits on the part, keep it; `s L W D` new sizes; `m L W D`
+   shift it (cm, along the arrows); `v` another view (moves the arm and the head); `h N E` turn the head (deg);
+   `q` stop without writing. The gripper body starts at the wrist roll's axis and runs toward the tips; the forearm
+   is centered between the elbow and the wrist, its top on the joints' line: shift them onto the real parts.
+4. It writes `calibration.urdf` (the start with the boxes) and `arm_shapes.md` (the sizes and shifts) in the folder.
 5. The other arm: run again with `--start-from` the file just written. Then check the whole calibration (section 9).
 
 ### 9. Check the calibration on the robot (no clicks, needs the server)
@@ -266,7 +263,8 @@ their outlines.
 Draws where the calibrated URDF puts both fingertips over the head camera, view after view, with the gripper at
 different openings: the pinch point (cyan, placed by the camera calibration) and the moving jaw's tip (magenta,
 placed by the gripper map from section 7 as well), and the wrist cameras' plates (yellow outlines) and the arms'
-capsules (orange outlines), from section 8, where the URDF has them. It needs a URDF with the arm's gripper map, made for this robot
+boxes (orange outlines), from section 8, where the URDF has them, each named above its outline (the other
+arm's as, e.g., "left forearm"). It needs a URDF with the arm's gripper map, made for this robot
 (the same check as the harness's: a recalibrated arm or flipped head directions are refused).
 
 1. Server on the Pi with the arm (and the head): as for section 6.
@@ -278,7 +276,7 @@ capsules (orange outlines), from section 8, where the URDF has them. It needs a 
    the head; `q` quits and sends the robot to rest.
 3. Read the result: both circles should sit on the fingertips everywhere. An offset of the pinch point that changes
    with the pose or the head is the camera calibration (recalibrate, section 6); a pinch point on target with the
-   moving tip off, growing with the opening, is the gripper map (re-measure, section 7); a plate's or a capsule's
+   moving tip off, growing with the opening, is the gripper map (re-measure, section 7); a plate's or a box's
    outline off the real one is its fit (section 8). With `--out-dir`, every
    frame is saved as drawn and raw, with `frames.json` (the measured state and both predictions per frame).
 

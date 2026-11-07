@@ -11,8 +11,9 @@ next of `--openings` (LeRobot's `gripper.pos`), and the frame shows where the mo
 
   cyan circle       the pinch point: the fixed jaw's tip (placed by the camera calibration)
   magenta circle    the moving jaw's tip (placed by the gripper map and the hinge too), with a line between them
-  yellow outlines   the wrist cameras' plates the calibration has, both arms' (`calibration.arm_shapes`)
-  orange outlines   the arms' capsules (fingers, gripper body, wrist, forearm) it has (`calibration.arm_shapes`)
+  yellow outlines   the wrist cameras' plates the calibration has, both arms' (older calibrations)
+  orange outlines   the arms' boxes it has, both arms' (the gripper body, the forearm: `calibration.arm_shapes`)
+                    each shape named above it ("forearm"; the other arm's as "left forearm")
 
 computed from the joint angles and the `gripper.pos` measured with the frame. If the calibration is right, the two
 circles sit on the two fingertips at every view and every opening; how far off they are, and whether it changes
@@ -38,7 +39,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from lerobot.felix_jr.calibration.arm_shapes import CAPSULE_COLOR, capsule_outline
+from lerobot.felix_jr.calibration.arm_shapes import BOX_COLOR, box_outline, draw_label, shape_name
 from lerobot.felix_jr.calibration.live_view import (
     INTRINSICS_KEYS,
     LiveView,
@@ -65,22 +66,24 @@ def annotate(
     image: np.ndarray,
     lines: list[str],
     points: Sequence[tuple[np.ndarray | None, tuple, str]],
-    outlines: Sequence[np.ndarray] = (),
-    capsules: Sequence[np.ndarray] = (),
+    outlines: Sequence[tuple[np.ndarray, str]] = (),
+    boxes: Sequence[tuple[np.ndarray, str]] = (),
 ) -> np.ndarray:
     """Copy of the RGB `image` with each `(pixel, color, label)` as a labeled circle, and text at the top left.
 
     A line joins the first two drawn points; a point with no pixel (None, or behind the camera) is left out. Each of
-    `outlines` (N, 2 pixels) is drawn as a closed yellow polygon: a wrist camera's plate; each of `capsules` as an
-    orange one: a part of an arm.
+    `outlines` ((N, 2) pixels, name) is drawn as a closed yellow polygon with its name above: a wrist camera's plate;
+    each of `boxes` as an orange one: a part of an arm.
     """
     out = image.copy()
-    for shapes, color in ((outlines, BOARD_COLOR), (capsules, CAPSULE_COLOR)):
-        for outline in shapes:
+    taken: list[tuple[int, int, int, int]] = []  # the labels' boxes, so they do not overlap
+    for shapes, color in ((outlines, BOARD_COLOR), (boxes, BOX_COLOR)):
+        for outline, name in shapes:
             if np.isfinite(outline).all():
                 polygon = np.round(outline).astype(np.int32).reshape(-1, 1, 2)
                 cv2.polylines(out, [polygon], True, (0, 0, 0), 3, cv2.LINE_AA)
                 cv2.polylines(out, [polygon], True, color, 1, cv2.LINE_AA)
+                draw_label(out, outline, name, color, taken)
     drawn = [(uv, color, label) for uv, color, label in points if uv is not None and np.isfinite(uv).all()]
     if len(drawn) >= 2:
         a, b = (tuple(int(round(float(c))) for c in uv) for uv, _, _ in drawn[:2])
@@ -201,12 +204,13 @@ class CheckSession(LiveView):
             (pinch.uv if pinch.z > 0 else None, PINCH_COLOR, "pinch"),
             (moving.uv if moving.z > 0 else None, MOVING_COLOR, "moving tip"),
         ]
-        return annotate(self.capture.color, lines, points, self.board_outlines(), self.capsule_outlines())
+        return annotate(self.capture.color, lines, points, self.board_outlines(), self.box_outlines())
 
-    def board_outlines(self) -> list[np.ndarray]:
+    def board_outlines(self) -> list[tuple[np.ndarray, str]]:
         """Each wrist camera plate the calibration has (both arms'), as its seen face in the current frame.
 
-        Each is (4, 2) pixels; a plate behind the camera is left out. The other arm's plate is placed at the joints this frame measured for it, if any, else at its rest in the URDF.
+        Each is (4, 2) pixels, with its name ("plate", or "left plate" for the other arm's); a plate behind the
+        camera is left out. The other arm's plate is placed at the joints this frame measured for it, if any, else at its rest in the URDF.
         """
         state = self.capture.state
         arms = {arm: state[f"{arm}_arm"] for arm in self.model.wrist_boards if f"{arm}_arm" in state}
@@ -215,26 +219,28 @@ class CheckSession(LiveView):
         for arm in self.model.wrist_boards:
             uv, z = self.model.project(self.model.board_corners(arm, q), q)
             if (z > 0).all():
-                outlines.append(uv)
+                outlines.append((uv, shape_name(arm, "plate", self.arm)))
         return outlines
 
-    def capsule_outlines(self) -> list[np.ndarray]:
-        """Each capsule the calibration has (both arms'), as its outline in the current frame (`capsule_outline`).
+    def box_outlines(self) -> list[tuple[np.ndarray, str]]:
+        """Each box the calibration has (both arms'), as its outline in the current frame, with its name.
+
+        The outline is `box_outline`'s; the name "forearm", or "left forearm" for the other arm's.
 
         Placed like `board_outlines`; a moving finger at its arm's measured opening (closed without a gripper map).
         """
         state = self.capture.state
-        arms = {arm: state[f"{arm}_arm"] for arm in self.model.capsules if f"{arm}_arm" in state}
+        arms = {arm: state[f"{arm}_arm"] for arm in self.model.boxes if f"{arm}_arm" in state}
         q = self.model.joint_vector(arms, {n: int(state["head"][n]["ticks"]) for n in HEAD_JOINTS})
         outlines = []
-        for arm in self.model.capsules:
+        for arm in self.model.boxes:
             opening = 0.0
             if arm in arms and arm in self.model.gripper_maps:
                 opening = max(self.model.opening_deg(arm, float(arms[arm]["gripper.pos"])), 0.0)
-            for a_root, b_root, radius in self.model.capsules_root(arm, q, opening).values():
-                polygon = capsule_outline(self.model, q, a_root, b_root, radius)
+            for part, (root_from_box, half) in self.model.boxes_root(arm, q, opening).items():
+                polygon = box_outline(self.model, q, root_from_box, half)
                 if polygon is not None:
-                    outlines.append(polygon)
+                    outlines.append((polygon, shape_name(arm, part, self.arm)))
         return outlines
 
     # ---- frames ---------------------------------------------------------------------------------------------

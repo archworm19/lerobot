@@ -54,6 +54,17 @@ the IK smoke test is built on pen1).
       untested.
     - **Try it on the robot:** a pen1-like pick with the new grasp point and gripper commands (a new session), once
       at margin 0 and once at ~1 cm.
+    - **The camera's pose with the head at home is ~2 cm off** (bowl4, 2026-11-07, `sessions.md`): at an attack
+      hold the real fingertips (depth) were 1.9-2.8 cm from the model's at the measured joints with the head at home,
+      1.3 cm with the head aimed at the grasp; the scan read the table 1.4-2 cm lower from the home pose. Until the
+      head's calibration is checked at home (`calibration.check` there), judge holds and plan moves in from a
+      capture with the head aimed at the grasp (`look_at`).
+    - **`arm_error` sees the joints only:** it compares measured to commanded joints through the model, so a camera
+      (or arm calibration) error is invisible to it. A check of the fingertips in the image (depth or the drawn
+      fingertips against the real ones) at the hold would catch it.
+    - **The move in goes sideways** (bowl4): `plan_pick` puts the attack point back along the grasp's approach, which
+      `to_claw` leaves 8-19 deg off the gripper's own axis (the tip-line tilt); the fingers travel crabwise and sweep
+      across a narrow object. Put the attack point back along the gripper axis (tried by hand in bowl4).
 
 ## Set up the wrist cameras
 
@@ -144,10 +155,13 @@ including the object being grasped. Revisit only if the model, given good render
     real plate (2.3 px RMS, 38 x 43 mm) and hides none of those grasps.
     TODO:
     - **The sleeved forearm:** a cylinder along the lower arm with the sleeve's real radius, tested like the plates.
-      It is what hid pen2's second pick. Built (2026-11-06), not yet run on the robot: `calibration.arm_shapes` fits
-      it (and the fingers, the gripper body, the wrist) as capsules from outline clicks (`Capsule`,
-      `XleRobotModel.capsules_root`); still to do: fit them on both arms, then test the line of sight against them
-      in `hidden_by` / `view_of` like the plates.
+      It is what hid pen2's second pick. Built (2026-11-06, measured since 2026-11-07): `calibration.arm_shapes`
+      gives it and the gripper body boxes from a ruler's sizes, checked over the head camera's frame (`ArmBox`,
+      `XleRobotModel.boxes_root`); the grasping's view filters test against them (`grasping.sight_blockers`).
+      Measured on both arms into `urdfs/xle_calib_11072026.urdf` (now `api.MODEL`): gripper bodies 3 x 6.5 x 5 cm,
+      forearms 13 x 6 x 3 cm, unshifted. Still to do: the boxes still look a bit off over the camera's frame
+      (`calibration.check`): find out where (the placement, the sizes, or the calibration under them) and fix it;
+      then test `hidden_by` / `view_of` against them like the plates.
     - **Re-check the left plate's fit:** 38 x 54 mm at 3.3 px RMS (the right: 38 x 43), not square; likely a corner
       clicked out of order or a misclick (the report, now `arm_shapes.md`, has the per-corner errors; `calibration.check` shows
       whether its outline sits on the plate). Re-run if it is off.

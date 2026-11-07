@@ -7,6 +7,93 @@ renders and the workspace log; `session.py log <name>` prints the calls and obje
 (`workspace.pkl`) of the sessions before pen1 (`cable1`, `cable1_new`, `chapstick1`, `desk1`) no longer loads: it
 holds objects removed since (`Plan`, `Reach`) or lacks the call log. Their images and `log.jsonl` still read.
 
+## bowl4 (2026-11-07): put a bottle and a chapstick into a plastic container
+
+**Setup.** The clear plastic container (11.0 cm wide, center (-44.2, -11.5) cm, rim at 79 cm); a white bottle
+(2.9 cm wide, top 77.6) and a chapstick (1.75 cm, top 78.3) upright on the table. Right arm, the grasp tools
+(`fit_cylinder`, `grasp_candidates`, `plan_pick`, `refine`) with `urdfs/xle_calib_11072026.urdf` (the arms' parts
+measured as boxes, no plates), `protocols.md` rule 1, every move approved. (bowl3, the session before, stopped at
+its first hold: the arm-shape model was replaced, `arm_shapes`.)
+
+### What happened
+
+1. **The bottle, from above (missed).** The first choice was a top-down grasp (pitch -76) for its square grip
+   (antipodal within 1 deg) and in the hope the head camera would see between the jaws. At the hold the view filter
+   rejected it anyway (a finger in front of the center: `GraspSettings.see_at_attack` added to turn it off, judging
+   the hold by the picture). The jaws closed fully on nothing much (`gripper.pos` 12.85 against 12.7 commanded):
+   a slight miss. Top-down also left the joints 19 deg from their bounds, and the right arm cannot carry that tilt
+   over the container (only pitch -40 or shallower reaches it).
+2. **The bottle, from the side (done).** A side grasp (pitch -30, 3.2 cm up the bottle): attack hold 0.7 cm low,
+   refined to cancel it; the jaws stopped at 14.5 for the 2.9 cm bottle (14.4 expected: gripped). Lifted, carried
+   at the same pitch (z 85) and released over the container's center: in.
+3. **The chapstick, first try (dropped).** A near-level grasp (pitch -13) at the far end of the right arm's reach:
+   gripped (jaws stopped at 1.75 cm), but closed only to 1.7 cm (width - 3 mm from a fit 2.0 cm wide): almost no
+   squeeze. On the lift the arm sagged 2 cm and the shoulder stalled 3 deg short; the chapstick was on the table.
+   Reset 5 cm further out it was out of reach for every grasp; moved closer.
+4. **The chapstick, second try (knocked over).** A side grasp (pitch -28, phi 30), the radius held at the measured
+   0.875 cm. The arm landed within 1.0 cm of plan (0.8 low, 0.3 across the jaws); the jaws closed fully: the
+   chapstick lay on the table, to the left of the left (fixed) finger.
+
+### Hypothesis: the move in goes sideways
+
+What we expected: open the jaws to the object's width plus a tolerance, put the point midway between the fingers on
+the object, then move straight forward along the gripper's own axis. What the tools do differs in two ways:
+
+- **Not centered:** the fixed finger is aimed 0.8 cm clear of its contact (`margin`), so closing pushes the object up
+  to 0.8 cm onto it. Fine for a heavy object, risky for a light, narrow one.
+- **Not straight forward:** `to_claw` lines the tip-to-tip line (tilted 8-19 deg toward the tips by the moving jaw's
+  arc) up with the closing line, so the gripper's axis leans off the grasp's approach; `plan_pick` puts the attack
+  point back along the approach, not the gripper axis. The move in therefore ran 21 deg off the gripper's own axis,
+  crabwise: the fixed finger swept across the front of the chapstick (planned 1.7-2.4 cm clear) and then ran
+  alongside it at 0.8 cm. Within the arm's ~1 cm error that clips a light object and pushes it toward the fixed
+  finger's outside: what was seen. The arm's orientation itself matched the plan within ~1 deg.
+
+To try: center the jaws on narrow objects (no margin) and move in straight along the gripper's own axis (the attack
+point back along it, the grasp pose unchanged).
+
+**Tried (third chapstick attempt):** the fixed finger 1.2 cm clear, the move in built straight along the gripper's
+own axis (`solve_pose` from the candidate's pose; 0.0 deg between travel and axis, the fixed finger closing in from
+4.6 to 1.2 cm clear in the model). At the hold the chapstick was *not* between the fingers (seen by the person).
+
+### Finding: the camera's pose at the head's home is ~2 cm off
+
+At that hold, the real fingertips (from the depth) were 2.8 cm (left, fixed) and 1.9 cm (right) from where the model
+puts them at the measured joints, mostly along the reach; the arm's joints were within 1 deg of the plan
+(`arm_error` 0.9 cm, the usual sag). With only the head turned to the grasp (`look_at`, the arm holding), the same
+fingertips came within 1.3 cm of the model (mostly vertical). So most of the error was the camera's pose with the
+head at home, which the startup scan also showed: the table read 70.3 cm from the home pose against 71.7-72.4 from
+the others. Earlier holds were judged with the head aimed (`look_at`), where the model's fingertips sat on the real
+ones. Two consequences: judge every hold, and plan every move in, from a capture with the head aimed at the grasp,
+not from home; and `arm_error` compares the joints only, so it cannot see a camera error: the fingertips measured in
+the image are the check (open_issues).
+
+**Fourth chapstick attempt (between the fingers, fell on the close).** Re-planned from the aimed view: the chapstick
+re-fitted there ((-50.4, 7.4), 0.7 cm closer and its base 0.9 cm higher than the home view's fit), the straight-in
+path aimed to cancel what the real fingertips would be off by (the joints' sag plus the model-to-depth gap, about
+(+0.2, +0.5, +0.4) cm), the fixed finger 1.2 cm clear and the moving one 2.0 cm. The predicted fingertip paths
+started on the real fingertips in the image and ended either side of the chapstick, and the arm landed as planned by
+its joints (0.8 cm: the 0.7 sag, 0.0 across the jaws). The chapstick *was* between the fingers (seen by the person),
+but off center: closed on, it tipped and fell (`gripper.pos` 6.63, closed fully).
+
+### Takeaways
+
+- **Upright cylinders: from the side, not top-down** (the person's guidance): more room for error, and the carry
+  keeps the grasp's pitch. The bottle, from the side at pitch -30, went in first time.
+- **The move in must be straight along the gripper's own axis.** `plan_pick` moves along the grasp's approach, which
+  the tip-line tilt leaves 8-19 deg off the gripper axis: the fingers travel crabwise and sweep across a narrow
+  object. Built by hand here; to go into `plan_pick` (open_issues).
+- **Judge holds and plan moves in from a view with the head aimed at the grasp.** The home pose's camera is ~2 cm off;
+  aimed, the model's fingertips were within 1.3 cm of the real ones, and predicted paths started on them.
+- **Check the grip by the jaws' position after the close:** the jaws stopping near the object's width means
+  gripped, closing fully means missed (every miss here read that way). Close well past the object, from a measured
+  width (holding the radius in `fit_cylinder`), not 3 mm past a fit that may be too wide.
+- **Light, narrow objects need centering, and only one jaw moves.** With the object off center, the moving jaw pushes
+  it onto the fixed finger and an upright chapstick tips before it is held. Open: center it between the fingers
+  (the fixed finger's margin equal to the moving one's clearance), grip it lower (below its middle), or close slowly;
+  or nudge it upright against the fixed finger first.
+- **Reach:** the right arm reaches the chapstick only within about 50 cm of the root along -x; 5 cm further out
+  nothing passed, and near the limit the shoulder stalled on the lift (dropping the first grip).
+
 ## bowl1 (2026-11-05): put a chapstick, a small container and a jar into a bowl
 
 **Setup.** The container1 tub as the bowl (rim center (-45.5, -1.0) cm, radius 5.5, z 77.8); in a row in front of

@@ -210,14 +210,19 @@ class ArmIK:
         rotation_tols_deg: Sequence[float],
         position_tol: float = POSITION_TOL_M,
         init: np.ndarray | None = None,
+        rotation_bounds_deg: Sequence[float] | None = None,
+        position_bound: float | None = None,
     ) -> FrameSolution:
         """The joints putting the pinch frame closest to the target `root_from_pinch`, from `init`.
 
-        A whole-frame target, for the object-centric grasps (`docs/object_grasping.md`): the grasp point within
-        `position_tol` of the target's, and the rotation's error split into its components about the three
-        `axes_root` (columns, orthonormal; e.g. a grasp's closing line, approach and hinge), each weighted by its own
-        tolerance. The arm has five joints, so most targets are met only within the tolerances: a loose axis is where
-        the solve gives way. One local solve, as `solve`.
+        A whole-frame target, for the object-centric grasps (`docs/object_grasping.md`): the grasp point's error
+        weighted by `position_tol`, and the rotation's error split into its components about the three `axes_root`
+        (columns, orthonormal; e.g. a grasp's closing line, approach and hinge), each weighted by its own
+        `rotation_tols_deg`. The arm has five joints, so most targets are met only approximately: a loosely weighted
+        axis is where the solve gives way. One local solve, as `solve`.
+
+        The weights are the solve's preferences; whether the result counts (`ok`) is `rotation_bounds_deg` and
+        `position_bound` (default: the weights themselves), so a caller can accept more than the solve aims for.
         """
         goal_point = self.tool(root_from_pinch)
         rot_goal = Rotation.from_matrix(root_from_pinch[:3, :3])
@@ -246,7 +251,13 @@ class ArmIK:
             position_error_m=error_m,
             rotation_error_deg=rotation_deg,
             at_limit=self._at_limit(result.x),
-            ok=bool(error_m <= position_tol and (rotation_deg <= np.degrees(tols)).all()),
+            ok=bool(
+                error_m <= (position_tol if position_bound is None else position_bound)
+                and (
+                    rotation_deg
+                    <= np.asarray(rotation_tols_deg if rotation_bounds_deg is None else rotation_bounds_deg)
+                ).all()
+            ),
         )
 
     def _at_limit(self, x: np.ndarray) -> tuple[str, ...]:

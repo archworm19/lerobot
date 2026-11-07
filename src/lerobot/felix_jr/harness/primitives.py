@@ -92,7 +92,10 @@ class AntipodalGrasp:
 class Primitive(Protocol):
     """A shape with a pose in the root frame that generates its own antipodal grasps."""
 
-    root_from_obj: np.ndarray  # (4, 4)
+    @property
+    def root_from_obj(self) -> np.ndarray:
+        """(4, 4): the shape's own axes and origin in the root frame."""
+        ...
 
     def surface_distance(self, points_root: np.ndarray) -> np.ndarray:
         """Signed distance (m) of each point (N, 3) to the surface: negative inside."""

@@ -183,39 +183,44 @@ def test_the_wrist_camera_plates_are_drawn_where_the_calibration_has_them(robot)
         outlines = session.board_outlines()
         q = session.current_q()
         uv, _ = session.model.project(session.model.board_corners("left", q), q)
-        assert any(np.allclose(o, uv) for o in outlines)  # the checked arm's, at its measured joints
+        assert any(np.allclose(o, uv) and name == "plate" for o, name in outlines)  # the checked arm's
+        assert {name for _, name in outlines} == {"plate", "right plate"}  # the other arm's named
         assert len(outlines) == 2  # the other arm's too, at its measured joints
         assert session.model.in_view(uv[0], margin=5)
         corner = np.round(uv[0]).astype(int)
         assert has_color(shown[-1], BOARD_COLOR, corner[1], corner[0])  # drawn on the frame
 
 
-def test_the_capsules_are_drawn_where_the_calibration_has_them(robot):
-    from lerobot.felix_jr.calibration.arm_shapes import CAPSULE_COLOR, initial_capsule
-    from lerobot.felix_jr.calibration.xle_robot_model import Capsule
+def test_the_boxes_are_drawn_where_the_calibration_has_them(robot):
+    from lerobot.felix_jr.calibration.arm_shapes import BOX_COLOR
+    from lerobot.felix_jr.calibration.xle_robot_model import ArmBox
 
     fake, client = robot
     with client.session():
         bare, _ = make_session(client, model_for(client))
-        assert bare.capsule_outlines() == []
+        assert bare.box_outlines() == []
         model = model_for(client)
-        body = Capsule("left_gripper_link", (0.0, 0.0, 0.02), (0.0, 0.0, 0.07), 0.02)
-        model = model.with_capsules(
-            "left", {"gripper_body": body, "fixed_finger": initial_capsule(model, "left", "fixed_finger")}
+        body = ArmBox("left_gripper_link", (0.0, 0.0, 0.045), (0.04, 0.04, 0.05))
+        model = model.with_boxes(
+            "left",
+            {
+                "gripper_body": body,
+                "fixed_finger": ArmBox("left_gripper_frame_link", (0.005, 0.0, -0.03), (0.01, 0.025, 0.06)),
+            },
         )
         session, shown = make_session(client, model)
         session.handle("next")
-        outlines = session.capsule_outlines()
-        assert len(outlines) == 2
+        outlines = session.box_outlines()
+        assert sorted(name for _, name in outlines) == ["fixed finger", "gripper body"]
         q = session.current_q()
-        a_root, b_root, _ = session.model.capsules_root("left", q)["gripper_body"]
-        uv, _ = session.model.project(a_root, q)
+        root_from_box, _ = session.model.boxes_root("left", q)["gripper_body"]
+        uv, _ = session.model.project(root_from_box[:3, 3], q)
         assert session.model.in_view(uv[0], margin=30)
         polygon = next(
             o
-            for o in outlines
+            for o, _ in outlines
             if cv2.pointPolygonTest(o.astype(np.float32).reshape(-1, 1, 2), tuple(map(float, uv[0])), False)
             > 0
         )
         edge = np.round(polygon[0]).astype(int)
-        assert has_color(shown[-1], CAPSULE_COLOR, edge[1], edge[0])  # drawn on the frame
+        assert has_color(shown[-1], BOX_COLOR, edge[1], edge[0])  # drawn on the frame

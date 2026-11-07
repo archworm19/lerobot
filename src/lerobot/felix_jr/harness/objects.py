@@ -21,6 +21,7 @@ from lerobot.felix_jr.calibration.xle_fit import load_session
 from lerobot.felix_jr.calibration.xle_robot_model import HEAD_JOINTS, XleRobotModel
 from lerobot.felix_jr.depth import with_matrices
 
+from .primitives import Primitive
 from .scene import Scene, read_image
 
 if TYPE_CHECKING:
@@ -600,3 +601,39 @@ class HeldObject:
             f"object {_cm(self.length)} cm long, held from {labels[0]} to {labels[-1]}; tilt from how it was grasped "
             f"(deg): {', '.join(tilts)}"
         )
+
+
+@dataclass(frozen=True, eq=False)
+class Object:
+    """A named object as primitives (`docs/object_grasping.md`), and the capture they were fitted from, if any.
+
+    Its `parts`: a jar, one cylinder; a pan, a handle and a body. The capture says how fresh they are.
+
+    Grasps are planned on a part (`grasping.grasp_candidates`). Describe only what may be grasped (the pen above the
+    rim): the tool knows nothing of the rest of it.
+    """
+
+    label: str
+    parts: Mapping[str, Primitive]
+    capture: Capture | None = None
+    note: str = ""  # how it was made, e.g. a fit's points and residual (`tools.fit_cylinder`)
+
+    def __post_init__(self) -> None:
+        """Refuse an object with no parts."""
+        if not self.parts:
+            raise ValueError(f"object {self.label!r} has no parts")
+
+    def part(self, name: str | None = None) -> Primitive:
+        """The part `name`; with none, the only part (an object of several parts must be told which)."""
+        if name is None:
+            if len(self.parts) > 1:
+                raise ValueError(f"{self.label} has parts {sorted(self.parts)}: say which")
+            return next(iter(self.parts.values()))
+        if name not in self.parts:
+            raise ValueError(f"{self.label} has no part {name!r}: {sorted(self.parts)}")
+        return self.parts[name]
+
+    def describe(self) -> str:
+        """The label, each part's shape (root frame) and the note."""
+        parts = "; ".join(f"{name}: {part.describe()}" for name, part in self.parts.items())
+        return f"{self.label}: {parts}" + (f" ({self.note})" if self.note else "")
