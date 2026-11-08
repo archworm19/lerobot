@@ -276,10 +276,15 @@ the jaws' frame (`object_grasping.md`, section 6).
      1.9% for views held up in a cramped workspace); if not, it says so and wants more views.
    - **Resuming:** the views are saved as they are taken; `--resume` (same `--out-dir`) keeps them and adds to them.
    - **The camera's pose:** lay the board flat on the table under the camera (its corners drawn), where it stays
-     from now on, and press `c`. Then `n`, again and again: each moves the arm to the next of 12 suggested views
-     around the start pose (tilted, turned, shifted) and takes it if the board is in view (if not, move the arm by
-     the keys and press space, or `n` to skip). The status line counts the views and how far they turn; `c` once it
-     says ENOUGH (8 views turned 15 deg about two axes).
+     from now on, and press `c`. Then `n`, again and again: each moves the arm to the next of 15 suggested views
+     around the start pose (tilted both ways, turned about the gripper's axis, shifted) and takes it if the board is
+     in view (if not, move the arm by the keys and press space, or `n` to skip); add views of your own as long as you
+     like. From 8 views the pose is fitted after every new one: the status line shows where the camera is and how
+     well that is known (each view left out in turn: it carries the arm's own error, which the pixel fit does not),
+     and the drawn fingertips follow it. `c` once it says SETTLED (under 5 mm and 1 deg, the views turned 15 deg
+     about two axes); until then it says what would help. Turns about one axis only (moving the arm about, which
+     only pans it) leave the camera's offset along that axis free: tilt (`[ ]`) and turn (`, .`) the gripper too.
+     The start pose keeps every joint 15 deg from its bounds, so both turns are in reach.
    - **The check:** the model's fingertips are drawn on the live picture (cyan the fixed tip, magenta the moving
      one): they should sit on the real ones. `c` to finish the arm (`u` for more views).
 5. It writes `calibration.urdf` (the start with the wrist cameras) and `wrist_cameras.md` (the lens, the pose, the

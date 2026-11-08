@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import os
 
 import pytest
 
@@ -123,13 +124,19 @@ def test_a_by_path_link_opens_by_its_video_number(tmp_path, monkeypatch):
 
     assert video_index(3) == 3
     link = tmp_path / "platform-xhci-hcd.0-usb-0:1.1:1.0-video-index0"
-    link.symlink_to("/dev/video7")  # a dangling link is fine: only its target's name is read
+    link.symlink_to("/dev/video7")  # no /dev/video7 here: its target is faked as there
     monkeypatch.setattr(
         "os.path.realpath", lambda path: "/dev/video7" if str(path) == str(link) else str(path)
     )
-    assert video_index(str(link)) == 7
-    with pytest.raises(ValueError, match="not a video device"):
+    with monkeypatch.context() as patched:
+        real_exists = os.path.exists
+        patched.setattr("os.path.exists", lambda path: str(path) == str(link) or real_exists(path))
+        assert video_index(str(link)) == 7
+    with pytest.raises(ValueError, match="no camera at"):  # the link is gone: unplugged, or another port
         video_index(str(tmp_path / "not-a-camera"))
+    (tmp_path / "a-file").touch()
+    with pytest.raises(ValueError, match="not a video device"):
+        video_index(str(tmp_path / "a-file"))
 
 
 def test_a_camera_whose_frames_stop_is_reopened(monkeypatch):

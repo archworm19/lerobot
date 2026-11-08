@@ -18,6 +18,7 @@ from lerobot.felix_jr.calibration.wrist_camera import (  # noqa: E402
     calibrate_intrinsics,
     find_board,
     fingertips_in_wrist_image,
+    fit_extrinsics,
     is_new_view,
     lens_coverage_missing,
     lens_settled,
@@ -92,21 +93,36 @@ REST = {
 
 
 def start_joints(model: XleRobotModel, arm: str) -> tuple[dict[str, float], np.ndarray, float]:
-    """The session's start pose (its first reachable one): the joints, the tip's position, the pitch."""
+    """The session's start pose, chosen as `WristCameraSession.go_to_start` does: the joints, the tip, the pitch."""
     from types import SimpleNamespace
 
-    from lerobot.felix_jr.calibration.wrist_camera import START_AHEAD_M, START_HEIGHTS_M, START_PITCHES_DEG
-    from lerobot.felix_jr.harness.reach import solve_pose
+    from lerobot.felix_jr.calibration.wrist_camera import (
+        START_AHEAD_M,
+        START_HEIGHTS_M,
+        START_JOINT_MARGIN_DEG,
+        START_PITCHES_DEG,
+    )
+    from lerobot.felix_jr.harness.reach import ArmIK, solve_pose
 
     base = model.frame_pose(f"{arm}_base_link", model.joint_vector())[:3, 3]
     capture = SimpleNamespace(arms={arm: dict(REST)}, head_ticks=None)
+    reachable = []
     for up in START_HEIGHTS_M:
         for pitch in START_PITCHES_DEG:
             target = np.array([base[0] - START_AHEAD_M, base[1], base[2] + up])
             poses = solve_pose(model, arm, capture, target, pitch, None, 0.0)
-            if poses.ok[0]:
-                return dict(poses.joints[0]) | {"gripper.pos": 1.0}, target, pitch
-    raise AssertionError("no start pose")
+            if not poses.ok[0]:
+                continue
+            joints = dict(poses.joints[0])
+            ik = ArmIK(model, arm, {arm: joints}, None, 0.0, 0.0)
+            x = ik.radians(joints)
+            margin = float(np.degrees(np.minimum(x - ik.lower, ik.upper - x)).min())
+            reachable.append((margin, joints, target, pitch))
+            if margin >= START_JOINT_MARGIN_DEG:
+                return joints | {"gripper.pos": 1.0}, target, pitch
+    assert reachable, "no start pose"
+    _, joints, target, pitch = max(reachable, key=lambda r: r[0])
+    return joints | {"gripper.pos": 1.0}, target, pitch
 
 
 def board_under(model: XleRobotModel, arm: str) -> np.ndarray:
@@ -360,3 +376,39 @@ def test_the_lens_is_settled_by_varied_views_and_not_by_flat_ones():
         )
     _, flat_spread = lens_settled(flat, BOARD, (640, 480))
     assert flat_spread > 0.03
+
+
+def test_views_turned_about_one_axis_do_not_settle_the_pose(model):
+    """calib_full3 (2026-11-07): the arm only panned between views. The views leave the camera's offset along the pan
+    axis free: not settled, and it says to tilt and turn the gripper. Views tilted and turned settle it."""
+    from types import SimpleNamespace
+
+    from lerobot.felix_jr.harness.reach import solve_pose
+
+    root_from_board = board_under(model, "right")
+    good = fit_extrinsics(model, "right", TRUE_CAMERA, arm_views(model, "right", root_from_board), BOARD)
+    assert good.settled and good.needs() == "" and np.nanmax(good.position_sd_m) < 0.002
+    assert "camera at" in good.describe()
+    joints, start, pitch = start_joints(model, "right")
+    truth = model.with_wrist_camera("right", _with_pose(TRUE_CAMERA))
+    capture = SimpleNamespace(arms={"right": dict(REST)}, head_ticks=None)
+    panned = []
+    for dx, dy in [
+        (0, 0),
+        (0, 0.03),
+        (0, -0.03),
+        (0.02, 0.02),
+        (0.02, -0.02),
+        (-0.02, 0.03),
+        (-0.02, -0.03),
+        (0.03, 0),
+    ]:
+        poses = solve_pose(model, "right", capture, start + [dx, dy, 0.0], pitch, None, 0.0, init=joints)
+        arm_pose = dict(poses.joints[0]) | {"gripper.pos": 1.0}
+        root_from_camera = truth.wrist_camera_pose("right", model.joint_vector({"right": arm_pose}))
+        camera_from_board = np.linalg.inv(root_from_camera) @ root_from_board
+        uv = TRUE_CAMERA.project(BOARD.points() @ camera_from_board[:3, :3].T + camera_from_board[:3, 3])
+        panned.append(ArmView(arm_pose, uv.tolist()))
+    one_axis = fit_extrinsics(model, "right", TRUE_CAMERA, panned, BOARD)
+    assert one_axis.spread_deg[1] < 5.0 and not one_axis.settled
+    assert "tilt" in one_axis.needs() and "turn" in one_axis.needs()

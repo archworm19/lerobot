@@ -112,9 +112,11 @@ def test_a_session_calibrates_the_lens_and_the_pose_by_keys(robot, model, tmp_pa
         session.handle("calibrate")  # the board is down
         for _ in POSE_VIEWS:  # n: the suggested views, each taken where the board is found
             session.handle("next")
-            if session.can_fit_extrinsics() and len(session.record.extrinsic_views) >= 10:
+            if session.pose_fit is not None and session.pose_fit.settled:
                 break
-        assert session.can_fit_extrinsics(), (len(session.record.extrinsic_views), session.spread())
+        fit = session.pose_fit
+        assert fit is not None and fit.settled, (len(session.record.extrinsic_views), fit and fit.describe())
+        assert "SETTLED" in "\n".join(session.status())
         assert session.next_view <= len(POSE_VIEWS)  # the suggested views were enough
         session.handle("calibrate")
         assert session.phase == "check" and session.camera.gripper_from_camera is not None

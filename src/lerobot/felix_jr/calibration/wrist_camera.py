@@ -38,10 +38,12 @@ camera; the keys move the arm (each a small move, the gripper's tip as the refer
 2. **Extrinsics.** Put the board flat on the table, where it stays, and press `c`. Then `n` again and again: the arm
    moves to the next suggested view around the start pose (`POSE_VIEWS`: tilted, turned, shifted; views from one
    direction only, however many, leave the camera's pose undetermined) and takes it if the board is in view; or move
-   the arm by keys and take a view with space. `c` fits, once there are `MIN_EXTRINSIC_VIEWS` spread over at least
-   `MIN_SPREAD_DEG` about two axes, the camera's pose in `<arm>_gripper_link` and the board's on the table together
-   (`cv2.calibrateRobotWorldHandEye`, then refined on the corners' pixels). The model's fingertips are then drawn on
-   the live picture: they should sit on the real ones.
+   the arm by keys and take a view with space, as many as you like. From `MIN_EXTRINSIC_VIEWS` the camera's pose in
+   `<arm>_gripper_link` and the board's on the table are fitted together after every new view (`fit_extrinsics`:
+   `cv2.calibrateRobotWorldHandEye`, then refined on the corners' pixels), with how well the views pin it down (each
+   view left out in turn), and the model's fingertips are drawn on the live picture from it. `c` accepts it once
+   settled (`ExtrinsicsFit.settled`: turned `MIN_SPREAD_DEG` about two axes, known to `POSE_SETTLED_M` and
+   `POSE_SETTLED_DEG`); until then the status line says what would help.
 
 The fit uses the arm's measured joints and the model (`--start-from`), so the arm's own error (its sag, its
 calibration) averages into the camera's pose; many views across the workspace keep it small. The output,
@@ -100,7 +102,17 @@ LENS_SETTLED = (
 LENS_SPLITS = 12  # how many random halves (`lens_settled`)
 FOCAL_RANGE = (0.2, 3.0)  # a focal length (px) outside this range times the picture's width is refused
 MIN_EXTRINSIC_VIEWS = 8
-MIN_SPREAD_DEG = 15.0  # the views' turns must spread this far about two axes for the extrinsics
+# the views must turn this far about two axes: about one only, the camera's offset along it is free
+MIN_SPREAD_DEG = 15.0
+# the camera's pose is accepted when known this well: the spread of the fits with each view left out (a jackknife).
+# The arm's own error (its joints, its calibration) dominates, and the fit's pixel residuals do not show it: simulated
+# with 0.3 deg of joint noise, the jackknife matched the true error (8 views: 18 vs 19 mm; 13: 13 vs 9) where the fit's
+# covariance said 3 mm. More views shrink it: keep adding them (fit as you go) until it settles
+POSE_SETTLED_M = 0.005
+POSE_SETTLED_DEG = 1.0
+# the start pose keeps every joint this far from its bounds, so the keys and the suggested views can tilt and turn the
+# gripper from it (calib_full3, 2026-11-07: the steepest start put the wrist flex at its 90 deg bound: no tilt left)
+START_JOINT_MARGIN_DEG = 15.0
 # the start pose: the gripper's tip this far in front of the arm's base, the first of these heights above the base
 # (about 6 cm above the table on this robot) the arm reaches with the gripper tilted down the steepest of these
 # pitches (straight down is out of reach: the wrist flex is at its limit)
@@ -108,21 +120,24 @@ START_AHEAD_M = 0.22
 START_HEIGHTS_M = (0.12, 0.08, 0.04)
 START_PITCHES_DEG = (-90.0, -80.0, -70.0, -60.0, -50.0, -40.0)
 # the suggested views for the camera's pose (`n`), from the start pose: (dx, dy, dz) m in the root frame (+x back
-# toward the robot), then the pitch's change (deg, + less steep: steeper is out of reach) and the roll (deg). Turns
-# about two axes (the pitch, the roll) and the pan the shifts in y bring, the board under the start pose kept in view
+# toward the robot), then the pitch's change (deg, + less steep; the start keeps the joints' margin for both ways) and
+# the roll (deg): turns about two axes (the pitch, the roll), the board under the start pose kept in view
 POSE_VIEWS = (
     (0.0, 0.0, 0.0, 0.0, 0.0),
-    (0.02, 0.0, 0.0, 10.0, 0.0),
-    (0.0, 0.03, 0.0, 0.0, 30.0),
-    (0.0, -0.03, 0.0, 0.0, -30.0),
+    (0.02, 0.0, 0.0, 15.0, 0.0),
+    (-0.02, 0.0, 0.01, -15.0, 0.0),
+    (0.0, 0.03, 0.0, 0.0, 35.0),
+    (0.0, -0.03, 0.0, 0.0, -35.0),
+    (0.02, 0.02, 0.0, 10.0, 50.0),
+    (-0.02, -0.02, 0.01, -10.0, -50.0),
+    (0.02, -0.02, 0.0, 15.0, -25.0),
+    (-0.02, 0.02, 0.01, -15.0, 25.0),
+    (0.0, 0.0, 0.03, 0.0, 70.0),
+    (0.0, 0.0, 0.03, 0.0, -70.0),
     (0.03, 0.0, 0.01, 20.0, 0.0),
-    (0.02, 0.02, 0.0, 10.0, 45.0),
-    (0.02, -0.02, 0.0, 10.0, -45.0),
-    (0.0, 0.02, 0.02, 0.0, 60.0),
-    (0.0, -0.02, 0.02, 0.0, -60.0),
-    (0.03, 0.03, 0.01, 20.0, 20.0),
-    (0.03, -0.03, 0.01, 20.0, -20.0),
-    (0.0, 0.0, 0.03, 5.0, 0.0),
+    (-0.02, 0.0, 0.02, -20.0, 0.0),
+    (0.01, 0.03, 0.0, 10.0, -60.0),
+    (-0.01, -0.03, 0.0, -10.0, 60.0),
 )
 PITCH_STEP_DEG = 10.0
 MOVE_TOL_DEG = (
@@ -436,15 +451,75 @@ def rotation_spread(rotations: Sequence[np.ndarray]) -> np.ndarray:
     return np.degrees(2.0 * singular / np.sqrt(len(rotations)))
 
 
+@dataclass(frozen=True)
+class ExtrinsicsFit:
+    """A fit of the camera's pose on the gripper (`fit_extrinsics`), with how well the views pin it down.
+
+    `position_sd_m` and `rotation_sd_deg` are how far it moves along / about `<arm>_gripper_link`'s x, y, z with each
+    view left out in turn (a jackknife: it carries the arm's own error, which the pixels' residuals do not), NaN with
+    too few views. `spread_deg` is how far the views turn about their main axes (`rotation_spread`).
+    """
+
+    gripper_from_camera: np.ndarray  # (4, 4)
+    root_from_board: np.ndarray  # (4, 4)
+    errors_px: np.ndarray  # each view's RMS error
+    position_sd_m: np.ndarray  # (3,)
+    rotation_sd_deg: np.ndarray  # (3,)
+    spread_deg: np.ndarray  # (3,)
+
+    @property
+    def settled(self) -> bool:
+        """Whether the pose is known well enough: turned about two axes, the jackknife within `POSE_SETTLED_*`."""
+        return bool(
+            self.spread_deg[1] >= MIN_SPREAD_DEG
+            and np.nanmax(self.position_sd_m) <= POSE_SETTLED_M
+            and np.nanmax(self.rotation_sd_deg) <= POSE_SETTLED_DEG
+        )
+
+    def needs(self) -> str:
+        """What would pin the pose down, in words ("" when settled).
+
+        Views turned about one axis only leave the camera's offset along it free: tilting the gripper (`[ ]`) and
+        turning it about its own axis (`, .`) are the two turns (moving it about only pans it, much the same turn).
+        Past that, more views of any new pose shrink the error.
+        """
+        if self.settled:
+            return ""
+        if self.spread_deg[1] < MIN_SPREAD_DEG:
+            return "tilt ([ ]) and turn (, .) the gripper between views: they all turn about one axis"
+        return "more views, from new poses (n, or keys and space)"
+
+    def describe(self) -> str:
+        """The pose and how well it is known, in a line."""
+        t = self.gripper_from_camera[:3, 3] * 1000
+        sd = self.position_sd_m * 1000
+        return (
+            f"camera at ({t[0]:.0f}, {t[1]:.0f}, {t[2]:.0f}) mm +- ({sd[0]:.1f}, {sd[1]:.1f}, {sd[2]:.1f}), turn +- "
+            f"{np.nanmax(self.rotation_sd_deg):.2f} deg, RMS {float(np.sqrt(np.mean(self.errors_px**2))):.2f} px"
+        )
+
+
 def calibrate_extrinsics(
     model: XleRobotModel, arm: str, camera: WristCamera, views: Sequence[ArmView], board: Board
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """`fit_extrinsics`' gripper_from_camera, root_from_board and each view's RMS error (px)."""
+    fit = fit_extrinsics(model, arm, camera, views, board)
+    return fit.gripper_from_camera, fit.root_from_board, fit.errors_px
+
+
+def fit_extrinsics(
+    model: XleRobotModel,
+    arm: str,
+    camera: WristCamera,
+    views: Sequence[ArmView],
+    board: Board,
+    jackknife: bool = True,
+) -> ExtrinsicsFit:
     """The camera's pose on the gripper and the board's on the table, from views of the board at several poses.
 
-    Returns gripper_from_camera (4x4, in `<arm>_gripper_link`), root_from_board (4x4) and each view's RMS error (px).
-    Started from `cv2.calibrateRobotWorldHandEye` on the board's pose in each view (`board_pose`) and the gripper's
-    (the model at the measured joints), then refined on all the corners' pixels (a Huber loss: a bad view does not
-    pull the rest).
+    The pose is gripper_from_camera (4x4, in `<arm>_gripper_link`). Started from `cv2.calibrateRobotWorldHandEye` on
+    the board's pose in each view (`board_pose`) and the gripper's (the model at the measured joints), then refined on
+    all the corners' pixels (a Huber loss: a bad view does not pull the rest).
     """
     require_package("scipy", extra="felix_jr")
     if len(views) < 3:
@@ -456,17 +531,22 @@ def calibrate_extrinsics(
         observed = orient_views(camera, observed, root_from_gripper, board)
     camera_from_board = [board_pose(camera, corners, board) for corners in observed]
     gripper_from_root = [np.linalg.inv(p) for p in root_from_gripper]
-    r_base2world, t_base2world, r_gripper2cam, t_gripper2cam = cv2.calibrateRobotWorldHandEye(
-        [p[:3, :3] for p in camera_from_board],
-        [p[:3, 3] for p in camera_from_board],
-        [p[:3, :3] for p in gripper_from_root],
-        [p[:3, 3] for p in gripper_from_root],
-    )
-    camera_from_gripper = np.eye(4)
-    camera_from_gripper[:3, :3], camera_from_gripper[:3, 3] = r_gripper2cam, np.ravel(t_gripper2cam)
-    board_from_root = np.eye(4)
-    board_from_root[:3, :3], board_from_root[:3, 3] = r_base2world, np.ravel(t_base2world)
-    start_gc, start_rb = np.linalg.inv(camera_from_gripper), np.linalg.inv(board_from_root)
+    try:
+        r_base2world, t_base2world, r_gripper2cam, t_gripper2cam = cv2.calibrateRobotWorldHandEye(
+            [p[:3, :3] for p in camera_from_board],
+            [p[:3, 3] for p in camera_from_board],
+            [p[:3, :3] for p in gripper_from_root],
+            [p[:3, 3] for p in gripper_from_root],
+        )
+        camera_from_gripper = np.eye(4)
+        camera_from_gripper[:3, :3], camera_from_gripper[:3, 3] = r_gripper2cam, np.ravel(t_gripper2cam)
+        board_from_root = np.eye(4)
+        board_from_root[:3, :3], board_from_root[:3, 3] = r_base2world, np.ravel(t_base2world)
+        start_gc, start_rb = np.linalg.inv(camera_from_gripper), np.linalg.inv(board_from_root)
+    # views turned about one axis: OpenCV's solver fails; start from the camera at the gripper
+    except cv2.error:
+        start_gc = np.eye(4)
+        start_rb = root_from_gripper[0] @ camera_from_board[0]
 
     points = board.points()
 
@@ -489,7 +569,21 @@ def calibrate_extrinsics(
     result = least_squares(residuals, x0, loss="huber", f_scale=2.0)
     gripper_from_camera, root_from_board = unpack(result.x)
     errors = np.array([float(np.sqrt(np.mean(np.sum(r**2, axis=1)))) for r in per_view(result.x)])
-    return gripper_from_camera, root_from_board, errors
+    spread = rotation_spread([p[:3, :3] for p in root_from_gripper])
+    position_sd, rotation_sd = np.full(3, np.nan), np.full(3, np.nan)
+    if jackknife and len(views) >= 4:
+        left_out = [
+            fit_extrinsics(model, arm, camera, [*views[:i], *views[i + 1 :]], board, jackknife=False)
+            for i in range(len(views))
+        ]
+        n = len(left_out)
+        positions = np.array([f.gripper_from_camera[:3, 3] for f in left_out])
+        turns = np.array(
+            [_rotvec(f.gripper_from_camera[:3, :3] @ gripper_from_camera[:3, :3].T) for f in left_out]
+        )
+        position_sd = np.sqrt((n - 1) / n * ((positions - positions.mean(axis=0)) ** 2).sum(axis=0))
+        rotation_sd = np.degrees(np.sqrt((n - 1) / n * ((turns - turns.mean(axis=0)) ** 2).sum(axis=0)))
+    return ExtrinsicsFit(gripper_from_camera, root_from_board, errors, position_sd, rotation_sd, spread)
 
 
 def orient_views(
@@ -542,8 +636,10 @@ def fingertips_in_wrist_image(
         max(model.opening_deg(arm, float(arm_pose["gripper.pos"])), 0.0) if arm in model.gripper_maps else 0.0
     )
     tips = np.array([model.frame_pose(pinch_frame(arm), q)[:3, 3], model.moving_tip(arm, q, opening)])
-    camera_from_root = np.linalg.inv(model.wrist_camera_pose(arm, q))
-    return camera.project(_apply(camera_from_root, tips))
+    if camera.gripper_from_camera is None:
+        raise ValueError("the camera's pose on the gripper is not known yet")
+    root_from_camera = model.frame_pose(wrist_camera_link(arm), q) @ np.array(camera.gripper_from_camera)
+    return camera.project(_apply(np.linalg.inv(root_from_camera), tips))
 
 
 # ---- saving -------------------------------------------------------------------------------------------------
@@ -608,16 +704,12 @@ def fit_record(model: XleRobotModel, record: ArmRecord) -> tuple[WristCamera | N
         f"{lens_line}",
     ]
     if len(record.extrinsic_views) >= 3:
-        gripper_from_camera, root_from_board, ext_errors = calibrate_extrinsics(
-            model, record.arm, camera, record.extrinsic_views, record.board
+        fit = fit_extrinsics(model, record.arm, camera, record.extrinsic_views, record.board)
+        gripper_from_camera, root_from_board, ext_errors = (
+            fit.gripper_from_camera,
+            fit.root_from_board,
+            fit.errors_px,
         )
-        rotations = [
-            model.frame_pose(wrist_camera_link(record.arm), model.joint_vector({record.arm: v.arm_pose}))[
-                :3, :3
-            ]
-            for v in record.extrinsic_views
-        ]
-        spread = rotation_spread(rotations)
         camera = replace(
             camera,
             gripper_from_camera=tuple(tuple(float(v) for v in row) for row in gripper_from_camera),
@@ -625,11 +717,14 @@ def fit_record(model: XleRobotModel, record: ArmRecord) -> tuple[WristCamera | N
             extrinsics_views=len(record.extrinsic_views),
         )
         euler = Rotation.from_matrix(gripper_from_camera[:3, :3]).as_euler("xyz", degrees=True)
+        sd = fit.position_sd_m * 1000
         lines += [
             f"- pose in `{wrist_camera_link(record.arm)}`: at ({', '.join(f'{v * 1000:.1f}' for v in gripper_from_camera[:3, 3])}) mm, "
             f"turned ({', '.join(f'{v:.1f}' for v in euler)}) deg (xyz); RMS {camera.extrinsics_rms_px:.2f} px over "
-            f"{camera.extrinsics_views} views (worst {ext_errors.max():.2f} px); the views' turns spread "
-            f"{', '.join(f'{v:.0f}' for v in spread)} deg",
+            f"{camera.extrinsics_views} views (worst {ext_errors.max():.2f} px)",
+            f"- known to +- ({', '.join(f'{v:.1f}' for v in sd)}) mm and {np.nanmax(fit.rotation_sd_deg):.2f} deg "
+            f"(each view left out in turn); the views' turns spread {', '.join(f'{v:.0f}' for v in fit.spread_deg)} deg"
+            + ("" if fit.settled else f": NOT settled ({fit.needs()})"),
             f"- the board on the table at ({', '.join(f'{v * 100:.1f}' for v in root_from_board[:3, 3])}) cm (root frame)",
         ]
     else:
@@ -738,6 +833,8 @@ class WristCameraSession:
         self.board_fixed = False  # extrinsics: the person put the board down and pressed c
         self.start_target: tuple[np.ndarray, float, float] | None = None  # the start pose (tip, pitch, roll)
         self.next_view = 0  # into `POSE_VIEWS`
+        self.solved: dict[str, float] = {}  # the joints `move_to` last solved
+        self.pose_fit: ExtrinsicsFit | None = None  # the camera's pose so far (fitted as the views come)
         self.target: tuple[np.ndarray, float, float] | None = (
             None  # the tip's position, pitch and roll asked for
         )
@@ -787,6 +884,7 @@ class WristCameraSession:
                 f"out of reach there ({poses.position_error_m[0] * 100:.1f} cm off): try another way"
             )
             return False
+        self.solved = dict(poses.joints[0])
         if dry_run:
             return True
         target = dict(poses.joints[0]) | {"gripper.pos": current.get("gripper.pos", 0.0)}
@@ -798,14 +896,35 @@ class WristCameraSession:
         self.target = (np.asarray(position, dtype=np.float64), pitch, roll)
         return True
 
+    def joint_margin_deg(self, joints: dict[str, float]) -> float:
+        """How close (deg) the closest of the arm's joints at `joints` (LeRobot degrees) comes to its bound."""
+        from lerobot.felix_jr.harness.reach import ArmIK
+
+        ik = ArmIK(self.model, self.arm, {self.arm: joints}, None, 0.0, 0.0)
+        x = ik.radians(joints)
+        return float(np.degrees(np.minimum(x - ik.lower, ik.upper - x)).min())
+
     def go_to_start(self) -> bool:
-        """Move to the first start pose the arm reaches (the caller has the person approve it first); no frame taken."""
+        """Move to a start pose (the caller has the person approve it first); no frame taken.
+
+        The first of `start_poses` the arm reaches with every joint `START_JOINT_MARGIN_DEG` from its bounds, so the
+        gripper can still tilt and turn from it; else the reachable one with the most margin.
+        """
+        reachable = []
         for position, pitch, roll in self.start_poses():
             if self.move_to(position, pitch, roll, dry_run=True):
-                self.start_target = (position, pitch, roll)
-                return self.move_to(position, pitch, roll)
-        self.message = "no start pose in reach"
-        return False
+                margin = self.joint_margin_deg(self.solved)
+                reachable.append((margin, (position, pitch, roll)))
+                if margin >= START_JOINT_MARGIN_DEG:
+                    break
+        if not reachable:
+            self.message = "no start pose in reach"
+            return False
+        margin, (position, pitch, roll) = next(
+            (r for r in reachable if r[0] >= START_JOINT_MARGIN_DEG), max(reachable, key=lambda r: r[0])
+        )
+        self.start_target = (position, pitch, roll)
+        return self.move_to(position, pitch, roll)
 
     def start(self) -> bool:
         """Move to the start pose (`go_to_start`; nothing moves if the arm is there already) and show the camera."""
@@ -923,11 +1042,17 @@ class WristCameraSession:
                 f"{self.arm} CAMERA POSE: the board stays put; the arm looks at it from several poses",
                 f"n: the arm moves to suggested view {min(self.next_view + 1, len(POSE_VIEWS))} of {len(POSE_VIEWS)} "
                 "and takes it | space: take this view (after moving the arm by keys)",
-                f"{n} of {MIN_EXTRINSIC_VIEWS} views; turns {spread[0]:.0f} and {spread[1]:.0f} deg "
+                f"{n} views (fitted from {MIN_EXTRINSIC_VIEWS}); turns {spread[0]:.0f} and {spread[1]:.0f} deg "
                 f"(need {MIN_SPREAD_DEG:.0f} each)",
             ]
-            if self.can_fit_extrinsics():
-                lines.append("ENOUGH: c fits the camera's pose (more views first: fine)")
+            if self.pose_fit is not None:
+                lines.append(self.pose_fit.describe())
+                lines.append(
+                    "SETTLED: c accepts (more views first: fine)"
+                    if self.pose_fit.settled
+                    else f"not settled (under {POSE_SETTLED_M * 1000:.0f} mm, {POSE_SETTLED_DEG:.0f} deg): "
+                    + self.pose_fit.needs()
+                )
         else:
             lines = [
                 f"{self.arm} CHECK: the drawn fingertips should sit on the real ones | c: done, u: more views"
@@ -973,6 +1098,20 @@ class WristCameraSession:
         """Enough views, turned about two axes."""
         return len(self.record.extrinsic_views) >= MIN_EXTRINSIC_VIEWS and self.spread()[1] >= MIN_SPREAD_DEG
 
+    def refit_pose(self) -> None:
+        """Fit the camera's pose to the views so far (from `MIN_EXTRINSIC_VIEWS`), with its jackknife; draw it."""
+        views = self.record.extrinsic_views
+        if self.camera is None or len(views) < MIN_EXTRINSIC_VIEWS:
+            self.pose_fit = None
+            return
+        self.pose_fit = fit_extrinsics(self.model, self.arm, self.camera, views, self.board)
+        self.camera = replace(  # the fingertips drawn live from it
+            self.camera,
+            gripper_from_camera=tuple(
+                tuple(float(v) for v in row) for row in self.pose_fit.gripper_from_camera
+            ),
+        )
+
     def take(self) -> None:
         """Keep this frame as a view (space): any view in intrinsics, the arm's pose too in extrinsics."""
         if self.frame is None or self.corners is None:
@@ -989,6 +1128,7 @@ class WristCameraSession:
             )
             self.record.save(self.out_dir)
             self.message = f"view {index + 1} taken"
+            self.refit_pose()
         self.render()
 
     def undo(self) -> None:
@@ -1002,6 +1142,8 @@ class WristCameraSession:
                 self.signatures.pop()
             self.record.save(self.out_dir)
             self.message = f"dropped the last view ({len(views)} left)"
+            if self.phase in ("extrinsics", "check"):
+                self.refit_pose()
         if self.phase == "check":
             self.phase, self.message = "extrinsics", "take more views, then c"
         self.render()
@@ -1041,26 +1183,24 @@ class WristCameraSession:
         elif self.phase == "extrinsics" and not self.board_fixed:
             self.board_fixed, self.message = True, "board down: n for the first suggested view"
         elif self.phase == "extrinsics":
-            if not self.can_fit_extrinsics():
-                self.message = (
-                    f"{MIN_EXTRINSIC_VIEWS} views turned {MIN_SPREAD_DEG:.0f} deg about two axes first"
-                )
+            fit = self.pose_fit
+            if fit is None:
+                self.message = f"{MIN_EXTRINSIC_VIEWS} views first"
+            elif not fit.settled:
+                self.message = f"not settled: {fit.needs()}"
             else:
                 assert self.camera is not None
-                gripper_from_camera, _, errors = calibrate_extrinsics(
-                    self.model, self.arm, self.camera, self.record.extrinsic_views, self.board
-                )
                 self.camera = replace(
                     self.camera,
-                    gripper_from_camera=tuple(tuple(float(v) for v in row) for row in gripper_from_camera),
-                    extrinsics_rms_px=float(np.sqrt(np.mean(errors**2))),
-                    extrinsics_views=len(errors),
+                    gripper_from_camera=tuple(
+                        tuple(float(v) for v in row) for row in fit.gripper_from_camera
+                    ),
+                    extrinsics_rms_px=float(np.sqrt(np.mean(fit.errors_px**2))),
+                    extrinsics_views=len(fit.errors_px),
                 )
                 self.model = self.model.with_wrist_camera(self.arm, self.camera)
                 self.phase = "check"
-                self.message = (
-                    f"pose fitted: RMS {self.camera.extrinsics_rms_px:.2f} px (worst view {errors.max():.2f})"
-                )
+                self.message = f"pose accepted: {fit.describe()}"
         else:
             self.done = True
         self.render()
