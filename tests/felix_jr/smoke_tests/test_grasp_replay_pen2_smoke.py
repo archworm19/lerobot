@@ -29,7 +29,9 @@ from lerobot.felix_jr.harness.grasping import grasp_candidates  # noqa: E402
 from lerobot.felix_jr.harness.objects import Object, angles_of  # noqa: E402
 from lerobot.felix_jr.harness.primitives import Cylinder  # noqa: E402
 
-URDF = Path(__file__).parents[3] / "src" / "lerobot" / "felix_jr" / "urdfs" / "xle_calib_11062026.urdf"
+URDF = (
+    Path(__file__).parents[1] / "reference" / "xle_calib_11062026.urdf"
+)  # the session's calibration, frozen
 CAPTURE = SimpleNamespace(  # pen2's capture21: the arms at rest, the head as it scanned
     arms={
         "left": {

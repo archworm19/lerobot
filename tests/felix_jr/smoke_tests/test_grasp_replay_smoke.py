@@ -38,7 +38,9 @@ from lerobot.felix_jr.harness.grasping import (  # noqa: E402
 from lerobot.felix_jr.harness.objects import angles_of  # noqa: E402
 from lerobot.felix_jr.harness.primitives import Cylinder  # noqa: E402
 
-URDF = Path(__file__).parents[3] / "src" / "lerobot" / "felix_jr" / "urdfs" / "xle_calib_11062026.urdf"
+URDF = (
+    Path(__file__).parents[1] / "reference" / "xle_calib_11062026.urdf"
+)  # the session's calibration, frozen
 JAR = Cylinder.upright(np.array([-0.344, -0.107, 0.714]), 0.079, 0.020)
 CAPTURE = SimpleNamespace(  # bowl1's capture1: the arms at rest
     arms={

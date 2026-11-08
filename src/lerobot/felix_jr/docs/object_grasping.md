@@ -414,8 +414,9 @@ or the arm's model at all.
 
 **Choosing grasps for it (replacing the head camera's visibility filters):**
 
-- **(a) The object in the wrist camera's view at the attack point:** inside its field of view, at a distance it can
-  focus and measure, not behind the fingers. This depends on the approach and the standoff, not on the head.
+- **(a) TODO, an experiment: the object in the wrist camera's view at the attack point** (inside its field of view,
+  at a distance it can focus and measure, not behind the fingers). No visibility filter of any kind for now
+  (2026-11-08): first see on the robot whether grasps lose the object from the wrist camera's view at all.
 - **(b) Corrections that do not fight each other:** prefer grasps whose closing line is square to the arm's vertical
   plane (through the shoulder pan axis and the object). Then the joints split the corrections: the shoulder pan
   moves the gripper across the jaws and, at a level grasp, turns it about the hinge (pinch y), both of which a side
@@ -433,19 +434,62 @@ or the arm's model at all.
    intrinsics; their pose in the gripper link (the extrinsics: replaces the plate's corner fit; the plate itself need
    not be modeled once nothing checks the head camera's line of sight past it). **Built 2026-11-07, not yet run on
    the robot:** `server --left-wrist-camera / --right-wrist-camera`, `calibration.wrist_camera` (README 8b).
-2. **A wrist capture in the harness:** `Capture` with the wrist camera's frame, and a tool to take one at a hold.
-3. **The measurement:** the object in the jaws' frame from a wrist capture (the same `fit_cylinder` marks, or a
-   simpler detector for the centering), as a tool that says how far off and which way.
-4. **The alignment step:** from that measurement, the small joint moves (pan across, roll for the closing line, the
-   arm's plane for in/out and up/down), each approved, until centered: a tool, so the model asks for it rather than
-   composing joint moves.
-5. **Grasp selection:** (a) and (b) in `grasp_candidates`, the head camera's view filters removed (section 4); the
+2. **A wrist capture in the harness:** built 2026-11-08: `wrist_look` (a `WristView`) and `render_wrist`.
+3. **The measurement:** built 2026-11-08: `plan_alignment`, from the object's two sides marked in the wrist view
+   (below, "The alignment loop").
+4. **The alignment step:** built 2026-11-08: `align_step` runs a `plan_alignment` (one approved move through the
+   model, `ArmIK.solve_frame`, rather than the model composing joint moves). Not yet run on the robot.
+5. **Grasp selection:** (b) in `grasp_candidates` ((a) waits on the experiment), the head camera's view filters
+   removed (section 4, done 2026-11-07); the
    attack point along the gripper's axis in `plan_pick`.
 6. **A session** (a bowl4-like scene: an upright bottle and a chapstick into a container), every grasp aligned at the
    hold from the wrist camera.
 
+**The alignment loop** (`harness/wrist.py`; smoke test `test_wrist_align_smoke.py`, against the fake robot with its
+joints 1-2 deg off the truth):
+
+1. At the attack point (`execute(..., hold=True)` of the pick plan up to "pick.back"): `wrist_look`, then
+   `render_wrist(view, pick)`. It draws the fingertips and the **approach line**: where the object's center appears
+   when it is lined up, a dot every 2 cm ahead of the aim point (`Poses.grasp`). The camera is off the jaws' axis, so
+   the line is not the picture's middle, and where on it the object belongs depends on how far ahead it is.
+2. Mark the object's two sides at the grasp height (check them on `render_wrist(..., marks=...)`); `plan_alignment`
+   measures its center (the bisector of the two rays) and its offset from the line, in the jaws' frame: toward the
+   moving jaw, square to that, how far ahead.
+3. **The first step is a sidestep** (`sidestep_m=0.02`, `gain=0`): it makes parallax for the depth (next item).
+   `triangulate_wrist` then locates the object's center from the views before and after it (the center pixel each
+   `plan_alignment` reports), and every later `plan_alignment` takes it (`center=`). Then steps across (each 80% of the correction: `STEP_FACTOR`, short of it rather than past it), and once near the line,
+   in along it too (`advance`, a fraction of the way), looking again after each. `roll_deg` turns the jaws about the
+   line (an angle needs no depth). Steps are clipped at 3 cm and 20 deg: past that, re-plan from the head camera.
+4. The last look is close; then the move in, the close, and the check of the grip.
+
+**Depth is the hard part** (found building it, 2026-11-08). The camera is ~7 cm off the jaws' line on the robot
+(the calibrated pose: (11, 70, -6) mm in the gripper link), and the ray to the object crosses the line at an angle. So
+a depth off by a fraction e puts the object off the line by e times that offset (the camera's distance from the
+line), at any range: coming closer does not shrink it. A depth from the object's width (the fitted primitive's, good
+to 10-20%) is 7-14 mm off; shortening the depth on purpose to make the steps conservative (the first version) is the
+same error, and the steps settled on it. So:
+
+- **The depth comes from parallax:** two looks with a known move between them (the arm's small relative moves are
+  accurate: the model's errors mostly cancel between nearby poses) triangulate the object's center
+  (`triangulate_wrist`, a tool, so the model sees the parallax, how far apart the rays pass and the depth's
+  sensitivity to a pixel, and chooses the pair). A sideways move makes the best pair; an advance moves the camera
+  mostly along the ray, so its parallax is a small part of the move and more of it the arm's error (a first version
+  triangulated automatically after every step and lost 3 mm to the advances). The width's depth is shown beside it:
+  far apart, the plan's width is off.
+- **Staleness, narrowed:** every arm move makes earlier results stale (it may have moved things), but an
+  `align_step` stops short of the object, so wrist views and triangulated points from before alignment steps still
+  count for `triangulate_wrist` and `plan_alignment` (not from before any other arm move or a scan).
+- **Conservative is in the step, not the depth:** each step makes 80% of the measured correction.
+- In the smoke test, the object 25% wider than the plan says: after the sidestep, 26 -> 5.1 -> 0.3 -> 0.4 -> 0.3 mm
+  off the line while coming in from 6 cm to 1.4 cm; with the width right, 9.4 -> 1.3 -> 0.5 -> 0.3 mm without one.
+  The steps went 99-100% of the way predicted (the gain each look reports).
+
 **Open questions:**
 
+- On the robot: the arm's smallest reliable step (the servos' deadband: 1 deg of pan is ~5 mm at the gripper), and
+  whether the steps go as predicted (the reported gain).
+- The fingertips in the wrist picture: if they show, a last check against them at the object's depth needs no depth
+  estimate at all.
 - How far the wrist camera sees: its field of view against the attack standoff (5 cm today) and the jaws' opening;
   the fingers in its picture.
 - Whether the pan's turn about the shoulder (about 45 cm back) is close enough to a shift across the jaws, or a

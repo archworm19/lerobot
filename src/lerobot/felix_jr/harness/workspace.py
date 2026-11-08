@@ -5,7 +5,7 @@ its result as a node: an id, the call, its arguments (objects replaced by their 
 arguments that are workspace objects). Objects stay plain Python objects; the workspace only adds ids, the graph,
 freshness and the log.
 
-Freshness: every `Capture` is stamped with the current epoch, and every node inherits the oldest epoch among its
+Freshness: every `Capture` (and any object marked `sensed`, e.g. a `WristView`) is stamped with the current epoch, and every node inherits the oldest epoch among its
 parents. `ws.moved()` (called after the robot moves) starts a new epoch, which makes everything derived from older
 captures stale. A node that depends on no capture (a grid at a height typed in by hand) is never stale.
 """
@@ -80,7 +80,7 @@ class Workspace:
         kind = "image" if isinstance(obj, np.ndarray) else type(obj).__name__.lower()
         self._counts[kind] += 1
         node_id = f"{kind}{self._counts[kind]}"
-        if isinstance(obj, Capture):
+        if isinstance(obj, Capture) or getattr(obj, "sensed", False):  # read off the robot now: fresh
             epoch: int | None = self.epoch
         else:
             epochs = [e for p in parents if (e := self.nodes[p].epoch) is not None]

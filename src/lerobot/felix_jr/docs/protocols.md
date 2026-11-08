@@ -24,6 +24,10 @@ With the grasp tools (`docs/object_grasping.md`): 1 is `look_at`, 2 `fit_cylinde
 5 `refine` (the same grasp on the object as fitted again, from where the arm is, aimed to cancel its error), then
 `plan_pick` of its result from "pick.back". Check 4, what the move in passes, is yours, from the image.
 
+Being tried (2026-11-08, not yet a rule): 2, 3 and 5 from the wrist camera instead, at the attack point
+(`wrist_look`, `plan_alignment`, `triangulate_wrist`, `align_step`: [object_grasping.md](object_grasping.md) section 6, "The alignment
+loop").
+
 If a check cannot be made (the jaws or the object hidden, no depth on it) or fails, do not go in: clear the arm and
 look again, or re-plan the attack (higher, another pitch, another side, the other arm).
 

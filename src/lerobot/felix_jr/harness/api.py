@@ -41,6 +41,7 @@ from . import (
     reach as _reach,
     scan as _scan,
     tools as _tools,
+    wrist as _wrist,
 )
 from .objects import (
     ArmError,
@@ -58,11 +59,12 @@ from .objects import (
 )
 from .render import contact_sheet as _contact_sheet, render as _render  # the package re-exports `render`
 from .workspace import Workspace
+from .wrist import Alignment, WristPoint, WristView
 
 if TYPE_CHECKING:
     from lerobot.felix_jr.server.client import FelixClient
 
-MODEL = Path(__file__).parents[1] / "urdfs" / "xle_calib_11072026.urdf"
+MODEL = Path(__file__).parents[1] / "urdfs" / "xle_calib_1008"
 ENDPOINT = "tcp://ikeabot.local:5555"
 
 
@@ -427,10 +429,6 @@ def solve_pose(
     `init`: where the solver starts (joints in LeRobot degrees, or `Poses` to continue from its last pose; default the
     arm's pose in the capture). It decides the branch (elbow up or down). One local solve, no retries: if a pose
     misses, the description says by how much and which joints are at a limit; try another pitch, start or tolerance.
-    The description also says, per pose, what the capture's camera sees of the grasp point: "jaws seen (+0.52)" (the
-    cosine of the hinge axis and the line of sight: the farther from 0, the more the camera looks into the gap),
-    "jaws edge-on" (below 0.2: they hide what is between them) or "hidden by the right wrist camera plate". Before
-    contact, prefer a pose the camera can check: try another roll, pitch or the other arm.
     """
     return _reach.solve_pose(
         h.model,
@@ -526,6 +524,28 @@ def _settings(
     if "rotation_bounds_deg" in changes:
         changes["rotation_bounds_deg"] = tuple(float(b) for b in changes["rotation_bounds_deg"])
     return dataclasses.replace(base or _grasping.GraspSettings(), **changes)
+
+
+def _aligned_since(h: Harness, obj: Any, what: str) -> None:
+    """Refuse `obj` if any arm move other than an `align_step` came after it (or a scan: the scene may have changed).
+
+    Alignment steps move the arm by a few mm short of the object, so wrist views and points from before them still
+    describe the object where it is (the workspace counts every arm move as stale: this is the narrower rule).
+    """
+    node_id = h.ws.id_of(obj)
+    if node_id is None or not h.ws.is_stale(obj):
+        return
+    made = next((i for i, call in enumerate(h.calls) if node_id in call.get("result", [])), None)
+    if made is None:
+        raise ValueError(f"{what} comes from before the arm last moved: look again")
+    for call in h.calls[made + 1 :]:
+        refused = str(call.get("outcome", "")).startswith("refused")
+        if call["tool"] == "align_step" or refused:
+            continue
+        if call["effect"] in (Effect.MOVE_ARM.value, Effect.END.value) or call["tool"] == "scan":
+            raise ValueError(
+                f"{what} comes from before {call['tool']}, which may have moved things: look again"
+            )
 
 
 def _fresh(h: Harness, obj: Any, what: str) -> None:
@@ -655,6 +675,88 @@ def refine(
 
 
 @tool(Effect.SOFTWARE)
+def render_wrist(
+    h: Harness,
+    view: WristView,
+    pick: Poses | None = None,
+    marks: Sequence[Sequence[float]] | None = None,
+    labels: Sequence[str] | None = None,
+) -> np.ndarray:
+    """The wrist camera's picture (`wrist_look`) with what lines the jaws up drawn on it.
+
+    Cyan / magenta circles: where the model puts the fixed jaw's tip (the pinch point) and the moving one. Yellow, with
+    the pick plan (`plan_pick`): the approach line, a dot every 2 cm ahead of where the object's center belongs,
+    labeled in cm: the object is lined up when its center sits on the line (at the dot for how far ahead it is).
+    Green crosses: `marks`, pixels you want to check before passing them on (e.g. the object's two sides). White
+    circle: where the last `align_step` expected the object's center. The camera is a few cm off the gripper's axis,
+    so the line is not through the picture's middle.
+    """
+    return _wrist.render_wrist(h.model, view, pick, marks, labels)
+
+
+@tool(Effect.SOFTWARE)
+def plan_alignment(
+    h: Harness,
+    view: WristView,
+    pick: Poses,
+    edges: Sequence[Sequence[float]],
+    advance: float = 0.0,
+    roll_deg: float = 0.0,
+    gain: float = 1.0,
+    sidestep_m: float = 0.0,
+    center: WristPoint | None = None,
+) -> Alignment:
+    """Measure the object in a wrist view against the pick plan, and plan one step that lines the jaws up on it.
+
+    `edges`: the object's two sides in `view`, at the height (or place) it is to be grasped, as two pixels [[u, v],
+    [u, v]] (mark them on `render_wrist` first). How far away it is matters (the camera is ~7 cm off the jaws'
+    line: a depth 10% off is ~7 mm sideways). Pass `center`, the object's center triangulated from two wrist views
+    (`triangulate_wrist`), for it; without one, the plan's width (`pick.width`, the fitted primitive's, good to
+    10-20%) gives it. So the first step should make parallax: `sidestep_m=0.02, gain=0` (2 cm aside, square to the
+    jaws' closing line; the next step corrects it back), then triangulate the center from the views before and after. Each step makes 80% of the correction, so it falls
+    short rather than overshoots. The step moves the gripper across the approach line by the object's offset from it (times `gain`), in
+    `advance` (0-1) of the way along it, and turns the jaws `roll_deg` about it (positive: counterclockwise, looking
+    along the approach). At most 3 cm and 20 deg a step (more is clipped and said: re-plan from the head camera).
+
+    The description says how far off the object is (toward the moving jaw, and square to that), how far ahead, the
+    step, and, after an `align_step`, how much of the predicted shift the last step made (its real gain, with a fair
+    `gain` for the next step). Nothing moves: `align_step` runs it. The loop: wrist_look -> render_wrist -> a
+    sidestep (plan_alignment with `sidestep_m=0.02, gain=0` -> align_step) -> triangulate_wrist (the center pixels
+    before and after) -> plan_alignment(..., center=) -> align_step, until the object is on the line within a few
+    mm; then advance in parts, looking again each time, before the last move in and the close.
+    """
+    _fresh(h, view, "the wrist view")
+    if center is not None:
+        _aligned_since(h, center, "the triangulated center")
+    return _wrist.plan_alignment(h.model, view, pick, edges, advance, roll_deg, gain, sidestep_m, center)
+
+
+@tool(Effect.SOFTWARE)
+def triangulate_wrist(
+    h: Harness,
+    view_a: WristView,
+    uv_a: Sequence[float],
+    view_b: WristView,
+    uv_b: Sequence[float],
+    label: str = "object",
+) -> WristPoint:
+    """Locate a point marked in two wrist views of the same arm, taken from different places: a stereo pair.
+
+    `uv_a` / `uv_b`: the same point in each (for the object's center, the middle between its two sides at the grasp
+    height). The move between the views is known through the model, and accurate for a small move, so this gives the
+    depth a single view cannot. Best from a sideways move (`plan_alignment(..., sidestep_m=0.02)`): a few degrees of
+    parallax; moving in along the view gives little. The description says the parallax, how far apart the two rays
+    pass (more than a few mm: the marks are not the same point) and how much one pixel of marking moves the depth.
+
+    The views may come from before alignment steps (`align_step` does not touch the object), but not from before any
+    other arm move. Nothing moves.
+    """
+    _aligned_since(h, view_a, "view_a")
+    _aligned_since(h, view_b, "view_b")
+    return _wrist.triangulate(view_a, uv_a, view_b, uv_b, label)
+
+
+@tool(Effect.SOFTWARE)
 def arm_path(h: Harness, execution: Execution, every: int = 5) -> ArmPath:
     """The arm's body along an execution, to draw with `render`: where the shoulder, elbow, wrist and gripper go.
 
@@ -768,6 +870,30 @@ def look_at_pixel(h: Harness, view: View, uv: Sequence[float], distance: float =
         origin, direction = view.capture.rays(view.to_capture(np.asarray(uv, dtype=np.float64)))
         xyz = origin + distance * direction
     return look_at(h, xyz)
+
+
+@tool(Effect.SENSE)
+def wrist_look(h: Harness, arm: str) -> WristView:
+    """A new frame from `arm`'s wrist camera ("left" or "right") with its joints. Nothing moves.
+
+    The camera rides on the gripper, so it sees the object in the jaws' own frame (no head, no arm model in between):
+    `render_wrist` it with the pick plan to see how far off the jaws are.
+    """
+    return _wrist.wrist_view(h.model, h.client.wrist_capture(arm))
+
+
+@tool(Effect.MOVE_ARM)
+def align_step(h: Harness, alignment: Alignment, max_vel: float = _wrist.STEP_VEL) -> WristView:
+    """Make one alignment step (`plan_alignment`): a small move of the arm, which then holds there.
+
+    Returns the wrist view after it, which also says where the object's center should appear if the step went as
+    planned (`render_wrist` draws it): measure again with `plan_alignment` on it. Everything seen before becomes
+    stale. Moves the arm: a person approves first, seeing the step.
+    """
+    view = alignment.view  # its center may be older (`triangulate_wrist`): the view it was planned from must be fresh
+    if h.ws.id_of(view) is None or h.ws.is_stale(view):
+        raise NotStartedError("this alignment comes from before the arm last moved: look and measure again")
+    return _wrist.run_alignment(h.client, h.model, alignment, max_vel)
 
 
 @tool(Effect.MOVE_ARM)
