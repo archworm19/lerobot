@@ -30,9 +30,6 @@ if TYPE_CHECKING:
 CAPTURE_FILE = "capture.json"
 
 
-EDGE_ON_VISIBILITY = 0.2  # |visibility| below it: the camera sees the jaws nearly edge-on (pen2: +0.03)
-
-
 def _cm(value: float) -> str:
     return f"{100 * value:.1f}"
 
@@ -399,30 +396,6 @@ class Poses:
     # point was aimed toward the moving jaw, so the fixed one clears the object (`reach`'s module docstring)
     held: np.ndarray | None = None
     margin: float = 0.0
-    # how the capture's camera sees each pose's grasp point (`XleRobotModel.view_of`): the jaws' visibility (cosine of
-    # the hinge axis and the line of sight: near 0 the jaws are edge-on and hide what is between them) and the arms
-    # whose wrist camera plate is in the way; None in poses solved before
-    visibility: np.ndarray | None = None  # (M,)
-    hidden_by: tuple[tuple[str, ...], ...] | None = None  # (M,)
-
-    def seen(self) -> np.ndarray:
-        """Each pose's visibility (NaN where it was not computed)."""
-        return self.visibility if self.visibility is not None else np.full(len(self.labels), np.nan)
-
-    def hidden(self) -> tuple[tuple[str, ...], ...]:
-        """Each pose's hiding plates (none where it was not computed)."""
-        return self.hidden_by if self.hidden_by is not None else ((),) * len(self.labels)
-
-    def camera_text(self, i: int) -> str:
-        """What the camera sees of pose `i`'s grasp point, in words ("" where not computed)."""
-        visibility, hidden_by = self.seen()[i], self.hidden()[i]
-        if hidden_by:
-            return f"camera: hidden by the {' and '.join(hidden_by)} wrist camera plate"
-        if not np.isfinite(visibility):
-            return ""
-        if abs(visibility) < EDGE_ON_VISIBILITY:
-            return f"camera: jaws edge-on ({visibility:+.2f})"
-        return f"camera: jaws seen ({visibility:+.2f})"
 
     def angles(self) -> list[tuple[float, float, float]]:
         """The solved (pitch, heading, roll) of each pose, deg."""
@@ -437,8 +410,6 @@ class Poses:
         for i, label in enumerate(self.labels):
             pitch, heading, roll = self.angles()[i]
             got = f"pitch {_deg(pitch)}, heading {_deg(heading)}, roll {_deg(roll)}"
-            if self.camera_text(i):
-                got += f"; {self.camera_text(i)}"
             if self.ok[i]:
                 rows.append(f"{label} ok ({got})")
                 continue

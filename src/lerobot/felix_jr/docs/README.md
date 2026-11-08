@@ -233,32 +233,7 @@ radius r. It needs a calibrated URDF from section 6 (the model's radius is the s
    stored measurements with no robot. A camera calibration started from this file (`collect` /
    `xle_fit --start-from`) keeps the maps.
 
-### 8. Measure the arm's shapes: the gripper body and the forearm as boxes (a ruler, needs the server)
-
-The grasping's line-of-sight checks (`object_grasping.md`) need the gripper's and the forearm's shape. Each is a box
-square to its link: measure it with a ruler, type the sizes, and check it drawn over the head camera's picture (the
-rest of the calibration stays as it is). The fingers are not measured: the grasping puts 1 cm x 1 inch stand-in boxes
-where the calibration puts the tips. (The boxes were first fitted to clicked outlines: fragile, 2026-11-06.)
-
-1. Measure each part with a ruler, in cm:
-   - **gripper body:** its length from the wrist toward the tips, its width across the jaws (the way they close),
-     its depth along the jaws' hinge;
-   - **forearm** (with its sleeve): its length from the elbow toward the wrist, its width side to side (along the
-     elbow's axis), its height from the line through the elbow's and the wrist's axes down to its bottom.
-2. Server on the Pi with the arm (and the head): as for section 6.
-3. On your computer, with the workspace clear:
-   `uv run python -m lerobot.felix_jr.calibration.arm_shapes tcp://<pi>:5555 --start-from <calibration.urdf>
-   --out-dir <a scratch folder>` (`--arm right` to skip the question). For each part, the head turns to it and the
-   terminal asks for its sizes (Enter keeps the ones shown: the calibration's box, if it has one). The box is then
-   drawn orange over the frame, with an arrow from its center along each direction (also saved as
-   `<arm>_<part>.png`), and the terminal asks: `y` it sits on the part, keep it; `s L W D` new sizes; `m L W D`
-   shift it (cm, along the arrows); `v` another view (moves the arm and the head); `h N E` turn the head (deg);
-   `q` stop without writing. The gripper body starts at the wrist roll's axis and runs toward the tips; the forearm
-   is centered between the elbow and the wrist, its top on the joints' line: shift them onto the real parts.
-4. It writes `calibration.urdf` (the start with the boxes) and `arm_shapes.md` (the sizes and shifts) in the folder.
-5. The other arm: run again with `--start-from` the file just written. Then check the whole calibration (section 9).
-
-### 8b. Calibrate the wrist cameras (a checkerboard, needs the server)
+### 8. Calibrate the wrist cameras (a checkerboard, needs the server)
 
 The wrist cameras (plain USB / UVC boards, one per arm, plugged into the Pi) are read by the server. Their lens
 (intrinsics) and their pose on the gripper (extrinsics) go into the calibration, so a wrist picture can be measured in
@@ -315,10 +290,10 @@ the jaws' frame (`object_grasping.md`, section 6).
 
 Draws where the calibrated URDF puts both fingertips over the head camera, view after view, with the gripper at
 different openings: the pinch point (cyan, placed by the camera calibration) and the moving jaw's tip (magenta,
-placed by the gripper map from section 7 as well), and the wrist cameras' plates (yellow outlines) and the arms'
-boxes (orange outlines), from section 8, where the URDF has them, each named above its outline (the other
-arm's as, e.g., "left forearm"). It needs a URDF with the arm's gripper map, made for this robot
-(the same check as the harness's: a recalibrated arm or flipped head directions are refused).
+placed by the gripper map from section 7 as well). When the URDF has the arm's wrist camera (section 8) and the
+server streams it, the wrist camera's picture is shown beside the head camera's with the same two circles, placed
+by its lens and its pose on the gripper. It needs a URDF with the arm's gripper map, made for this robot (the same
+check as the harness's: a recalibrated arm or flipped head directions are refused).
 
 1. Server on the Pi with the arm (and the head): as for section 6.
 2. On your computer, with the workspace clear:
@@ -329,9 +304,10 @@ arm's as, e.g., "left forearm"). It needs a URDF with the arm's gripper map, mad
    the head; `q` quits and sends the robot to rest.
 3. Read the result: both circles should sit on the fingertips everywhere. An offset of the pinch point that changes
    with the pose or the head is the camera calibration (recalibrate, section 6); a pinch point on target with the
-   moving tip off, growing with the opening, is the gripper map (re-measure, section 7); a plate's or a box's
-   outline off the real one is its fit (section 8). With `--out-dir`, every
-   frame is saved as drawn and raw, with `frames.json` (the measured state and both predictions per frame).
+   moving tip off, growing with the opening, is the gripper map (re-measure, section 7). In the wrist picture the
+   fingertips stay in about the same place: circles off them there are the wrist camera's calibration (section 8),
+   whatever the head camera shows. With `--out-dir`, every frame is saved as drawn and raw (the wrist picture too),
+   with `frames.json` (the measured state and both predictions per frame, and their wrist pixels).
 
 ## Checks and teleop (after either setup)
 

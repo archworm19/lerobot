@@ -3,7 +3,6 @@
 import json
 import threading
 
-import cv2
 import numpy as np
 import pytest
 
@@ -19,6 +18,7 @@ from lerobot.felix_jr.calibration.check import (  # noqa: E402
 from lerobot.felix_jr.calibration.xle_robot_model import (  # noqa: E402
     GripperMap,
     RobotMismatchError,
+    WristCamera,
     XleRobotModel,
     arm_record,
 )
@@ -162,65 +162,41 @@ def test_annotate_draws_both_tips_and_skips_one_behind_the_camera():
     assert not has_color(alone, PINCH_COLOR, 60, 40 + 12)
 
 
-def test_the_wrist_camera_plates_are_drawn_where_the_calibration_has_them(robot):
-    from lerobot.felix_jr.calibration.check import BOARD_COLOR
-    from lerobot.felix_jr.calibration.xle_robot_model import WristBoard
+def wrist_camera() -> WristCamera:
+    """A wrist camera like the fake robot's (320 x 240), looking along the gripper's axis from 2 cm to its side."""
 
+    gripper_from_camera = (
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, -1.0, 0.0, 0.02),
+        (0.0, 0.0, -1.0, -0.03),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    return WristCamera(
+        320, 240, 200.0, 200.0, 160.0, 120.0, "rational", (0.0,) * 8, gripper_from_camera=gripper_from_camera
+    )
+
+
+def test_the_wrist_camera_shows_the_fingertips_beside_the_head_camera(robot, tmp_path):
     fake, client = robot
     with client.session():
-        bare, _ = make_session(client, model_for(client))
-        assert bare.board_outlines() == []  # none in the calibration: nothing drawn
-        model = model_for(client)
-        for arm in ("left", "right"):  # a 4 cm plate beside each gripper
-            plate = WristBoard(
-                f"{arm}_gripper_link",
-                ((0.02, -0.03, 0.06), (0.02, -0.03, 0.02), (0.02, 0.01, 0.02)),
-                (1.0, 0, 0),
-            )
-            model = model.with_wrist_board(arm, plate)
-        session, shown = make_session(client, model)
+        bare, shown = make_session(client, model_for(client))
+        assert any("head camera only" in note for note in bare.notes)
+        assert shown[-1].shape[1] == 320 and bare.wrist_fingertips() is None
+        model = model_for(client).with_wrist_camera("left", wrist_camera())
+        session, shown = make_session(client, model, out_dir=tmp_path / "check")
         session.handle("next")
-        outlines = session.board_outlines()
-        q = session.current_q()
-        uv, _ = session.model.project(session.model.board_corners("left", q), q)
-        assert any(np.allclose(o, uv) and name == "plate" for o, name in outlines)  # the checked arm's
-        assert {name for _, name in outlines} == {"plate", "right plate"}  # the other arm's named
-        assert len(outlines) == 2  # the other arm's too, at its measured joints
-        assert session.model.in_view(uv[0], margin=5)
-        corner = np.round(uv[0]).astype(int)
-        assert has_color(shown[-1], BOARD_COLOR, corner[1], corner[0])  # drawn on the frame
-
-
-def test_the_boxes_are_drawn_where_the_calibration_has_them(robot):
-    from lerobot.felix_jr.calibration.arm_shapes import BOX_COLOR
-    from lerobot.felix_jr.calibration.xle_robot_model import ArmBox
-
-    fake, client = robot
-    with client.session():
-        bare, _ = make_session(client, model_for(client))
-        assert bare.box_outlines() == []
-        model = model_for(client)
-        body = ArmBox("left_gripper_link", (0.0, 0.0, 0.045), (0.04, 0.04, 0.05))
-        model = model.with_boxes(
-            "left",
-            {
-                "gripper_body": body,
-                "fixed_finger": ArmBox("left_gripper_frame_link", (0.005, 0.0, -0.03), (0.01, 0.025, 0.06)),
-            },
-        )
-        session, shown = make_session(client, model)
-        session.handle("next")
-        outlines = session.box_outlines()
-        assert sorted(name for _, name in outlines) == ["fixed finger", "gripper body"]
-        q = session.current_q()
-        root_from_box, _ = session.model.boxes_root("left", q)["gripper_body"]
-        uv, _ = session.model.project(root_from_box[:3, 3], q)
-        assert session.model.in_view(uv[0], margin=30)
-        polygon = next(
-            o
-            for o, _ in outlines
-            if cv2.pointPolygonTest(o.astype(np.float32).reshape(-1, 1, 2), tuple(map(float, uv[0])), False)
-            > 0
-        )
-        edge = np.round(polygon[0]).astype(int)
-        assert has_color(shown[-1], BOX_COLOR, edge[1], edge[0])  # drawn on the frame
+        assert shown[-1].shape[:2] == (
+            240,
+            640,
+        )  # the head camera's picture, then the wrist camera's beside it
+        tips = session.wrist_fingertips()
+        assert tips is not None and np.isfinite(tips).all()
+        assert all(
+            0 <= u < 320 and 0 <= v < 240 for u, v in tips
+        )  # it looks along the jaws: it sees the tips
+        u, v = np.round(tips[0]).astype(int)
+        # the fingertips' circles in the wrist half (closed jaws: the moving tip's drawn over the pinch's)
+        assert any(has_color(shown[-1], color, v, 320 + u + 12) for color in (PINCH_COLOR, MOVING_COLOR))
+    frames = json.loads((tmp_path / "check" / "frames.json").read_text())
+    assert frames[-1]["wrist"]["pinch_uv"] == pytest.approx(tips[0].tolist())
+    assert (tmp_path / "check" / frames[-1]["wrist"]["image"]).is_file()

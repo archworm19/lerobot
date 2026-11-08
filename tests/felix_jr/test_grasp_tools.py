@@ -109,8 +109,8 @@ def test_stale_captures_are_refused(setup):
     fresh = Capture(capture.scene, capture.x_root_camera, REST, {}, 1.0)
     h.ws.add(fresh, "look")
     jar2 = h.call("fit_cylinder", h.call("full_view", fresh), marks_around(fresh, JAR), "up", "jar")
-    again = h.call("refine", found, "A", jar2, fresh, None, None, see_at_grasp=False)
-    assert again.passed == 1 and again.settings.see_at_grasp is False
+    again = h.call("refine", found, "A", jar2, fresh, None, None, margin=0.01)
+    assert again.passed == 1 and again.settings.margin == 0.01
     plan = h.call("plan_pick", again, "A")
     assert plan.labels[1] == "pick.back"
     go_in = h.call("select_poses", plan, "pick.back", "pick")

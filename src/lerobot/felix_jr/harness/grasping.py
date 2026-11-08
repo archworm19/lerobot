@@ -17,10 +17,9 @@ recorded with the reason (`Rejected`), and each stage is timed (`GraspCandidates
 - **attack point**, then **grasp:** the arm reaches them (`ArmIK.solve_frame`), the grasp from the attack point's
   joints, so the move in has no joint jump. The solve prefers the exact antipodal pose (`ROTATION_SCALES_DEG`: the
   closing line kept square to the object most); what it accepts is the settings' bounds, generous by default.
-- **attack view**, **grasp view:** the line of sight from the head camera to the grasp's points passes no arm surface
-  (both arms' plates and boxes, the stand-in fingers too: `sight_blockers`). At the attack point the center and
-  both contacts (where `protocols.md` rule 1 looks before going in), at the grasp the center (to watch the close).
-  Jaws seen edge-on hide the center behind a finger, so they fail here.
+
+Whether the grasp is seen is not checked here: the head camera, behind the gripper, could not judge it (bowl3, bowl4),
+and the wrist cameras will (`docs/object_grasping.md`, section 6).
 
 The rest are ranked by how close to a true antipodal grip the arm gets (the solved pose's turn about the approach,
 which tilts the closing line off the object's normal, and about the hinge, which slides the contacts; in steps of
@@ -41,13 +40,7 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from lerobot.felix_jr.calibration.xle_robot_model import (
-    PLATE_MARGIN_M,
-    ArmBox,
-    XleRobotModel,
-    pinch_frame,
-    segment_hits_box,
-)
+from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 
 from .objects import Capture, Object, Poses, angles_of
 from .primitives import AntipodalGrasp, Cylinder, Primitive, Ranges, Spacing
@@ -62,27 +55,7 @@ AXIS_NAMES = ("closing line", "approach", "hinge")  # the grasp's axes (`ClawTar
 # approach (tilts the closing line off the object's normal: bowl1's jar at roll -60 the worst), the hinge (slides the
 # contacts along the approach). Not what is accepted: `GraspSettings.rotation_bounds_deg`.
 ROTATION_SCALES_DEG = (20.0, 5.0, 10.0)
-STAGES = (
-    "jaws",
-    "attack point",
-    "attack view",
-    "grasp",
-    "grasp view",
-)  # in order: cheap first, each after its needs
-SIGHT_STOP_M = (
-    0.003  # a line of sight stops this short of its point (a point on a surface is not hidden by it)
-)
-# a plate hides what passes this close to it (its fit and the arm's error: 5 mm, as `XleRobotModel.hidden_by`); a
-# part's box only what passes through it: it was fitted to the outline as seen (a margin on the gripper body's old
-# capsule rejected bowl1's grasp that worked, the body "hiding" the center the head camera saw)
-SIGHT_MARGIN_M = PLATE_MARGIN_M
-# a stand-in for the fingers' size: about 1 inch across at their widest (estimated, 2026-11-06; not measured)
-FINGER_WIDTH_M = 0.0254
-FINGER_THICKNESS_M = (
-    0.010  # and about 1 cm thick, across the closing line (guessed, 2026-11-06; not measured)
-)
-FINGER_LENGTH_M = 0.05  # from the tip back, when there is no gripper body box to run back to
-FINGERS = ("fixed_finger", "moving_finger")
+STAGES = ("jaws", "attack point", "grasp")  # in order: cheap first, each after its needs
 
 
 def _cm(value: float) -> str:
@@ -106,14 +79,6 @@ class GraspSettings:
     rank_step_deg: float = (
         5.0  # antipodal errors this close rank as equal; the joint margin decides between them
     )
-    see_contacts: bool = (
-        True  # at the attack point the head camera must see the contacts too, not only the center
-    )
-    see_at_grasp: bool = True  # and at the grasp, the center
-    # at the attack point the head camera must see the center (and the contacts, with `see_contacts`); off at the hold:
-    # from there the camera looks down past the jaws at the object's middle, which a finger hides, while the picture
-    # shows the jaws on either side of it (bowl3, bowl4: the hold's judgement is the one who looks, rule 1)
-    see_at_attack: bool = True
     margin: float = MARGIN_M  # the fixed jaw this far clear of its contact
     attack: float = ATTACK_M  # the attack point this far back along the approach
 
@@ -122,14 +87,8 @@ class GraspSettings:
         bounds = ", ".join(
             f"{name} {b:g}" for name, b in zip(AXIS_NAMES, self.rotation_bounds_deg, strict=True)
         )
-        seen = "center and contacts" if self.see_contacts else "center"
-        views = [f"the {seen} at the attack point"] if self.see_at_attack else []
-        views += ["the center at the grasp"] if self.see_at_grasp else []
-        sight = (
-            f"the head camera sees {' and '.join(views)}" if views else "the head camera's view not checked"
-        )
         return (
-            f"accepted: turns up to ({bounds}) deg, the grasp point within {_cm(self.position_bound_m)} cm; {sight}; "
+            f"accepted: turns up to ({bounds}) deg, the grasp point within {_cm(self.position_bound_m)} cm; "
             f"ranked by the antipodal error in {self.rank_step_deg:g} deg steps, then the joint margin; fixed jaw "
             f"{_cm(self.margin)} cm clear, attack point {_cm(self.attack)} cm back"
         )
@@ -248,90 +207,6 @@ def widest_apart(model: XleRobotModel, arm: str) -> float:
     return float(2 * radius * np.sin(np.radians(widest_deg) / 2))
 
 
-def finger_boxes(
-    model: XleRobotModel, arm: str, width: float = FINGER_WIDTH_M, thickness: float = FINGER_THICKNESS_M
-) -> dict[str, ArmBox]:
-    """Stand-in boxes for `arm`'s two fingers, from the calibration, a finger `width` and `thickness`.
-
-    In the pinch frame: each runs from its tip back along the gripper axis to the gripper body's box (else
-    `FINGER_LENGTH_M`), its inner face on the tips' plane (the fixed jaw on +x, the moving one on -x, as closed), so
-    the contact faces are where the calibration puts the tips. The moving one turns with the jaw.
-    """
-    pinch = pinch_frame(arm)
-    length = FINGER_LENGTH_M
-    body = model.boxes.get(arm, {}).get("gripper_body")
-    if body is not None:
-        q = model.joint_vector()
-        pinch_from_body = np.linalg.inv(model.frame_pose(pinch, q)) @ model.box_frame(body, arm, q)
-        signs = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], dtype=float)
-        corners = (signs * 0.5 * np.asarray(body.size)) @ pinch_from_body[:3, :3].T + pinch_from_body[:3, 3]
-        length = max(float(-corners[:, 2].max()), thickness)  # to its face nearest the tips
-    size = (thickness, width, length)
-    return {
-        "fixed_finger": ArmBox(pinch, (thickness / 2, 0.0, -length / 2), size),
-        "moving_finger": ArmBox(pinch, (-thickness / 2, 0.0, -length / 2), size, moving=True),
-    }
-
-
-def arm_boxes(model: XleRobotModel, arm: str) -> dict[str, ArmBox]:
-    """`arm`'s boxes for the view filters: the model's, with stand-in fingers where it has none.
-
-    The model's are `calibration.arm_shapes`'s; the fingers `finger_boxes`. Empty if the model has none for the arm.
-    """
-    fitted = dict(model.boxes.get(arm, {}))
-    if not fitted:
-        return {}
-    return finger_boxes(model, arm) | fitted
-
-
-@dataclass(frozen=True)
-class Body:
-    """An arm surface that can block the head camera's view, as a box in the root frame: a plate or a part."""
-
-    name: str  # "right plate", "left forearm", ...
-    pose: np.ndarray  # root_from_box
-    half: np.ndarray  # half its size (3,)
-    margin: float = 0.0  # it hides what passes this close to it (`SIGHT_MARGIN_M` for a plate)
-
-    def blocks(self, camera_root: np.ndarray, end_root: np.ndarray) -> bool:
-        """Whether the segment from the camera to `end_root` passes through it, or within its `margin`."""
-        return segment_hits_box(camera_root, end_root, self.pose, self.half + self.margin)
-
-
-def arm_bodies(model: XleRobotModel, arm: str, q: np.ndarray, opening_deg: float) -> list[Body]:
-    """`arm`'s surfaces at `q` (its jaws open `opening_deg`): its plate and its boxes, the stand-in fingers too."""
-    bodies = []
-    if arm in model.wrist_boards:
-        board = model.wrist_boards[arm]
-        pose, size = board.box()
-        bodies.append(
-            Body(f"{arm} plate", model.frame_pose(board.parent, q) @ pose, size / 2, SIGHT_MARGIN_M)
-        )
-    for part, box in arm_boxes(model, arm).items():
-        frame = model.box_frame(box, arm, q, opening_deg)
-        bodies.append(Body(f"{arm} {part.replace('_', ' ')}", frame, 0.5 * np.asarray(box.size)))
-    return bodies
-
-
-def sight_blockers(
-    model: XleRobotModel, q: np.ndarray, bodies: Sequence[Body], points_root: Mapping[str, np.ndarray]
-) -> dict[str, str]:
-    """For each named point the head camera should see at `q`, the first body in its line of sight (none: absent).
-
-    The line stops `SIGHT_STOP_M` short of the point. Only the arms' surfaces count, not the objects.
-    """
-    camera = model.camera_pose(q)[:3, 3]
-    blocked = {}
-    for name, point in points_root.items():
-        sight = point - camera
-        end = camera + sight * (1.0 - SIGHT_STOP_M / max(float(np.linalg.norm(sight)), 1e-9))
-        for body in bodies:
-            if body.blocks(camera, end):
-                blocked[name] = body.name
-                break
-    return blocked
-
-
 @dataclass(frozen=True, eq=False)
 class GraspCandidate:
     """One grasp that passed every filter, with the arm's solved poses at the attack point and at the grasp."""
@@ -367,7 +242,7 @@ class GraspCandidate:
             f"{self.claw.fixed_side}, {_cm(self.claw.margin)} cm clear; gripper at pitch {pitch:.0f}, heading "
             f"{heading:.0f}, roll {roll:.0f} (root frame); antipodal error {self.antipodal_error_deg:.0f} deg (about the "
             f"approach {approach:.0f}, about the hinge {hinge:.0f}), approach tilted {closing:.0f} deg; joints >= "
-            f"{self.limit_margin_deg:.0f} deg from their bounds; seen by the head camera; off the target by "
+            f"{self.limit_margin_deg:.0f} deg from their bounds; off the target by "
             f"{_cm(self.grasp.position_error_m)} cm"
         )
 
@@ -471,13 +346,6 @@ def _limit_margin_deg(ik: ArmIK, *solutions: FrameSolution) -> float:
     return float(min(np.degrees(np.minimum(s.x - ik.lower, ik.upper - s.x)).min() for s in solutions))
 
 
-def _opening_of(model: XleRobotModel, arm: str, pose: Mapping[str, float]) -> float:
-    """The jaws' opening (deg) at an arm's measured `gripper.pos`; 0 without it or a gripper map."""
-    if "gripper.pos" not in pose or arm not in model.gripper_maps:
-        return 0.0
-    return max(model.opening_deg(arm, float(pose["gripper.pos"])), 0.0)
-
-
 def _solve(
     ik: ArmIK, claw: ClawTarget, target: np.ndarray, settings: GraspSettings, init: np.ndarray | None = None
 ):
@@ -519,15 +387,12 @@ def _evaluate(
     model: XleRobotModel,
     claw: ClawTarget,
     ik: ArmIK,
-    others: Sequence[Body],
     settings: GraspSettings,
     timed: _Timer,
     init: np.ndarray | None = None,
 ) -> GraspCandidate | Rejected:
     """One claw target through the filters after the jaws (`STAGES`): a candidate, or why it is rejected."""
     grasp, arm, fixed_side = claw.grasp, claw.arm, claw.fixed_side
-    opening_deg = model.opening_for_width(arm, claw.open_apart)
-
     start = time.perf_counter()
     at_attack = _solve(ik, claw, claw.root_from_attack, settings, init=init)
     timed("attack point", start)
@@ -536,43 +401,11 @@ def _evaluate(
         return Rejected(grasp, arm, fixed_side, "attack point", reason, claw, at_attack)
 
     start = time.perf_counter()
-    q = ik.q.copy()
-    q[ik.index] = at_attack.x
-    points = {"center": grasp.center_root}
-    if settings.see_contacts:
-        points |= dict(zip(("contact 0", "contact 1"), grasp.contacts_root, strict=True))
-    hidden = (
-        sight_blockers(model, q, [*arm_bodies(model, arm, q, opening_deg), *others], points)
-        if settings.see_at_attack
-        else {}
-    )
-    timed("attack view", start)
-    if hidden:
-        point, body = next(iter(hidden.items()))
-        reason = f"attack point: the {body.split(' ', 1)[1]} hides the grasp from the head camera"
-        detail = f"the {arm if body.startswith(arm) else 'other'} arm's, in front of the {point}"
-        return Rejected(grasp, arm, fixed_side, "attack view", reason, claw, at_attack, detail=detail)
-
-    start = time.perf_counter()
     at_grasp = _solve(ik, claw, claw.root_from_pinch, settings, init=at_attack.x)
     timed("grasp", start)
     reason = _rejection(at_grasp, "grasp", settings)
     if reason is not None:
         return Rejected(grasp, arm, fixed_side, "grasp", reason, claw, at_attack, at_grasp)
-
-    if settings.see_at_grasp:
-        start = time.perf_counter()
-        q = ik.q.copy()
-        q[ik.index] = at_grasp.x
-        hidden = sight_blockers(
-            model, q, [*arm_bodies(model, arm, q, opening_deg), *others], {"center": grasp.center_root}
-        )
-        timed("grasp view", start)
-        if hidden:
-            body = hidden["center"]
-            reason = f"grasp: the {body.split(' ', 1)[1]} hides the grasp from the head camera"
-            detail = f"the {arm if body.startswith(arm) else 'other'} arm's, in front of the center"
-            return Rejected(grasp, arm, fixed_side, "grasp view", reason, claw, at_attack, at_grasp, detail)
 
     cost = sum(
         (s.position_error_m / POSITION_TOL_M) ** 2
@@ -582,17 +415,6 @@ def _evaluate(
     return GraspCandidate(
         "", claw, at_attack, at_grasp, _limit_margin_deg(ik, at_attack, at_grasp), cost, settings
     )
-
-
-def _other_arms(model: XleRobotModel, capture: Capture, arm: str) -> list[Body]:
-    """The other arms' surfaces, where the capture has them."""
-    q = model.joint_vector(capture.arms, capture.head_ticks or None)
-    return [
-        body
-        for other, pose in capture.arms.items()
-        if other != arm
-        for body in arm_bodies(model, other, q, _opening_of(model, other, pose))
-    ]
 
 
 def _ranked(passed: Sequence[GraspCandidate], n: int) -> tuple[GraspCandidate, ...]:
@@ -615,8 +437,7 @@ def grasp_candidates(
 
     `target` is an `Object` (grasped by its `part`: the only one if not given) or a primitive: only what may be
     grasped. For each of its grasps in `where`, each arm and each contact on the fixed jaw. The attack point is solved
-    from the arm's pose in `capture`, the grasp from the attack point's joints; the camera is the capture's head pose,
-    the other arm where the capture has it. The best `n` are named A, B, ...; every rejected one is kept, with its stage.
+    from the arm's pose in `capture`, the grasp from the attack point's joints. The best `n` are named A, B, ...; every rejected one is kept, with its stage.
     """
     settings = GraspSettings() if settings is None else settings
     primitive = target.part(part) if isinstance(target, Object) else target
@@ -628,7 +449,6 @@ def grasp_candidates(
     for arm in arms:
         widest = widest_apart(model, arm)
         iks: dict[float, ArmIK] = {}
-        others = _other_arms(model, capture, arm)
         for grasp in grasps:
             for fixed_side in (0, 1):
                 tried += 1
@@ -643,7 +463,7 @@ def grasp_candidates(
                     iks[grasp.opening] = ArmIK(
                         model, arm, capture.arms, capture.head_ticks, grasp.opening, settings.margin
                     )
-                result = _evaluate(model, claw, iks[grasp.opening], others, settings, timed)
+                result = _evaluate(model, claw, iks[grasp.opening], settings, timed)
                 if isinstance(result, GraspCandidate):
                     passed.append(result)
                 else:
@@ -666,8 +486,8 @@ def refine(
     """The chosen grasp again, at the attack hold (`protocols.md` rule 1): from what the hold's capture shows.
 
     The same grasp (the same side, tilt and fixed jaw, at the same height on the object) on `target` as fitted again
-    from the hold's view; solved from where the arm is now (`capture`'s joints: it is at the attack point), the camera
-    where the head is; with its grasp and attack frames moved by `offset_root`, to cancel what the arm was measured to
+    from the hold's view; solved from where the arm is now (`capture`'s joints: it is at the attack point); with its
+    grasp and attack frames moved by `offset_root`, to cancel what the arm was measured to
     miss by at the hold (minus `arm_error(...).offset`: the arm sags the same way again on the short move in). The
     filters run again; the result is one candidate, "A", or none and why.
     """
@@ -684,7 +504,7 @@ def refine(
     if offset_root is not None:
         claw = _shifted(claw, -np.asarray(offset_root, dtype=np.float64))
     ik = ArmIK(model, arm, capture.arms, capture.head_ticks, grasp.opening, settings.margin)
-    result = _evaluate(model, claw, ik, _other_arms(model, capture, arm), settings, timed)
+    result = _evaluate(model, claw, ik, settings, timed)
     passed = [result] if isinstance(result, GraspCandidate) else []
     rejected = (result,) if isinstance(result, Rejected) else ()
     label = target.label if isinstance(target, Object) else ""
@@ -709,12 +529,7 @@ def _as_poses(
 ) -> Poses:
     """Solved frames as the harness's `Poses` (the solve's frames and joints, its achieved angles as targets)."""
     ik = ArmIK(model, claw.arm, capture.arms, capture.head_ticks, claw.grasp.opening, claw.margin)
-    angles, views = [], []
-    for solution in solutions:
-        angles.append(angles_of(solution.root_from_pinch[:3, :3]))
-        q = ik.q.copy()
-        q[ik.index] = solution.x
-        views.append(model.view_of(claw.arm, q, ik.tool(solution.root_from_pinch)))
+    angles = [angles_of(solution.root_from_pinch[:3, :3]) for solution in solutions]
     nan = np.full(len(labels), np.nan)
     return Poses(
         claw.arm,
@@ -736,8 +551,6 @@ def _as_poses(
         ik.open_jaw,
         ik.held,
         claw.margin,
-        np.array([v[0] for v in views]),
-        tuple(v[1] for v in views),
     )
 
 

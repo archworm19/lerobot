@@ -1,4 +1,4 @@
-"""Check a calibration on the robot: the model's two fingertips drawn over the head camera, view after view.
+"""Check a calibration on the robot: the model's two fingertips drawn over the head camera and the wrist camera.
 
   uv run python -m lerobot.felix_jr.calibration.check tcp://<pi>:5555 --arm right --model <calibration.urdf>
       [--openings 0,15,30,50,70] [--gripper-step 10] [--out-dir DIR] [--n 20] [--step 2] [--max-vel 30]
@@ -11,13 +11,15 @@ next of `--openings` (LeRobot's `gripper.pos`), and the frame shows where the mo
 
   cyan circle       the pinch point: the fixed jaw's tip (placed by the camera calibration)
   magenta circle    the moving jaw's tip (placed by the gripper map and the hinge too), with a line between them
-  yellow outlines   the wrist cameras' plates the calibration has, both arms' (older calibrations)
-  orange outlines   the arms' boxes it has, both arms' (the gripper body, the forearm: `calibration.arm_shapes`)
-                    each shape named above it ("forearm"; the other arm's as "left forearm")
 
 computed from the joint angles and the `gripper.pos` measured with the frame. If the calibration is right, the two
 circles sit on the two fingertips at every view and every opening; how far off they are, and whether it changes
 with the pose, the head or the opening, says which part is wrong.
+
+When the calibration has the arm's wrist camera (`calibration.wrist_camera`) and the server streams it, its picture is
+shown beside the head camera's with the same two circles, placed by the wrist camera's lens and its pose on the
+gripper (and the joints measured with that picture). There the fingertips barely move from view to view: circles that
+sit on them say the wrist camera's calibration is right, whatever the head camera's.
 
   n                   next view, with the next opening
   [ / ]               close / open the gripper by --gripper-step (gripper.pos), at this view
@@ -25,9 +27,9 @@ with the pose, the head or the opening, says which part is wrong.
   q or Esc            quit (the robot is sent to rest)
 
 The model must match the robot (`XleRobotModel.check_robot`) and have a gripper map for the arm
-(`calibration.gripper_step`). With `--out-dir`, every frame is saved as it is shown: `NNN.png` (as drawn) and
-`NNN_color.png`, and `frames.json` lists, per frame, the measured state, the opening and both points' predicted
-pixels and positions. The script runs inside a client session, so on Ctrl+C or a crash the robot goes to rest.
+(`calibration.gripper_step`). With `--out-dir`, every frame is saved as it is shown: `NNN.png` (as drawn),
+`NNN_color.png` and `NNN_wrist.png` (the wrist camera's, as taken), and `frames.json` lists, per frame, the measured
+state, the opening and both points' predicted pixels and positions (and their pixels in the wrist picture). The script runs inside a client session, so on Ctrl+C or a crash the robot goes to rest.
 """
 
 import argparse
@@ -39,7 +41,6 @@ from typing import Any
 import cv2
 import numpy as np
 
-from lerobot.felix_jr.calibration.arm_shapes import BOX_COLOR, box_outline, draw_label, shape_name
 from lerobot.felix_jr.calibration.live_view import (
     INTRINSICS_KEYS,
     LiveView,
@@ -48,42 +49,33 @@ from lerobot.felix_jr.calibration.live_view import (
     set_floor,
 )
 from lerobot.felix_jr.calibration.views import MAX_ROLL_DEG
-from lerobot.felix_jr.calibration.xle_robot_model import HEAD_JOINTS, Prediction, XleRobotModel
-from lerobot.felix_jr.server.client import FelixClient
-from lerobot.felix_jr.server.protocol import DEFAULT_PORT
+from lerobot.felix_jr.calibration.wrist_camera import fingertips_in_wrist_image
+from lerobot.felix_jr.calibration.xle_robot_model import Prediction, XleRobotModel
+from lerobot.felix_jr.server.client import FelixClient, WristCapture
+from lerobot.felix_jr.server.protocol import DEFAULT_PORT, ServerError
 
 DEFAULT_OPENINGS = (0.0, 15.0, 30.0, 50.0, 70.0)  # gripper.pos per view, in turn
-PINCH_COLOR, MOVING_COLOR, BOARD_COLOR = (
-    (0, 255, 255),
-    (255, 0, 255),
-    (255, 220, 0),
-)  # RGB: cyan, magenta, yellow
+PINCH_COLOR, MOVING_COLOR = (0, 255, 255), (255, 0, 255)  # RGB: cyan, magenta
 KEY_ACTIONS = {ord("n"): "next", ord("["): "close", ord("]"): "open", ord("q"): "quit", 27: "quit"}
 FRAMES_FILE = "frames.json"
 
 
+def side_by_side(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """The two RGB images in one, `right` scaled to `left`'s height and put on its right (`left`'s pixels unmoved)."""
+    height = left.shape[0]
+    scale = height / right.shape[0]
+    right = cv2.resize(right, (round(right.shape[1] * scale), height), interpolation=cv2.INTER_AREA)
+    return np.hstack([left, right])
+
+
 def annotate(
-    image: np.ndarray,
-    lines: list[str],
-    points: Sequence[tuple[np.ndarray | None, tuple, str]],
-    outlines: Sequence[tuple[np.ndarray, str]] = (),
-    boxes: Sequence[tuple[np.ndarray, str]] = (),
+    image: np.ndarray, lines: list[str], points: Sequence[tuple[np.ndarray | None, tuple, str]]
 ) -> np.ndarray:
     """Copy of the RGB `image` with each `(pixel, color, label)` as a labeled circle, and text at the top left.
 
-    A line joins the first two drawn points; a point with no pixel (None, or behind the camera) is left out. Each of
-    `outlines` ((N, 2) pixels, name) is drawn as a closed yellow polygon with its name above: a wrist camera's plate;
-    each of `boxes` as an orange one: a part of an arm.
+    A line joins the first two drawn points; a point with no pixel (None, or behind the camera) is left out.
     """
     out = image.copy()
-    taken: list[tuple[int, int, int, int]] = []  # the labels' boxes, so they do not overlap
-    for shapes, color in ((outlines, BOARD_COLOR), (boxes, BOX_COLOR)):
-        for outline, name in shapes:
-            if np.isfinite(outline).all():
-                polygon = np.round(outline).astype(np.int32).reshape(-1, 1, 2)
-                cv2.polylines(out, [polygon], True, (0, 0, 0), 3, cv2.LINE_AA)
-                cv2.polylines(out, [polygon], True, color, 1, cv2.LINE_AA)
-                draw_label(out, outline, name, color, taken)
     drawn = [(uv, color, label) for uv, color, label in points if uv is not None and np.isfinite(uv).all()]
     if len(drawn) >= 2:
         a, b = (tuple(int(round(float(c))) for c in uv) for uv, _, _ in drawn[:2])
@@ -159,6 +151,14 @@ class CheckSession(LiveView):
             max_roll,
         )
         self.openings, self.gripper_step, self.out_dir = [float(o) for o in openings], gripper_step, out_dir
+        camera = model.wrist_cameras.get(arm)
+        self.wrist = camera if camera is not None and camera.gripper_from_camera is not None else None
+        if self.wrist is None:
+            self.notes.append(f"no calibrated {arm} wrist camera in the calibration: the head camera only")
+        elif arm not in client.hello().get("wrist_cameras", []):
+            self.notes.append(f"the server has no {arm} wrist camera: the head camera only")
+            self.wrist = None
+        self.wrist_frame: WristCapture | None = None
         self.opening_index = 0
         self.frames: list[dict[str, Any]] = []
         self.message = self.notes[-1] if self.notes else "n = next view"
@@ -188,6 +188,27 @@ class CheckSession(LiveView):
         self.image = self._annotated()
         self.show(self.image)
 
+    def wrist_fingertips(self) -> np.ndarray | None:
+        """Where the model puts the two fingertips in the wrist picture (2, 2) px, at its joints; None without one."""
+        if self.wrist is None or self.wrist_frame is None:
+            return None
+        return fingertips_in_wrist_image(
+            self.model, self.arm, self.wrist, self.wrist_frame.state[self.arm_id]
+        )
+
+    def _wrist_annotated(self) -> np.ndarray | None:
+        tips = self.wrist_fingertips()
+        if tips is None or self.wrist_frame is None:
+            return None
+        image = self.wrist_frame.color
+        lines = [f"{self.arm} wrist camera"]
+        if self.wrist is not None and image.shape[1::-1] != (self.wrist.width, self.wrist.height):
+            lines.append(
+                f"frame {image.shape[1]} x {image.shape[0]}, calibrated at {self.wrist.width} x {self.wrist.height}"
+            )
+        points = [(tips[0], PINCH_COLOR, "pinch"), (tips[1], MOVING_COLOR, "moving tip")]
+        return annotate(image, lines, points)
+
     def _annotated(self) -> np.ndarray:
         opening, pinch, moving = self.predictions()
         apart = float(np.linalg.norm(moving.point - pinch.point))
@@ -204,49 +225,19 @@ class CheckSession(LiveView):
             (pinch.uv if pinch.z > 0 else None, PINCH_COLOR, "pinch"),
             (moving.uv if moving.z > 0 else None, MOVING_COLOR, "moving tip"),
         ]
-        return annotate(self.capture.color, lines, points, self.board_outlines(), self.box_outlines())
-
-    def board_outlines(self) -> list[tuple[np.ndarray, str]]:
-        """Each wrist camera plate the calibration has (both arms'), as its seen face in the current frame.
-
-        Each is (4, 2) pixels, with its name ("plate", or "left plate" for the other arm's); a plate behind the
-        camera is left out. The other arm's plate is placed at the joints this frame measured for it, if any, else at its rest in the URDF.
-        """
-        state = self.capture.state
-        arms = {arm: state[f"{arm}_arm"] for arm in self.model.wrist_boards if f"{arm}_arm" in state}
-        q = self.model.joint_vector(arms, {n: int(state["head"][n]["ticks"]) for n in HEAD_JOINTS})
-        outlines = []
-        for arm in self.model.wrist_boards:
-            uv, z = self.model.project(self.model.board_corners(arm, q), q)
-            if (z > 0).all():
-                outlines.append((uv, shape_name(arm, "plate", self.arm)))
-        return outlines
-
-    def box_outlines(self) -> list[tuple[np.ndarray, str]]:
-        """Each box the calibration has (both arms'), as its outline in the current frame, with its name.
-
-        The outline is `box_outline`'s; the name "forearm", or "left forearm" for the other arm's.
-
-        Placed like `board_outlines`; a moving finger at its arm's measured opening (closed without a gripper map).
-        """
-        state = self.capture.state
-        arms = {arm: state[f"{arm}_arm"] for arm in self.model.boxes if f"{arm}_arm" in state}
-        q = self.model.joint_vector(arms, {n: int(state["head"][n]["ticks"]) for n in HEAD_JOINTS})
-        outlines = []
-        for arm in self.model.boxes:
-            opening = 0.0
-            if arm in arms and arm in self.model.gripper_maps:
-                opening = max(self.model.opening_deg(arm, float(arms[arm]["gripper.pos"])), 0.0)
-            for part, (root_from_box, half) in self.model.boxes_root(arm, q, opening).items():
-                polygon = box_outline(self.model, q, root_from_box, half)
-                if polygon is not None:
-                    outlines.append((polygon, shape_name(arm, part, self.arm)))
-        return outlines
+        head = annotate(self.capture.color, lines, points)
+        wrist = self._wrist_annotated()
+        return head if wrist is None else side_by_side(head, wrist)
 
     # ---- frames ---------------------------------------------------------------------------------------------
 
     def refresh(self, after: float | None = None) -> None:
-        """Take a new frame, show it, and save it (with `out_dir`)."""
+        """Take a new frame (the wrist camera's too), show it, and save it (with `out_dir`)."""
+        if self.wrist is not None:
+            try:
+                self.wrist_frame = self.client.wrist_capture(self.arm, after=after)
+            except ServerError as e:  # e.g. the camera dropped for a moment: the server reopens it
+                self.wrist_frame, self.message = None, f"no wrist frame ({e})"
         super().refresh(after)
         if self.out_dir is not None:
             self._save()
@@ -260,6 +251,12 @@ class CheckSession(LiveView):
         cv2.imwrite(
             str(self.out_dir / f"{name}_color.png"), cv2.cvtColor(self.capture.color, cv2.COLOR_RGB2BGR)
         )
+        wrist_tips = self.wrist_fingertips()
+        if self.wrist_frame is not None:
+            cv2.imwrite(
+                str(self.out_dir / f"{name}_wrist.png"),
+                cv2.cvtColor(self.wrist_frame.color, cv2.COLOR_RGB2BGR),
+            )
         self.frames.append(
             {
                 "index": index,
@@ -276,6 +273,14 @@ class CheckSession(LiveView):
                         "visibility": p.visibility,
                     }
                     for key, p in (("pinch", pinch), ("moving_tip", moving))
+                },
+                "wrist": None
+                if wrist_tips is None or self.wrist_frame is None
+                else {
+                    "image": f"{name}_wrist.png",
+                    "state": {self.arm_id: self.wrist_frame.state[self.arm_id]},
+                    "pinch_uv": wrist_tips[0].tolist(),
+                    "moving_tip_uv": wrist_tips[1].tolist(),
                 },
             }
         )

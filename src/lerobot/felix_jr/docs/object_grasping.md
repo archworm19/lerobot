@@ -313,27 +313,21 @@ place until `plan_place` (phase D).
 - `scratch/session.py` (gitignored): `propose` (waypoints in cm at a pitch); `execute` keeps working on `Poses`.
 
 
-**Deprecated by the wrist-camera redesign** (2026-11-07, section 6). They keep working until the redesign replaces
-them; nothing new is built on them.
+**Removed with the wrist-camera redesign** (2026-11-07, section 6): the code for the head camera's line of sight to a
+grasp, which the wrist cameras replace. bowl3 and bowl4 turned the view filters off at every hold.
 
-*The arm's shapes* (they existed for the head camera's line of sight, which the wrist cameras replace; the wrist
-camera's own pose is calibrated instead, section 6):
-
-- `calibration/arm_shapes.py` (the whole script) and its tests (`test_arm_shapes.py`).
-- `calibration/xle_robot_model.py`: `ArmBox`, `BOX_PARTS`, `with_boxes`, `box_frame`, `boxes_root`, the `boxes`
-  record; `WristBoard`, `with_wrist_board`, `without_wrist_board`, `board_corners`, `wrist_board_link`,
-  `BOARD_THICKNESS_M`, `PLATE_MARGIN_M`, `segment_hits_box`; the plates' and boxes' outlines in `calibration/check.py`.
-  Their tests: `test_arm_model_shapes.py`, `test_calibration_check.py`'s plate and box cases.
-
-*The head camera's view of the grasp:*
-
-- `harness/grasping.py`: the stages "attack view" and "grasp view", `sight_blockers`, `Body`, `arm_bodies`,
-  `arm_boxes`, `finger_boxes`, `FINGER_*`, `SIGHT_STOP_M`, `SIGHT_MARGIN_M`; `GraspSettings.see_contacts`,
-  `see_at_grasp`, `see_at_attack`; `refine`'s view check. (bowl3 and bowl4 turned them off at every hold.)
-- `calibration/xle_robot_model.py`: `hidden_by`, `view_of`, `visibility` (as used for grasps; `views.py`'s check that
-  the head camera faces the pinch point stays: the click calibration needs it, without the plates).
-- `harness/reach.py` / `objects.py`: `FrameSolution` and `Poses`'s `visibility`, `hidden_by`, `seen`, `hidden`,
-  `camera_text`, `EDGE_ON_VISIBILITY` (the "camera: jaws seen / edge-on / hidden" reports).
+- *The arm's shapes:* `calibration/arm_shapes.py` and its tests; in `calibration/xle_robot_model.py` the parts' boxes
+  (`ArmBox`, `with_boxes`, `boxes_root`, ...) and the wrist cameras' plates (`WristBoard`, `with_wrist_board`,
+  `board_corners`, `segment_hits_box`, ...); their outlines in `calibration/check.py`. An older calibration loads
+  without them (`OLD_SHAPE_KEYS`, its plate links taken out of the URDF, a warning).
+- *The head camera's view of the grasp:* in `harness/grasping.py` the stages "attack view" and "grasp view",
+  `sight_blockers`, the stand-in fingers, `GraspSettings.see_*`, `refine`'s view check; in the model `hidden_by` and
+  `view_of`; in `reach.py` / `objects.py` the poses' `visibility` / `hidden_by` and their "camera: jaws seen /
+  edge-on / hidden" reports. The model's `visibility` (the hinge axis against the line of sight) stays: the click
+  calibration's views use it to face the pinch point to the head camera.
+- *Tests:* `test_arm_model_shapes.py`; the visibility checks in the replays (`test_grasp_replay_smoke.py`,
+  `test_grasp_replay_pen2_smoke.py`: its first left grasp no longer ranks among the best 10 without the view
+  filters, only among the level ones).
 
 *Also changed or replaced:*
 
@@ -350,7 +344,6 @@ camera's own pose is calibrated instead, section 6):
 - `test_grasp.py`: rewritten for `to_claw` and the candidates (the claw geometry it checks stays true).
 - `test_harness.py`: the `solve_pose` / `approach` / `held_object` cases.
 - `smoke_tests/test_ik_smoke.py`: rebuilt on `grasp_candidates` over pen1's and bowl1's recorded scenes.
-- `test_arm_model_shapes.py` (from `test_arm_shapes.py`, was `test_wrist_camera_board.py`): `test_solved_poses_say_what_the_camera_sees_of_the_grasp` moves to the scores.
 
 **Docs:**
 

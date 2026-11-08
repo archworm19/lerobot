@@ -11,29 +11,21 @@ pytest.importorskip("pinocchio")
 pytest.importorskip("scipy")
 
 from lerobot.felix_jr.calibration.xle_robot_model import (  # noqa: E402
-    ArmBox,
     GripperMap,
     XleRobotModel,
 )
 from lerobot.felix_jr.harness.execute import prepare_execution  # noqa: E402
 from lerobot.felix_jr.harness.grasping import (  # noqa: E402
     ATTACK_M,
-    FINGER_LENGTH_M,
-    FINGER_THICKNESS_M,
-    FINGER_WIDTH_M,
     LIFT_M,
     PICK_GRIP,
     STAGE_UP_M,
     STAGES,
-    Body,
     GraspCandidate,
     GraspSettings,
-    arm_boxes,
-    finger_boxes,
     grasp_candidates,
     plan_pick,
     refine,
-    sight_blockers,
     to_claw,
 )
 from lerobot.felix_jr.harness.objects import Object, angles_of  # noqa: E402
@@ -221,57 +213,6 @@ def test_rank_antipodal_first_then_joint_margin():
         20.0,
         60.0,
     ]
-
-
-def test_a_box_in_the_line_of_sight_hides_a_point(model):
-    q = model.joint_vector({"right": BOWL1_ARMS["right"]})
-    camera = model.camera_pose(q)[:3, 3]
-    point = camera + np.array([-0.3, 0.0, -0.3])
-    middle = np.eye(4)
-    middle[:3, 3] = 0.5 * (camera + point)
-    half = np.array([0.02, 0.05, 0.02])
-    beside = middle.copy()
-    beside[:3, 3] += [0.0, 0.0, 0.05]
-    in_the_way, off = Body("right forearm", middle, half), Body("right forearm", beside, half)
-    assert sight_blockers(model, q, [off, in_the_way], {"center": point}) == {"center": "right forearm"}
-    assert sight_blockers(model, q, [off], {"center": point}) == {}
-    # a plate hides what passes within its margin too
-    assert sight_blockers(model, q, [Body("right plate", beside, half, 0.04)], {"center": point}) == {
-        "center": "right plate"
-    }
-
-
-# boxes about where `urdfs/xle_calib_11062026.urdf`'s capsules had the right arm's parts (`calibration.arm_shapes`)
-RIGHT_BOXES = {
-    "gripper_body": ArmBox("right_gripper_link", (-0.002, -0.0017, -0.029), (0.077, 0.045, 0.045)),
-    "forearm": ArmBox("right_lower_arm_link", (-0.054, -0.020, 0.020), (0.20, 0.067, 0.067)),
-}
-LID = {"t": (0.069, 0.069), "psi": (0.0, 90.0)}
-
-
-@pytest.fixture(scope="module")
-def shaped(model):
-    return model.with_boxes("right", RIGHT_BOXES)
-
-
-def test_stand_in_fingers_run_from_the_tips_to_the_body(shaped, model):
-    fingers = finger_boxes(shaped, "right")
-    fixed, moving = fingers["fixed_finger"], fingers["moving_finger"]
-    assert fixed.size[:2] == moving.size[:2] == pytest.approx((FINGER_THICKNESS_M, FINGER_WIDTH_M))
-    assert not fixed.moving and moving.moving
-    # the inner faces are on the tips' plane (the pinch frame's x = 0), on either side of it, from the tips back
-    for box, side in ((fixed, 1.0), (moving, -1.0)):
-        assert box.center[0] - side * box.size[0] / 2 == pytest.approx(0.0, abs=1e-12)
-        assert box.center[2] + box.size[2] / 2 == pytest.approx(0.0, abs=1e-12)
-    assert 0.02 < fixed.size[2] < 0.12  # back to the gripper body's box
-    q = shaped.joint_vector()
-    root_from_body, half = shaped.boxes_root("right", q)["gripper_body"]
-    back = shaped.box_frame(fixed, "right", q) @ np.array([0.0, 0.0, -fixed.size[2] / 2, 1.0])
-    gap = np.abs(np.linalg.inv(root_from_body)[:3] @ back) - half  # the fingers' back: on the body's surface
-    assert gap.max() == pytest.approx(0.0, abs=0.012)
-    assert set(arm_boxes(shaped, "right")) == {"fixed_finger", "moving_finger", "gripper_body", "forearm"}
-    assert arm_boxes(model, "right") == {}  # none fitted: none at all
-    assert finger_boxes(model, "right")["fixed_finger"].size[2] == FINGER_LENGTH_M
 
 
 # ---- objects and the pick plan ----------------------------------------------------------------------------------

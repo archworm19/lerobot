@@ -189,8 +189,8 @@ def default_parameters(
 class Prediction:
     """What the model says about one of an arm's gripper points (`POINTS`).
 
-    Its pixel (u, v), depth along the optical axis, position in the camera frame and in the root frame,
-    `visibility` (see `XleRobotModel.visibility`) and `hidden_by` (`XleRobotModel.hidden_by`).
+    Its pixel (u, v), depth along the optical axis, position in the camera frame and in the root frame, and
+    `visibility` (see `XleRobotModel.visibility`).
     """
 
     uv: np.ndarray
@@ -198,7 +198,6 @@ class Prediction:
     p_camera: np.ndarray
     point: np.ndarray
     visibility: float
-    hidden_by: tuple[str, ...] = ()  # the arms whose wrist camera plate is between the camera and the point
 
 
 def motor_record(motor: Mapping[str, int]) -> dict[str, int]:
@@ -239,101 +238,14 @@ class GripperMap:
         return self.pos_closed + opening_deg / self.deg_per_unit
 
 
-BOARD_THICKNESS_M = 0.01  # the wrist camera's mount plate, with the board on it (assumed, not measured)
-PLATE_MARGIN_M = 0.005  # a plate hides what passes this close to its box (its fit and the arm's error)
-SIGHT_END_M = (
-    0.005  # the line of sight stops this short of the point: a point on the plate's edge is not hidden
-)
+# the old calibrations' arm shapes (`load` leaves them out): the wrist cameras' mount plates (a link in the URDF too) and
+# the arms' parts as capsules or boxes, for the head camera's line of sight, replaced by the wrist cameras (2026-11-07)
+OLD_SHAPE_KEYS = ("wrist_boards", "boxes", "capsules")
 
 
-def segment_hits_box(a: np.ndarray, b: np.ndarray, pose: np.ndarray, half: np.ndarray) -> bool:
-    """Whether the segment from `a` to `b` (root frame) passes through the box at `pose` (4x4) of half-size `half`."""
-    rotation, center = pose[:3, :3], pose[:3, 3]
-    start, direction = rotation.T @ (a - center), rotation.T @ (b - a)
-    low, high = 0.0, 1.0
-    for axis in range(3):
-        if abs(direction[axis]) < 1e-12:
-            if abs(start[axis]) > half[axis]:
-                return False
-            continue
-        t1, t2 = sorted(
-            ((-half[axis] - start[axis]) / direction[axis], (half[axis] - start[axis]) / direction[axis])
-        )
-        low, high = max(low, t1), min(high, t2)
-        if low > high:
-            return False
-    return True
-
-
-def wrist_board_link(arm: str) -> str:
-    """The URDF link of `arm`'s wrist camera mount plate (`XleRobotModel.with_wrist_board`)."""
+def old_plate_link(arm: str) -> str:
+    """The URDF link of an old calibration's wrist camera mount plate (`load` takes it out)."""
     return f"{arm}_wrist_camera_link"
-
-
-@dataclass(frozen=True)
-class WristBoard:
-    """An arm's wrist camera mount plate, fixed to its gripper (`calibration.arm_shapes`): a thin box.
-
-    `corners` are three corners of the plate's face the head camera sees (its back), in turn around it (the second
-    between the other two), in `parent`'s frame (m); the fourth follows. The box is `thickness` deep (assumed),
-    from that face toward `away` (unit, parent frame: the side away from the head camera, where the lens is). `rms_px`
-    and `n_clicks` say what the corners were fitted to.
-    """
-
-    parent: str
-    corners: tuple[tuple[float, float, float], ...]
-    away: tuple[float, float, float]
-    thickness: float = BOARD_THICKNESS_M
-    rms_px: float | None = None
-    n_clicks: int = 0
-
-    def face_corners(self) -> np.ndarray:
-        """The seen face's four corners in turn (4, 3), `parent`'s frame: the three fitted and the fourth."""
-        c1, c2, c3 = (np.asarray(c, dtype=float) for c in self.corners)
-        return np.array([c1, c2, c3, c1 + c3 - c2])
-
-    def box(self) -> tuple[np.ndarray, np.ndarray]:
-        """The box in `parent`'s frame: its pose (4x4) and its size (3,), m.
-
-        The pose's origin is the box's center, its x and y run along the plate's edges, its z is the normal toward
-        `away`.
-        """
-        c1, c2, c3 = self.face_corners()[:3]
-        e1, e2 = c1 - c2, c3 - c2
-        x = e1 / np.linalg.norm(e1)
-        y = e2 - (e2 @ x) * x
-        y /= np.linalg.norm(y)
-        z = np.cross(x, y)
-        if z @ np.asarray(self.away) < 0:  # keep it right-handed
-            y, z = -y, -z
-        pose = np.eye(4)
-        pose[:3, :3] = np.column_stack([x, y, z])
-        pose[:3, 3] = (c1 + c3) / 2 + z * self.thickness / 2
-        return pose, np.array([np.linalg.norm(e1), np.linalg.norm(e2), self.thickness])
-
-
-# an arm's parts, as boxes (`ArmBox`), in the order clicked; no wrist (the wrist roll servo): mostly hidden, and covered by
-# its neighbours for the line of sight
-BOX_PARTS = ("fixed_finger", "moving_finger", "gripper_body", "forearm")
-
-
-@dataclass(frozen=True)
-class ArmBox:
-    """A part of an arm as a box (`calibration.arm_shapes`), square to its parent link's axes.
-
-    `center` is in `parent`'s frame, `size` (m) along its x, y and z: six numbers, the part being bolted square to the
-    link (the gripper's servo housing to the gripper link, the forearm along its link). With `moving`, the parent is
-    the pinch frame and the box turns with the moving jaw: `center` is where it is with the jaws closed, and
-    `XleRobotModel.box_frame` turns it by the opening (`moving_jaw`). `rms_px` and `n_clicks` say what it was fitted to
-    (none for a stand-in).
-    """
-
-    parent: str
-    center: tuple[float, float, float]
-    size: tuple[float, float, float]
-    moving: bool = False
-    rms_px: float | None = None
-    n_clicks: int = 0
 
 
 WRIST_CAMERA_MODELS = (
@@ -426,8 +338,6 @@ class XleRobotModel:
         visible_side: Mapping[str, str] | None = None,
         gripper_maps: Mapping[str, GripperMap] | None = None,
         arm_calibration: Mapping[str, Mapping[str, Mapping[str, int]]] | None = None,
-        wrist_boards: Mapping[str, WristBoard] | None = None,
-        boxes: Mapping[str, Mapping[str, ArmBox]] | None = None,
         wrist_cameras: Mapping[str, WristCamera] | None = None,
     ):
         """Build the model from URDF text (`from_urdf` reads a file).
@@ -439,9 +349,7 @@ class XleRobotModel:
         gripper the camera must see ("positive" by default: the wrist camera is on the negative side).
         `gripper_maps`: per arm, how `gripper.pos` opens the jaws, where measured. `arm_calibration`: per arm, the
         LeRobot calibration (`arm_record`) its clicks were taken under, where known: the arm's estimates hold only
-        under it. `wrist_boards`: per arm, its wrist camera's mount plate, where fitted (the URDF also carries it as a
-        link: `with_wrist_board`). `boxes`: per arm, its parts as boxes (`BOX_PARTS`), where fitted. `wrist_cameras`:
-        per arm, its wrist camera, where calibrated (`WristCamera`).
+        under it. `wrist_cameras`: per arm, its wrist camera, where calibrated (`WristCamera`).
         """
         require_package("pin", extra="kinematics", import_name="pinocchio")
         self.urdf = urdf
@@ -456,8 +364,6 @@ class XleRobotModel:
         self.visible_side = dict.fromkeys(ARMS, "positive") | dict(visible_side or {})
         self.gripper_maps = dict(gripper_maps or {})
         self.arm_calibration = {arm: arm_record(motors) for arm, motors in (arm_calibration or {}).items()}
-        self.wrist_boards = dict(wrist_boards or {})
-        self.boxes = {arm: dict(parts) for arm, parts in (boxes or {}).items()}
         self.wrist_cameras = dict(wrist_cameras or {})
         if not set(self.visible_side.values()) <= set(SIDES):
             raise ValueError(f"visible_side must be one of {SIDES}: {self.visible_side}")
@@ -869,7 +775,7 @@ class XleRobotModel:
         uv, z = self._project(xyz[None])
         x_root_camera = self._pose(OPTICAL_FRAME)
         p_camera = x_root_camera[:3, :3].T @ (xyz - x_root_camera[:3, 3])
-        return Prediction(uv[0], float(z[0]), p_camera, xyz, self._visibility(arm, xyz), self._hidden_by(xyz))
+        return Prediction(uv[0], float(z[0]), p_camera, xyz, self._visibility(arm, xyz))
 
     def predict_many(
         self,
@@ -1035,46 +941,6 @@ class XleRobotModel:
         self._evaluate(q, theta)
         return self._visibility(arm, self._point(arm, point, opening_deg))
 
-    def hidden_by(
-        self,
-        arm: str,
-        q: np.ndarray,
-        point: str = "pinch",
-        opening_deg: float | None = None,
-        theta: np.ndarray | Mapping[str, float] | None = None,
-    ) -> tuple[str, ...]:
-        """The arms whose wrist camera plate (`wrist_boards`) is between the camera and one of `arm`'s gripper points.
-
-        Each plate is its box, `PLATE_MARGIN_M` larger; an arm without a fitted plate hides nothing.
-        """
-        self._evaluate(q, theta)
-        return self._hidden_by(self._point(arm, point, opening_deg))
-
-    def view_of(
-        self, arm: str, q: np.ndarray, xyz: np.ndarray, theta: np.ndarray | Mapping[str, float] | None = None
-    ) -> tuple[float, tuple[str, ...]]:
-        """How the camera sees a root-frame point held by `arm`'s jaws (a grasp point).
-
-        Returns the jaws' `visibility` there and the arms whose plate hides it (as `hidden_by`).
-        """
-        self._evaluate(q, theta)
-        xyz = np.asarray(xyz, dtype=float)
-        return self._visibility(arm, xyz), self._hidden_by(xyz)
-
-    def _hidden_by(self, xyz: np.ndarray) -> tuple[str, ...]:
-        camera = self._pose(OPTICAL_FRAME)[:3, 3]
-        sight = xyz - camera
-        end = camera + sight * max(0.0, 1.0 - SIGHT_END_M / max(float(np.linalg.norm(sight)), 1e-9))
-        hits = []
-        for arm, board in self.wrist_boards.items():
-            link = wrist_board_link(arm)
-            if link not in self._frame_ids:
-                continue
-            _, size = board.box()
-            if segment_hits_box(camera, end, self._pose(link), size / 2 + PLATE_MARGIN_M):
-                hits.append(arm)
-        return tuple(hits)
-
     def _visibility(self, arm: str, xyz: np.ndarray) -> float:
         sight = self._pose(OPTICAL_FRAME)[:3, 3] - xyz
         return float(self._hinge(arm)[1] @ sight) / float(np.linalg.norm(sight))
@@ -1190,114 +1056,6 @@ class XleRobotModel:
             element_origin.set("rpy", _format(pin.rpy.matrixToRpy(rotation)))
         return '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode") + "\n"
 
-    def with_wrist_board(self, arm: str, board: WristBoard) -> "XleRobotModel":
-        """A copy of the model with `arm`'s wrist camera plate, replacing an earlier one.
-
-        The plate is kept in `wrist_boards`, and in the URDF as a link (`wrist_board_link`, a box) on a fixed joint
-        to `board.parent`. The joint is not calibrated, so the estimates carry over as they are.
-        """
-        link, joint = wrist_board_link(arm), f"{arm}_wrist_camera_joint"
-        root = ET.fromstring(self.urdf)
-        for element in [*root.findall("link"), *root.findall("joint")]:
-            if element.get("name") in (link, joint):
-                root.remove(element)
-        pose, size = board.box()
-        rpy = _format(pin.rpy.matrixToRpy(pose[:3, :3]))
-        link_element = ET.SubElement(root, "link", {"name": link})
-        visual = ET.SubElement(link_element, "visual")
-        ET.SubElement(visual, "origin", {"xyz": "0 0 0", "rpy": "0 0 0"})
-        ET.SubElement(ET.SubElement(visual, "geometry"), "box", {"size": _format(size)})
-        joint_element = ET.SubElement(root, "joint", {"name": joint, "type": "fixed"})
-        ET.SubElement(joint_element, "origin", {"xyz": _format(pose[:3, 3]), "rpy": rpy})
-        ET.SubElement(joint_element, "parent", {"link": board.parent})
-        ET.SubElement(joint_element, "child", {"link": link})
-        model = type(self)(
-            '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode") + "\n",
-            self.head_signs,
-            self.head_refs,
-            self.intrinsics,
-            self.parameters,
-            self.floor_z,
-            self.visible_side,
-            self.gripper_maps,
-            self.arm_calibration,
-            self.wrist_boards | {arm: board},
-            self.boxes,
-            self.wrist_cameras,
-        )
-        model.set_estimates(self._estimates.copy())
-        model.covariance = self.covariance
-        model.fit_info = dict(self.fit_info)
-        return model
-
-    def without_wrist_board(self, arm: str) -> "XleRobotModel":
-        """A copy of the model with no wrist camera plate on `arm` (taken off the robot).
-
-        Its link and joint go from the URDF and from `wrist_boards`. The same model if it has none.
-        """
-        if arm not in self.wrist_boards:
-            return self
-        link, joint = wrist_board_link(arm), f"{arm}_wrist_camera_joint"
-        root = ET.fromstring(self.urdf)
-        for element in [*root.findall("link"), *root.findall("joint")]:
-            if element.get("name") in (link, joint):
-                root.remove(element)
-        model = type(self)(
-            '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode") + "\n",
-            self.head_signs,
-            self.head_refs,
-            self.intrinsics,
-            self.parameters,
-            self.floor_z,
-            self.visible_side,
-            self.gripper_maps,
-            self.arm_calibration,
-            {other: board for other, board in self.wrist_boards.items() if other != arm},
-            self.boxes,
-            self.wrist_cameras,
-        )
-        model.set_estimates(self._estimates.copy())
-        model.covariance = self.covariance
-        model.fit_info = dict(self.fit_info)
-        return model
-
-    def board_corners(
-        self, arm: str, q: np.ndarray, theta: np.ndarray | Mapping[str, float] | None = None
-    ) -> np.ndarray:
-        """Root-frame positions (4, 3) of the four corners of `arm`'s wrist camera plate's seen face, in turn."""
-        if arm not in self.wrist_boards:
-            raise ValueError(f"no wrist camera plate for the {arm} arm: run calibration.arm_shapes")
-        board = self.wrist_boards[arm]
-        frame = self.frame_pose(board.parent, q, theta)
-        return board.face_corners() @ frame[:3, :3].T + frame[:3, 3]
-
-    def with_boxes(self, arm: str, parts: Mapping[str, ArmBox]) -> "XleRobotModel":
-        """A copy of the model with `arm`'s boxes `parts` added, replacing earlier ones of the same parts.
-
-        They live in `boxes` only (saved in `<felix_calibration>`): each is fixed to a link the URDF has.
-        """
-        unknown = set(parts) - set(BOX_PARTS)
-        if unknown:
-            raise ValueError(f"unknown parts {sorted(unknown)}: one of {BOX_PARTS}")
-        model = type(self)(
-            self.urdf,
-            self.head_signs,
-            self.head_refs,
-            self.intrinsics,
-            self.parameters,
-            self.floor_z,
-            self.visible_side,
-            self.gripper_maps,
-            self.arm_calibration,
-            self.wrist_boards,
-            self.boxes | {arm: self.boxes.get(arm, {}) | dict(parts)},
-            self.wrist_cameras,
-        )
-        model.set_estimates(self._estimates.copy())
-        model.covariance = self.covariance
-        model.fit_info = dict(self.fit_info)
-        return model
-
     def with_wrist_camera(self, arm: str, camera: WristCamera) -> "XleRobotModel":
         """A copy of the model with `arm`'s wrist camera `camera` (replacing an earlier one); saved in `<felix_calibration>`."""
         if camera.model not in WRIST_CAMERA_MODELS:
@@ -1312,8 +1070,6 @@ class XleRobotModel:
             self.visible_side,
             self.gripper_maps,
             self.arm_calibration,
-            self.wrist_boards,
-            self.boxes,
             self.wrist_cameras | {arm: camera},
         )
         model.set_estimates(self._estimates.copy())
@@ -1329,38 +1085,6 @@ class XleRobotModel:
         if camera is None or camera.gripper_from_camera is None:
             raise ValueError(f"no calibrated {arm} wrist camera pose: run calibration.wrist_camera")
         return self.frame_pose(wrist_camera_link(arm), q, theta) @ np.array(camera.gripper_from_camera)
-
-    def box_frame(
-        self,
-        box: ArmBox,
-        arm: str,
-        q: np.ndarray,
-        opening_deg: float = 0.0,
-        theta: np.ndarray | Mapping[str, float] | None = None,
-    ) -> np.ndarray:
-        """root_from_box (4x4) of one of `arm`'s boxes: its center, its axes its parent's.
-
-        The parent's pose; for the moving finger, the pinch frame turned by the jaws' opening (`opening_deg`, 0 closed).
-        """
-        frame = self.frame_pose(box.parent, q, theta)
-        if box.moving:
-            frame = frame @ self.moving_jaw(arm, max(opening_deg, 0.0), theta)
-        out = frame.copy()
-        out[:3, 3] = frame[:3, :3] @ np.asarray(box.center) + frame[:3, 3]
-        return out
-
-    def boxes_root(
-        self,
-        arm: str,
-        q: np.ndarray,
-        opening_deg: float = 0.0,
-        theta: np.ndarray | Mapping[str, float] | None = None,
-    ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        """`arm`'s boxes at `q` (the moving finger at `opening_deg`): part -> (root_from_box, half its size (3,))."""
-        return {
-            part: (self.box_frame(box, arm, q, opening_deg, theta), 0.5 * np.asarray(box.size, dtype=float))
-            for part, box in self.boxes.get(arm, {}).items()
-        }
 
     def save(self, path: str | Path) -> None:
         """Write the calibrated URDF: `to_urdf()` plus a `<felix_calibration>` element holding everything else.
@@ -1387,10 +1111,6 @@ class XleRobotModel:
             "visible_side": self.visible_side,
             "gripper_maps": {arm: asdict(m) for arm, m in self.gripper_maps.items()},
             "arm_calibration": self.arm_calibration,
-            "wrist_boards": {arm: asdict(b) for arm, b in self.wrist_boards.items()},
-            "boxes": {
-                arm: {part: asdict(b) for part, b in parts.items()} for arm, parts in self.boxes.items()
-            },
             "wrist_cameras": {arm: asdict(c) for arm, c in self.wrist_cameras.items()},
             "parameters": [asdict(p) for p in self.parameters],
             "estimates": self._estimates.tolist(),
@@ -1413,6 +1133,19 @@ class XleRobotModel:
             raise ValueError(f"{path} has no <{CALIBRATION_TAG}> element: not written by XleRobotModel.save")
         data = json.loads(element.text)
         root.remove(element)
+        old_shapes = [key for key in OLD_SHAPE_KEYS if data.get(key)]
+        if (
+            old_shapes
+        ):  # the arms' shapes of older calibrations: no longer modeled (the wrist cameras see instead)
+            log.warning(
+                "%s: its arm shapes (%s) are left out: no longer modeled", path, ", ".join(old_shapes)
+            )
+            plates = {old_plate_link(arm) for arm in data.get("wrist_boards", {})}
+            for element_ in list(root):  # the plate's link and the fixed joint holding it
+                child = element_.find("child")
+                name = attr(element_, "name") if element_.tag == "link" else None
+                if name in plates or (child is not None and attr(child, "link") in plates):
+                    root.remove(element_)
         for joint in root.findall("joint"):
             name = attr(joint, "name")
             if name not in data["nominal_origins"]:
@@ -1435,17 +1168,6 @@ class XleRobotModel:
                 for arm, m in data.get("gripper_maps", {}).items()
             },
             data.get("arm_calibration", {}),  # none in calibrations made before snapshots
-            {  # none before the wrist camera boards were fitted
-                arm: WristBoard(**b | {"corners": tuple(map(tuple, b["corners"])), "away": tuple(b["away"])})
-                for arm, b in data.get("wrist_boards", {}).items()
-            },
-            {  # none before the arms' shapes were fitted
-                arm: {
-                    part: ArmBox(**b | {"center": tuple(b["center"]), "size": tuple(b["size"])})
-                    for part, b in parts.items()
-                }
-                for arm, parts in data.get("boxes", {}).items()
-            },
             {  # none before the wrist cameras were calibrated
                 arm: WristCamera(
                     **c
@@ -1459,10 +1181,6 @@ class XleRobotModel:
                 for arm, c in data.get("wrist_cameras", {}).items()
             },
         )
-        if data.get("capsules"):  # the arms' shapes as capsules, before they were boxes (2026-11-06)
-            log.warning(
-                "%s: its capsules are left out (the arms' shapes are boxes now): fit them again", path
-            )
         model.set_estimates(np.array(data["estimates"], dtype=float))
         if data["covariance"] is not None:
             model.covariance = np.array(data["covariance"], dtype=float)

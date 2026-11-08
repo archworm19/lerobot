@@ -332,3 +332,17 @@ def test_the_frame_jacobian_matches_finite_differences(model, arm):
             jacobian[3:, i], [spin[2, 1], spin[0, 2], spin[1, 0]], atol=1e-6, err_msg=joint
         )
     np.testing.assert_array_equal(jacobian[:, -1], 0.0)
+
+
+@pytest.mark.parametrize(
+    ("name", "kind"), [("xle_calib_11052026.urdf", "wrist_boards"), ("xle_calib_11072026.urdf", "boxes")]
+)
+def test_an_old_calibrations_arm_shapes_are_left_out(name, kind, caplog):
+    """The arms' shapes (the wrist cameras' plates, the parts' boxes or capsules) are no longer modeled (2026-11-07): an
+    older calibration loads without them, its plate links taken out of the URDF, and says so."""
+    path = Path(__file__).parents[2] / "src" / "lerobot" / "felix_jr" / "urdfs" / name
+    with caplog.at_level("WARNING"):
+        model = XleRobotModel.load(path)
+    assert f"arm shapes ({kind})" in caplog.text
+    assert "wrist_camera_link" not in model.urdf
+    assert not hasattr(model, "boxes") and not hasattr(model, "wrist_boards")

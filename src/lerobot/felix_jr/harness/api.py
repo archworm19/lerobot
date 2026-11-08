@@ -584,8 +584,9 @@ def grasp_candidates(
     each (low, high), e.g. {"psi": (0, 90)} for an object in a book or a cup (not from below, through the support).
     `**settings` change what is assumed (`GraspSettings`, printed with the result): `rotation_bounds_deg` (how far
     the arm may turn off the exact grasp, about the closing line, the approach, the hinge; default 45 each: narrow
-    the approach for a slippery object), `position_bound_m`, `rank_step_deg`, `see_contacts`, `see_at_grasp`,
-    `margin` (the fixed jaw's clearance, m), `attack` (m). Draw them with `render`. Nothing moves.
+    the approach for a slippery object), `position_bound_m`, `rank_step_deg`, `margin` (the fixed jaw's clearance,
+    m), `attack` (m). Whether the grasp is seen is not checked: judge it at the hold. Draw them with `render`. Nothing
+    moves.
     """
     _fresh(h, capture, "the capture")
     _fresh(h, target, "the object")
@@ -641,10 +642,9 @@ def refine(
     At the hold (the arm at "pick.back"): look at the grasp (`look_at`), fit the object again in that capture
     (`target`, `fit_cylinder`), measure the arm (`error`, `arm_error(pick, capture, "pick.back")`); this re-solves the
     same grasp (side, tilt, jaw, height on the object) on the object where it is now, from where the arm is, aimed to
-    cancel the arm's measured error, and checks again that the camera sees it. One candidate, "A", or none and why.
+    cancel the arm's measured error, and checks again that the arm reaches it. One candidate, "A", or none and why.
     Then `plan_pick` it and run "pick.back" -> "pick" -> "lift" with grip {"pick": "close"}. `**settings` change the
-    chosen candidate's (as for `grasp_candidates`): e.g. `see_at_grasp=False` when the look, from behind the gripper,
-    cannot see between the jaws at the grasp but saw the object and the jaws at the attack point. Nothing moves.
+    chosen candidate's (as for `grasp_candidates`): e.g. a wider `margin` for a light object. Nothing moves.
     """
     _fresh(h, capture, "the capture")
     _fresh(h, target, "the object")
