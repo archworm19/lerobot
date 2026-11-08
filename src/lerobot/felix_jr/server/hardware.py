@@ -493,6 +493,11 @@ def video_index(device: str | int) -> int:
     """The `/dev/videoN` number of a camera given by index or by path (a `/dev/v4l/by-path/...` link is followed)."""
     if isinstance(device, int):
         return device
+    if not os.path.exists(device):
+        raise ValueError(
+            f"no camera at {device!r}: unplugged, in another USB port, or dropped off the bus "
+            "(`ls -l /dev/v4l/by-path/`, `sudo dmesg | tail`; `setup.find_wrist_cameras` finds it again)"
+        )
     real = os.path.realpath(device)
     match = re.fullmatch(r"/dev/video(\d+)", real)
     if match is None:
