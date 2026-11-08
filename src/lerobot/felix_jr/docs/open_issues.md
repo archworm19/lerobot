@@ -14,7 +14,7 @@ planned on it, and `pen1` (2026-11-01) moved the arm, every move approved; sessi
 `harness/scratch/sessions/`, write-ups in [sessions.md](sessions.md). On pen1 the gripper landed ~1 cm from plan, in line with the XLeRobot's inexpensive hardware: close enough everywhere except
 across the jaws, which is the first item.
 
-Last updated 2026-11-05 (16 added: the arm's sag, from pen2). 2026-11-02: 10 closed (the legacy objects are gone;
+Last updated 2026-11-08 (14, 15, 16: what bowl6 showed). 2026-11-05: 16 added (the arm's sag, from pen2). 2026-11-02: 10 closed (the legacy objects are gone;
 the IK smoke test is built on pen1).
 
 ## Fix the gripper model (the biggest issue)
@@ -44,6 +44,10 @@ the IK smoke test is built on pen1).
       an overshoot in servo units / degrees past the object (or close to the tips meeting), with the servo's torque
       cap setting the force; weigh it against overload protection (torque drops to 25 % after a long hard hold).
       Worth measuring: the load after closing at a few overshoots, and how long until protection trips.
+      **bowl6 (2026-11-08) again:** a 3.6 cm bottle, closed to `gripper.pos` 17.0 (width - 3 mm), stopped at 18.3:
+      1.3 of error, held but too weakly; the lift left it on the table, twice. Next: a bench test, the bottle
+      between the jaws by hand, closed to 17, 13 and 10 and lifted. Also: the reading cannot tell a grip across the
+      middle from a chord 4 mm off it (0.4 of `gripper.pos`, inside the map's accuracy): judge by the lift.
     - **Grasping at the tips.** The grasp point is between the fingertips, so a thin object is held at the very tips,
       where pen1's pen sat (and pen2's, which slipped). Holding it a finger-depth (~1.5-2 cm) into the jaws would be a `depth` on the grasp: the
       points of both jaws that far back from the tips, and the opening that leaves `width` between them there.
@@ -82,8 +86,24 @@ the IK smoke test is built on pen1).
     hand-eye fit), a separate step after the click calibration; both go into `calibration.urdf`
     (`XleRobotModel.wrist_cameras`, `WristCamera`, `wrist_camera_pose`). README section 8b.
 
-    Still to do: their frames in the harness (`Capture` or a wrist capture tool). Signals besides the camera, worth trying: the gripper's load or current after
-    closing; a capture after a small lift (is the object still in the cup?).
+    **d. In the harness (2026-11-08), tried on bowl5/bowl6:** `wrist_look`, `render_wrist` (the fingertips, the
+    approach line, the closing line, the object's midline from its observed top), `plan_alignment`,
+    `triangulate_wrist`, `align_step` (`object_grasping.md` section 6). Centering across the jaws worked (1-4 mm);
+    the bottle was not picked.
+
+    Still to do:
+    - **Depth at the grasp.** The wrist camera has none: the object's width, triangulation over the arm's moves
+      (10-20% on short baselines: the arm's motion error) and the rigid closing line were each weaker than the
+      person's eye; the head camera is blind behind the arm. A depth camera on the wrist, or a head view from the
+      side.
+    - **The wrist calibration's check should fit the camera's turn from the fingertips.** The right camera's
+      checkerboard fit was ~5 deg off (bowl5: the drawn tips 34-51 px from the real ones; 7.8 deg at first, which also
+      absorbed the fingers' 1 cm thickness: the wrist camera sees their other face, `JAW_THICKNESS_M`); a gripper sweep
+      (the moving tip's arc and the fixed tip) fitted 5.2 deg to 8 px (`urdfs/xle_calib_1008_wrist2.urdf`). The
+      calibration script's last step could do the same. Not the board's hand-eye fit over many arm poses: it absorbs
+      the arm model's errors (hil3, `object_grasping.md` 6.3).
+    - Signals besides the camera: the gripper's load or current after closing; the object's size in the wrist picture
+      after a small lift (a held object keeps it).
 
 ## Rendering
 
@@ -145,6 +165,9 @@ including the object being grasped. Revisit only if the model, given good render
     measured by hand. **Used on bowl1** (four attack holds, 0.4-0.8 cm; each grasp aimed to cancel the full error
     landed). TODO: a couple more sessions, then add it to `protocols.md` (rule 1's "measure the arm" step); and log
     its measurements (pose, load, error) toward the sag model.
+    **bowl6 (2026-11-08):** the elbow stopped 1.2-1.4 deg short under load on every step; `align_step` now commands a
+    joint more than 0.5 deg short again, pushed past by the shortfall (it then lands within 0.5 deg). Every grasp
+    plan is aimed 1 cm high against the sag (`GraspSettings.sag_lift`, the person's call).
 
 18. **A rolled grasp on a vertical object is wider than its `width`.** `solve_pose` takes `width` along the jaws'
     closing line; rolled by `roll`, that line crosses a vertical cylinder over `width / cos(roll)` (bowl1: a 4 cm jar

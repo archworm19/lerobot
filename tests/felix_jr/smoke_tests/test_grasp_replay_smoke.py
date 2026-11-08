@@ -31,6 +31,7 @@ from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel  # noqa: 
 from lerobot.felix_jr.harness.execute import prepare_execution  # noqa: E402
 from lerobot.felix_jr.harness.grasping import (  # noqa: E402
     PICK_GRIP,
+    SAG_LIFT_M,
     STAGES,
     grasp_candidates,
     plan_pick,
@@ -88,13 +89,14 @@ def found(model):
     )
 
 
-def test_the_best_close_level(found):
+def test_the_best_close_level(found, model):
     assert found.passed > 0
     for c in found.candidates[:5]:
         assert abs(c.claw.grasp.closing_root[2]) < 1e-9  # the family: square to the vertical axis
         assert c.antipodal_error_deg < found.settings.rank_step_deg, c.describe()
         # the solved tip-to-tip line: within the first step of level
-        d_root = c.grasp.root_from_pinch[:3, :3] @ (c.claw.aim_pinch / np.linalg.norm(c.claw.aim_pinch))
+        in_plane = c.claw.aim_pinch - model.wrist_face(c.claw.arm) / 2  # the aim, in the jaws' plane
+        d_root = c.grasp.root_from_pinch[:3, :3] @ (in_plane / np.linalg.norm(in_plane))
         assert np.degrees(np.arcsin(abs(d_root[2]))) <= found.settings.rank_step_deg
 
 
@@ -116,7 +118,9 @@ def test_the_best_is_like_the_grasp_that_worked(found):
     best = found.candidates[0]
     pitch, heading, roll = angles_of(best.grasp.root_from_pinch[:3, :3], WORKED[1])
     level = min(_wrap(roll - WORKED[2]), _wrap(roll - WORKED[2] - 180.0))  # either jaw on either side
-    assert max(abs(pitch - WORKED[0]), _wrap(heading - WORKED[1]), level) <= 6.0, best.describe()
+    # 6.5: bowl1 aimed the pinch point (one face of the fingers); the aim is now their middle, half a thickness along
+    # the hinge (`JAW_THICKNESS_M`, 2026-11-08), which turns the solve slightly (the roll 6.0 deg off bowl1's)
+    assert max(abs(pitch - WORKED[0]), _wrap(heading - WORKED[1]), level) <= 6.5, best.describe()
     low = [c for c in found.candidates if c.grasp.root_from_pinch[2, 2] > -0.3]  # pitch above about -17
     assert all(c.limit_margin_deg < best.limit_margin_deg for c in low)
 
@@ -133,6 +137,8 @@ def test_the_best_is_planned_and_runs_through_the_execution(model, found):
     assert pick.ok.all(), pick.describe()
     execution = prepare_execution(model, pick, PICK_GRIP)
     assert len(execution.moves) > 4
-    # bowl1's own plan, as executed: the attack point (pick.back) and the grasp aim (pick), root frame
-    np.testing.assert_allclose(pick.points[1], [-0.329, -0.083, 0.806], atol=0.01)
-    np.testing.assert_allclose(pick.points[2], [-0.348, -0.107, 0.780], atol=0.01)
+    # bowl1's own plan, as executed: the attack point (pick.back) and the grasp aim (pick), root frame; aimed
+    # SAG_LIFT_M higher now (bowl6), which bowl1's was not
+    high = np.array([0.0, 0.0, SAG_LIFT_M])
+    np.testing.assert_allclose(pick.points[1] - high, [-0.329, -0.083, 0.806], atol=0.01)
+    np.testing.assert_allclose(pick.points[2] - high, [-0.348, -0.107, 0.780], atol=0.01)

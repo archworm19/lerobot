@@ -220,7 +220,9 @@ def test_a_full_pose_is_solved_back_from_nearby(model, arm):
         q = model.joint_vector()
         q[index] = x
         frame = model.frame_pose(pinch_frame(arm), q)
-        tool = frame[:3, 3] - width / 2 * frame[:3, 0]
+        tool = (
+            frame[:3, :3] @ model.grasp_offset(arm, width) + frame[:3, 3]
+        )  # the grasp point the solver aims
         pitch, heading, roll = angles_of(frame[:3, :3])
         init = {
             f"{j}.pos": float(np.degrees(v))

@@ -7,7 +7,152 @@ renders and the workspace log; `session.py log <name>` prints the calls and obje
 (`workspace.pkl`) of the sessions before pen1 (`cable1`, `cable1_new`, `chapstick1`, `desk1`) no longer loads: it
 holds objects removed since (`Plan`, `Reach`) or lacks the call log. Their images and `log.jsonl` still read.
 
+## bowl5, bowl6 (2026-11-08): the bottle, aligned from the wrist camera (not picked)
+
+**Setup.** bowl4's scene again (the container, the white bottle and the chapstick upright). Right arm; the first
+session with the wrist-camera alignment loop (`wrist_look`, `plan_alignment`, `triangulate_wrist`, `align_step`:
+[object_grasping.md](object_grasping.md) section 6), `urdfs/xle_calib_1008`, every move approved. The bottle fitted
+3.6-3.7 cm wide (a depth from parallax later agreed: 13.8 cm against the width's 13.7); grasp A, from the robot's
+side at pitch -40, 4 cm up the bottle; `execute` to the attack point, held there.
+
+### What happened
+
+1. **The fingertips show in the wrist picture** (both arms): the last check can be against the real tips.
+2. **The right wrist camera's pose was off ~8 deg (bowl5).** The drawn tips sat 34-51 px from the real ones. A
+   gripper sweep at the hold (`gripper.pos` 10, 20, 35, 50: the moving tip's arc and the fixed tip, 5 points) fitted
+   a turn of 7.8 deg to 3.2 px RMS; a shift alone needed 13 mm and left 8 px (up to 15). The person's view: the
+   extrinsics calibration was bad for this camera (the checkerboard fit did not show it). Patched as
+   `urdfs/xle_calib_1008_wrist.urdf` (`api.MODEL`), the session restarted as bowl6 on it: the tips sit on the real
+   ones. The calibration's check should fit this from the tips (open issue).
+3. **A sidestep along the hinge gives the wrong parallax.** The first sidestep (2 cm along the hinge: up, for an
+   upright bottle grasped from the side) and the step after it gave two triangulations 1.8 cm apart in height
+   (depths 13.0 and 11.2 cm). Along an upright object's axis nothing marks the same height in both views. Changed
+   to a sidestep across the jaws (the object's two sides pin the correspondence): the rays then passed 1 mm apart,
+   and the depth agreed with the width's. `hinge_gain=0` leaves the along-hinge offset (the height on the object) to
+   the plan.
+4. **Centering across the jaws worked:** 23 -> 6 -> (sidestep) -> 13 -> 4 mm, the steps going 90-106% of the
+   way predicted when they were sideways.
+5. **The first advance went down instead of in.** Asked: the pinch (-0.8, -0.2, -0.9) cm along the approach; by
+   the joints read it moved (-0.1, 0.0, -1.5): the shoulder lift reached its target, the elbow stopped 1.2 deg short.
+   The servos' deadband (0.5-1.5 deg per joint, 3-8 mm at the gripper) is now as large as the steps. After it, the
+   depth carried through the model (11.7 cm) and the width's (13.5 cm) disagree by 1.8 cm, and the approach line runs
+   2.6 cm below the marked center (just under the cap): the jaws perhaps 1 cm over the table, by the model.
+
+### Where it stopped: unsure
+
+At this point the measurements disagreed and nothing in the loop could say which was right: the across-the-jaws
+offset was well measured (2-4 mm), but the height of the jaws over the table and how far the tips were from the
+bottle depended on the arm model through moves the servos had not made as asked.
+
+**Decision:** a second sensor before contact. The head camera (`look_at` the bottle) could not see the jaws: the
+sleeve and the wrist camera's board were in front of them (bowl4's problem: from behind the arm it does not see the
+grasp). The person chose to raise the gripper first (too high only grasps higher on the body; too low risks the
+table).
+
+6. **The elbow stops short under load, every time:** the raise came out 2 mm instead of 7 (the elbow 1.3 deg short of
+   43.8 -> 42.5; the advance before, 1.2 deg short). The other joints within 0.5 deg. `align_step` now commands a
+   joint more than 0.5 deg short again, pushed past by the shortfall (twice at most): the raise again went as asked
+   (the elbow pushed once more, 39.4 for 39.3), and so did the advance after it.
+7. **The advance: every measurement said "there", the person said "too far".** After 1.2 cm in along the approach,
+   across the jaws 1 mm, the bottle's center 0.3 cm ahead of the aim point, the depth 11.1 cm by the triangulation
+   and 11.5 by the width, and the bottle 109 px wide against 108 for its width at the fingertips' depth (the tips as a
+   ruler). The person: the gripper is too far in. Not closed.
+
+### Finding (confirmed): the free direction is the object's axis, not the hinge
+
+The marks were at one height on the bottle (just under the cap) and the jaws' line passed 1.6 cm from it along the
+hinge; `hinge_gain=0` left that to the plan as "the height on the object". But the approach is pitched 40 deg down,
+so the hinge is tilted 50 deg from vertical: a point moved along the hinge also moves along the approach. The free
+direction of an upright cylinder is vertical (its axis), so `plan_alignment(..., object_axis=(0, 0, 1))` now slides
+the measured center along it to the jaws' line before measuring ahead and across. Measured that way the bottle's
+center was 2.3 cm *ahead* of the aim point (against 0.3 cm along the hinge), and so was it: the person's "too far"
+meant the jaws had not reached the bottle yet, and the gripper sat a bit low for a sure grasp.
+
+8. **Back and up, then in again, aimed higher.** Pulled back 2 cm along the approach and up 1.5 cm (the person's
+   call). Triangulated on the label (the top ends of its two black lines: a point that marks the same in both views,
+   unlike the smooth sides), carried 1.8 cm horizontally onto the axis (`triangulate_wrist(..., to_axis_m=)`; a step
+   along the nearly vertical ray first went 12 cm down it). The person: aim against gravity (`GraspSettings.sag_lift`,
+   1 cm, now in every plan; 1 cm up added to the next step). Two steps in, every joint pushed again once (the elbow
+   1.3 deg each time): the jaws' line met the bottle's axis at the planned height, 78.1 cm, and the measurement said
+   0.3 cm to go.
+9. **The closing line said otherwise, and was right.** `render_wrist` now draws the closing line (the fixed tip to
+   where the moving tip touches an object of the plan's width), the moving tip's sweep and where the object's center
+   is once held: all rigid to the gripper. It crossed the picture over the bottle's foot, its contacts 107 px apart
+   for 3.6 cm against the bottle's 93 px on that row: the jaws ~1.5 cm short. The person confirmed: the gripper had to
+   move toward the bottle.
+
+### Finding: triangulation from the arm's moves inherits the arm's motion error
+
+A triangulation's depth is off by about (the baseline's error) / (the baseline). The baseline (how far the camera
+moved between the two looks) came from the joints read, through the model; the encoders read true, but backlash,
+link flex and a sag that changes as the arm extends or rises are not in them. The baselines were short (1.5 cm
+sideways, 2.9 cm up): 3 mm of real-against-modeled motion on 2.9 cm is 10%, 1.5 cm at 14.6 cm, the size of the miss.
+The tell was in every step's report: the fraction of the predicted shift that happened came out 157, 90, 129, 69, 112,
+110 and 42% (in the simulation, with only fixed joint offsets, 99%: why the arm's small relative moves were thought
+accurate). The two sources the arm's motion does not enter agreed with each other and with the person: the depth
+from the object's width (15.2 cm against the triangulation's 14.6; the fitted width, 3.6 cm, was right) and the
+closing line / fingertip ruler (rigid to the gripper: only the camera's pose on it and the gripper map).
+
+**So:** the depth from the fitted width first, triangulation as a cross-check only, and then from a baseline of 4-5
+cm or more; a step whose gain is outside ~0.8-1.2 marks any triangulation across it as suspect; and the closing line
+is the go / no-go before closing (the object's two sides on its ends).
+
+10. **In by the closing line, then the close (missed).** Two steps straight along the approach (1.5 then 1 cm; each
+    went in less and down more than asked, ~2.5 mm), until the closing line crossed the bottle near its middle (the
+    person: move it toward the object's midpoint). Closed to `gripper.pos` 17.0: the jaws stopped at 18.24 (3.5 cm);
+    lifted 3 cm: the bottle stayed on the table. The person: the gripper was too far from the bottle's middle line.
+    The jaw reading said so, unread: across the diameter a 3.6 cm bottle stops them at 18.7; 3.5 cm is a chord ~4 mm
+    off the middle, enough for a round bottle to slip out. ~~A grip is "stopped at the object's width", not "stopped
+    short of the command".~~ (Wrong: see the findings below; the reading cannot tell them apart.)
+11. The lifted pose (3 cm over the missed grasp) is a good attack pose for a second try (the person).
+12. **The midline, anchored on the cap.** `render_wrist` now also draws the object's middle line down from its
+    observed top (`midline_top`: the cap's center as seen; its rim's ends give the depth from the width) along the
+    vertical as the model has the camera tilted, ticked every cm. The wrist camera looked nearly straight down (its
+    rays' vertical component -0.98), so the bottle's whole axis fell on about one point, the cap's center: a grasp
+    through the middle puts the "held" circle on it, with no depth. It was 33 px (~1.1 cm) short; measured from the
+    cap (the width's depth, the axis slide) 1.8 cm short. Two steps in (the second 134% of the way predicted, the
+    picture checked instead) put "held" on the cap's center, 2 mm across and 0.3 cm along by the measurement, the
+    jaws' line on the body ~3 cm over the table.
+13. **The second close: held, too weakly; the third: missed on the lift.** Closed to 17.0: the jaws stopped at 18.31.
+    The person: a grasp, but too weak; open and move closer. Opened, 1 cm further in along the approach (the bottle
+    deeper between the jaws, the cap filling the gap between the tips), closed to 17.0: 18.31 again. Lifted 3 cm: the
+    bottle stayed on the table. The wrist picture said so (a held object moves with the camera and keeps its size: the
+    cap went from ~125 to ~90 px across), as it had after the first lift, which I misread as a pick.
+14. **Ended there**, the arm 3 cm over the bottle, the jaws closed on nothing.
+
+### Findings
+
+- **The jaws' reading cannot tell a grip.** A chord 4 mm off a 1.8 cm radius is 0.9 mm shorter than the diameter,
+  0.4 of `gripper.pos`: inside the gripper map's accuracy. 18.24 (missed) and 18.31 (held, weakly) read the same;
+  the servo just stops there, and reads the same after the object slips out. (Item 10's "a grip is stopped at the
+  object's width" was wrong: struck.) The test is the lift, judged by the wrist picture (the held object's size) and
+  the person.
+- **The grip is weak because the squeeze is small.** The gripper is position controlled: its force comes from how
+  far the target is past where the jaws stop. Commanded 17.0, stopped at 18.3: 1.3 of `gripper.pos`, the plan's 3 mm
+  (`reach.SQUEEZE_M`); bowl4's chapstick dropped on the same squeeze ("almost no squeeze"). Not tried: a harder close
+  (~`gripper.pos` 10 on a 3.6 cm bottle, ~8 of error) (open issue 14).
+- **The wrist camera has no depth, and every way of getting it was weaker than the person's eye.** The width (good
+  when the fit is: 3.6 cm here), the rigid closing line and fingertip ruler (good, but hard to read from a camera
+  looking nearly straight down, where nearer and lower look alike), triangulation over the arm's moves (as poor as
+  the arm's motion: 10-20% on 1.5-3 cm baselines), the head camera (blind behind the arm). The checks that worked
+  were 2D and rigid to the gripper: the closing line against the object's sides, "held" on the cap's center. The
+  person's call: we struggled without a depth camera at the grasp.
+- **The arm does not make small moves as asked:** the elbow stops 1.2-1.4 deg short under load every time (fixed in
+  `align_step` by pushing again), and steps went 42-157% of the way predicted. Moves along the approach came out
+  ~2.5 mm lower and less far in than asked.
+- **What worked:** the camera's pose from a gripper sweep (bowl5), centering across the jaws (to 1-4 mm), the
+  sidestep across the jaws, the axis slide, aiming against gravity, the closing line and the midline.
+
+### Next
+
+- A grip-force test before the next session: the bottle placed between the open jaws by hand, closed to
+  `gripper.pos` 17, 13 and 10, and lifted: what squeeze holds it (open issue 14).
+- Depth at the grasp: a depth camera on the wrist, or the head camera placed to see the jaws (from the side, not
+  from behind the arm); until then, the person's eye at the last check.
+- The wrist camera calibration's check should fit the camera's turn from the fingertips (open issue).
+
 ## bowl4 (2026-11-07): put a bottle and a chapstick into a plastic container
+
 
 **Setup.** The clear plastic container (11.0 cm wide, center (-44.2, -11.5) cm, rim at 79 cm); a white bottle
 (2.9 cm wide, top 77.6) and a chapstick (1.75 cm, top 78.3) upright on the table. Right arm, the grasp tools

@@ -92,6 +92,10 @@ SIGMAS = {
 
 
 POINTS = ("pinch", "moving_tip")  # the gripper points the model predicts (module docstring)
+# Both fingers are ~1 cm thick at the tip, along the hinge (measured, 2026-11-08). The pinch point is calibrated on the
+# face the head camera sees (`visible_side`); the wrist camera sees the other face, one thickness away
+# (`XleRobotModel.wrist_face`), and the jaws' middle is half of it (`grasp_offset`).
+JAW_THICKNESS_M = 0.010
 
 
 def pinch_frame(arm: str) -> str:
@@ -698,27 +702,40 @@ class XleRobotModel:
         turn[:3, 3] = origin - turn[:3, :3] @ origin
         return np.linalg.inv(pinch) @ turn @ pinch
 
+    def wrist_face(self, arm: str) -> np.ndarray:
+        """The fingers' other face, in the pinch frame: where the wrist camera sees the tips (`JAW_THICKNESS_M` away).
+
+        The pinch point is calibrated on the face the head camera sees (`visible_side`: the hinge axis, the pinch
+        frame's -y, points toward it when "positive"); the wrist camera is on the other side.
+        """
+        side = 1.0 if self.visible_side[arm] == "positive" else -1.0
+        return np.array([0.0, side * JAW_THICKNESS_M, 0.0])
+
     def grasp_offset(
         self,
         arm: str,
         width_m: float,
         margin_m: float = 0.0,
         theta: np.ndarray | Mapping[str, float] | None = None,
+        mid_plane: bool = True,
     ) -> np.ndarray:
         """Where the center of an object `width_m` wide is, in the pinch frame, when grasped.
 
         Midway between the tips, with the moving one `width_m` from the pinch point (the origin): where it is held.
         With `margin_m`, the point `margin_m` farther from the fixed tip, toward the moving one: where to aim so the
-        fixed jaw clears the object by that much, the moving jaw then sweeping the object onto it as it closes.
+        fixed jaw clears the object by that much, the moving jaw then sweeping the object onto it as it closes. With
+        `mid_plane` (default), in the middle of the fingers' thickness (`wrist_face` / 2): the pinch point is on one
+        face; without, in the plane the jaws open in through it (for the tip-to-tip direction).
         """
+        middle = self.wrist_face(arm) / 2 if mid_plane else np.zeros(3)
         tip = self.moving_jaw(arm, self.opening_for_width(arm, width_m, theta), theta)[:3, 3]
         if not margin_m:
-            return tip / 2
+            return tip / 2 + middle
         # the direction toward the moving tip (for no width, that of a tip just apart)
         toward = (
             tip if width_m else self.moving_jaw(arm, self.opening_for_width(arm, 1e-3, theta), theta)[:3, 3]
         )
-        return toward / np.linalg.norm(toward) * (width_m / 2 + margin_m)
+        return toward / np.linalg.norm(toward) * (width_m / 2 + margin_m) + middle
 
     def gripper_pos_for(self, arm: str, opening_deg: float) -> float:
         """The `gripper.pos` that opens `arm`'s jaws `opening_deg` degrees (its `GripperMap`; `opening_deg`'s inverse)."""

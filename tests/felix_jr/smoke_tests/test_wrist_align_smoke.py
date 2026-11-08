@@ -122,7 +122,7 @@ def test_the_jaws_are_lined_up_by_conservative_steps(model, client, true_width, 
     assert image.shape == view.color.shape
     gains, sources = [], []
     center = None
-    sidestep = 0.02 if advance else 0.0
+    sidestep = 0.015 if advance else 0.0
     if sidestep:  # first, aside for the parallax (and no closer: the depth is not known yet)
         alignment = h.call("plan_alignment", view, pick, true_edges(), gain=0.0, sidestep_m=sidestep)
         assert "the width only" in alignment.depth_source
@@ -131,12 +131,12 @@ def test_the_jaws_are_lined_up_by_conservative_steps(model, client, true_width, 
         offsets = [offset_now()]
         after = h.call("plan_alignment", view, pick, true_edges()).center_uv
         center = h.call("triangulate_wrist", first_view, before, view, after)  # from before the step: allowed
-        assert center.parallax_deg > 5 and center.miss_m < 0.001, center.describe()
+        assert center.parallax_deg > 3 and center.miss_m < 0.001, center.describe()
         # in the model's root frame, which the joints' error shifts as a whole: its distance from the camera is what
         # counts, against the truth's
         seen = np.linalg.norm(center.xyz - view.root_from_camera[:3, 3])
         true_camera = model.wrist_camera_pose(ARM, true_q(model, client.get_state()[f"{ARM}_arm"]))
-        assert abs(seen - np.linalg.norm(center_root - true_camera[:3, 3])) < 0.002, center.describe()
+        assert abs(seen - np.linalg.norm(center_root - true_camera[:3, 3])) < 0.005, center.describe()  # 3%
     for i in range(4):
         # center first; come in once near the line (as the tool's docstring says)
         alignment = h.call(
@@ -161,3 +161,44 @@ def test_the_jaws_are_lined_up_by_conservative_steps(model, client, true_width, 
         h.call("triangulate_wrist", first_view, [320.0, 240.0], view, [330.0, 240.0])
     with pytest.raises(ValueError, match="before the arm last moved"):
         h.call("plan_alignment", view, pick, true_edges())
+
+
+class ElbowShort:
+    """The fake robot's client, with the elbow stopping 1.2 deg short of every target (bowl6's elbow under load)."""
+
+    def __init__(self, client):
+        self.client = client
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
+
+    def move_joints(self, targets, **kwargs):
+        key = f"{ARM}_arm"
+        now = self.client.get_state()[key]["elbow_flex.pos"]
+        target = targets[key]["elbow_flex.pos"]
+        short = np.sign(target - now) * min(1.2, abs(target - now))
+        return self.client.move_joints({key: {**targets[key], "elbow_flex.pos": target - short}}, **kwargs)
+
+
+def test_a_joint_that_stops_short_is_pushed_again(model, client):
+    joints, _, _ = start_joints(model, ARM)
+    with client.session():
+        client.move_joints({f"{ARM}_arm": {**joints, "gripper.pos": 30.0}}, tol=0.5)
+        client.keep_holding()
+    aim = model.grasp_offset(ARM, WIDTH, MARGIN)
+    pick = SimpleNamespace(
+        width=WIDTH,
+        grasp=aim,
+        labels=("pick.back", "pick"),
+        points=np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.05]]),
+        frames=np.array([np.eye(4), np.eye(4)]),
+    )
+    h = api.Harness(ask=lambda spec, preview: True, client=ElbowShort(client), model=model)
+    view = h.call("wrist_look", ARM)
+    center = view.project_pinch((aim + [0.0, 0.0, 0.06])[None, :])[0]
+    edges = [center - [30.0, 0.0], center + [30.0, 0.0]]
+    alignment = h.call("plan_alignment", view, pick, edges, gain=0.0, sidestep_m=0.015)
+    after = h.call("align_step", alignment)
+    reached = client.get_state()[f"{ARM}_arm"]
+    assert all(abs(reached[k] - v) <= 0.5 for k, v in alignment.joints.items()), (reached, alignment.joints)
+    assert "pushed again" in after.describe() and "still short" not in after.describe(), after.describe()

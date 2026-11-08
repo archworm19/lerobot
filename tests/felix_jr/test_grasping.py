@@ -19,6 +19,7 @@ from lerobot.felix_jr.harness.grasping import (  # noqa: E402
     ATTACK_M,
     LIFT_M,
     PICK_GRIP,
+    SAG_LIFT_M,
     STAGE_UP_M,
     STAGES,
     GraspCandidate,
@@ -60,11 +61,13 @@ def test_the_tips_land_on_the_contacts(model, arm, fixed_side, phi, psi):
     np.testing.assert_allclose(rot.T @ rot, np.eye(3), atol=1e-12)
     assert np.linalg.det(rot) == pytest.approx(1.0)
     fixed, moving = g.contacts_root[fixed_side], g.contacts_root[1 - fixed_side]
+    # the tips' middle (the pinch point is on one face of the fingers, `wrist_face` / 2 from their middle)
+    middle = model.wrist_face(arm) / 2
     np.testing.assert_allclose(
-        claw.root_from_pinch[:3, 3], fixed, atol=1e-9
-    )  # the pinch point is the fixed tip
+        at(claw.root_from_pinch, middle), fixed, atol=1e-9
+    )  # the fixed tip on its contact
     moving_tip_pinch = model.moving_jaw(arm, model.opening_for_width(arm, g.opening))[:3, 3]
-    np.testing.assert_allclose(at(claw.root_from_pinch, moving_tip_pinch), moving, atol=1e-9)
+    np.testing.assert_allclose(at(claw.root_from_pinch, moving_tip_pinch + middle), moving, atol=1e-9)
     # the hinge (pinch y) is square to the closing line and the approach: the jaws close in the grasp's plane
     assert rot[:, 1] @ g.closing_root == pytest.approx(0.0, abs=1e-5)
     assert rot[:, 1] @ g.approach_root == pytest.approx(0.0, abs=1e-5)
@@ -83,7 +86,8 @@ def test_agrees_with_grasp_offset(model, margin):
     # with a margin the fixed tip stands that far off its contact, back along the closing line
     outward = g.contacts_root[0] - g.center_root
     outward /= np.linalg.norm(outward)
-    np.testing.assert_allclose(claw.root_from_pinch[:3, 3], g.contacts_root[0] + margin * outward, atol=1e-9)
+    middle = at(claw.root_from_pinch, model.wrist_face("right") / 2)  # the fixed tip, the fingers' middle
+    np.testing.assert_allclose(middle, g.contacts_root[0] + margin * outward, atol=1e-9)
     assert claw.open_apart == pytest.approx(min(g.opening + margin + 0.02, 2 * model.jaw_radius("right")))
 
 
@@ -249,9 +253,8 @@ def test_plan_pick_runs_through_the_existing_execution(gripped):
     assert pick.labels == ("stage", "pick.back", "pick", "lift") and pick.ok.all()
     assert pick.width == pytest.approx(JAR.radius * 2) and pick.margin == best.claw.margin
     stage, back, at, lift = pick.points
-    np.testing.assert_allclose(
-        at, best.claw.grasp.center_root, atol=1e-9
-    )  # the aim point on the grasp's center
+    lifted = best.claw.grasp.center_root + [0.0, 0.0, SAG_LIFT_M]  # aimed high against the arm's sag
+    np.testing.assert_allclose(at, lifted, atol=1e-9)  # the aim point on the grasp's center
     np.testing.assert_allclose(back, at - ATTACK_M * best.claw.grasp.approach_root, atol=1e-9)
     np.testing.assert_allclose(stage - back, [0, 0, STAGE_UP_M], atol=1e-9)
     np.testing.assert_allclose(lift - at, [0, 0, LIFT_M], atol=1e-9)

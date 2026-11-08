@@ -15,8 +15,11 @@ ray. So:
   are accurate (through the model from the measured joints, its errors mostly cancel). `triangulate` locates a point
   marked in two wrist views (a `WristPoint`, with the rays' parallax and how well that pins the depth), and
   `plan_alignment` takes it as the object's center (`center`); without one, it uses the width's depth and says so.
-  A sideways move makes the best pair (`sidestep_m`); an advance moves the camera mostly along the ray, so its
-  parallax is a small part of the move and more of it the arm's error. The description shows the width's depth
+  A move across the jaws makes the best pair (`sidestep_m`): its parallax is across the object, where its two
+  marked sides pin the same point in both views. A move along the hinge makes vertical parallax on an upright
+  object, which needs the same height marked in both views, and nothing on a smooth side pins that (bowl6: two such
+  pairs put the center 1.8 cm apart). An advance moves the camera mostly along the ray, so its parallax is a small
+  part of the move and more of it the arm's error. The description shows the width's depth
   beside the one used: far apart, the plan's width is off.
 - **Each step makes `STEP_FACTOR` of the measured correction**, so it falls short rather than overshoots, and the
   next one picks up the rest. The measurement itself uses the best depth, not a shortened one: the camera is off
@@ -62,6 +65,12 @@ MAX_STEP_M = 0.03  # a step moves the gripper at most this far (across and along
 MAX_ROLL_DEG = 20.0  # and turns it at most this much
 STEP_POSITION_TOL_M = 0.001  # the step's solve: how closely the pinch frame must land
 STEP_ROTATION_TOLS_DEG = (20.0, 10.0, 5.0)  # about the pinch frame's x (~closing), y (hinge), z (~approach)
+JOINT_SHORT_DEG = (
+    0.5  # a joint this far from its target after a step is commanded again, pushed past by the shortfall
+)
+JOINT_RETRIES = (
+    2  # at most this many times (bowl6: the elbow stopped 1.2-1.3 deg short under load, every time)
+)
 MAX_DRIFT_DEG = 3.0  # the arm must be this close to where the view saw it
 STEP_VEL = 10.0  # deg/s
 TICK_M = 0.02  # the approach line's ticks
@@ -98,6 +107,7 @@ class WristView:
     timestamp: float = 0.0
     expected_uv: np.ndarray | None = None
     previous_uv: np.ndarray | None = None
+    step_note: str = ""  # how the step that led here went at the joints (`run_alignment`)
 
     @property
     def pinch_from_camera(self) -> np.ndarray:
@@ -133,6 +143,8 @@ class WristView:
         if self.expected_uv is not None:
             u, v = self.expected_uv
             text += f"; after the step the object's center should show near ({u:.0f}, {v:.0f})"
+        if self.step_note:
+            text += f"; {self.step_note}"
         return text
 
 
@@ -178,13 +190,24 @@ def render_wrist(
     pick: Poses | None = None,
     marks: Sequence[Sequence[float]] | None = None,
     labels: Sequence[str] | None = None,
+    midline_top: Sequence[float] | None = None,
+    midline_sides: Sequence[Sequence[float]] | None = None,
+    object_axis: Sequence[float] = (0.0, 0.0, 1.0),
 ) -> np.ndarray:
     """The wrist frame with the fingertips, the plan's approach line, `marks` and the last step's expectation.
 
     Cyan: the fixed jaw's tip (the pinch point); magenta: the moving one. Yellow: with `pick`, the approach line ahead
     of the aim point, a tick every `TICK_M` labeled in cm: where the object's center appears when it is lined up that
     far ahead. Green crosses: `marks` (pixels, labeled `labels` or 1, 2, ...). White circle: where the last step
-    expected the object's center.
+    expected the object's center. Green, with `pick`: the closing line, from the fixed tip to where the moving tip
+    is when the jaws touch an object the plan's width (its two sides should fall on its ends), the moving tip's
+    sweep from now to the close (dots), and where the object's center is once held (circle): all fixed to the
+    gripper, so no depth is needed to judge them. Orange, with `midline_top` (the pixel of the top of the object's
+    axis: an upright bottle's cap center) and `midline_sides` (the two ends of the top's rim across, for its depth from
+    the plan's width): the object's axis down from there (`object_axis`, root frame, up), a tick every `MIDLINE_TICK_M`
+    labeled in cm below the top. The line is anchored on what the camera sees (the top) and takes only its direction
+    from the model (the camera's tilt), the ticks' spacing from the depth; the "held" circle should sit on it at the
+    grasp's height.
     """
     from lerobot.felix_jr.calibration.wrist_camera import fingertips_in_wrist_image
 
@@ -193,7 +216,10 @@ def render_wrist(
     for (u, v), color in zip(tips, ((0, 255, 255), (255, 0, 255)), strict=True):
         if np.isfinite([u, v]).all():
             cv2.circle(out, (int(round(u)), int(round(v))), 8, color, 2, cv2.LINE_AA)
+    if midline_top is not None and midline_sides is not None and pick is not None:
+        _draw_midline(out, view, midline_top, midline_sides, pick.width, object_axis)
     if pick is not None:
+        _draw_close(out, model, view, pick)
         aim, approach = jaw_line(pick)
         steps = np.arange(0.0, LINE_M + 1e-9, TICK_M / 4)
         uv = view.project_pinch(aim + steps[:, None] * approach)
@@ -216,6 +242,70 @@ def render_wrist(
         label = labels[i] if labels is not None and i < len(labels) else str(i + 1)
         _text(out, label, (center[0] + 8, center[1] + 16), (0, 255, 0))
     return out
+
+
+MIDLINE_TICK_M = 0.01
+MIDLINE_M = 0.06
+
+
+def _draw_midline(
+    out: np.ndarray,
+    view: WristView,
+    top_uv: Sequence[float],
+    sides: Sequence[Sequence[float]],
+    width: float,
+    axis_root: Sequence[float],
+) -> None:
+    """The object's axis down from its observed top (`render_wrist`), in orange, ticked every `MIDLINE_TICK_M`."""
+    orange = (255, 150, 0)
+    rays = view.rays(np.asarray(sides, dtype=np.float64).reshape(2, 2))
+    angle = float(np.arccos(np.clip(rays[0] @ rays[1], -1.0, 1.0)))
+    distance = (width / 2) / np.sin(angle / 2)
+    top_camera = distance * view.rays(np.asarray(top_uv, dtype=np.float64).reshape(1, 2))[0]
+    down_camera = -(view.root_from_camera[:3, :3].T @ _unit(np.asarray(axis_root, dtype=np.float64)))
+    steps = np.arange(0.0, MIDLINE_M + 1e-9, MIDLINE_TICK_M / 4)
+    uv = view.camera.project(top_camera + steps[:, None] * down_camera)
+    good = np.isfinite(uv).all(axis=1)
+    if good.sum() >= 2:
+        cv2.polylines(out, [uv[good].round().astype(np.int32)], False, orange, 2, cv2.LINE_AA)
+    for depth, (u, v) in zip(steps, uv, strict=True):
+        ticks = depth / MIDLINE_TICK_M
+        if np.isfinite([u, v]).all() and abs(ticks - round(ticks)) < 1e-6 and ticks > 0:
+            center = (int(round(u)), int(round(v)))
+            cv2.circle(out, center, 3, orange, -1, cv2.LINE_AA)
+            _text(out, f"{100 * depth:.0f}", (center[0] - 18, center[1] + 4), orange)
+
+
+def _draw_close(out: np.ndarray, model: XleRobotModel, view: WristView, pick: Poses) -> None:
+    """The closing line, the moving tip's sweep to the close, the held center (`render_wrist`), in green."""
+    from .reach import SQUEEZE_M
+
+    arm, green = view.arm, (60, 255, 60)
+    if arm not in model.gripper_maps:  # the jaws' opening is not known without it: nothing to draw
+        return
+    q = model.joint_vector({arm: dict(view.arm_pose)})
+    to_pinch = np.linalg.inv(view.root_from_pinch)
+    now = max(model.opening_deg(arm, float(view.arm_pose["gripper.pos"])), 0.0)
+    touching = model.opening_for_width(arm, pick.width)
+    closed = model.opening_for_width(arm, max(pick.width - SQUEEZE_M, 0.0))
+    sweep = [
+        _apply(to_pinch, model.moving_tip(arm, q, float(a))[None, :])[0] for a in np.linspace(now, closed, 12)
+    ]
+    tip = _apply(to_pinch, model.moving_tip(arm, q, touching)[None, :])[0]
+    held = model.grasp_offset(arm, pick.width)  # the jaws' middle
+    face = model.wrist_face(arm)  # the tips as the wrist camera sees them: on its face of the fingers
+    uv = view.project_pinch(np.array([face, tip + face, held, *(np.array(sweep) + face)]))
+    if np.isfinite(uv[:2]).all():
+        a, b = (tuple(int(round(c)) for c in p) for p in uv[:2])
+        cv2.line(out, a, b, green, 2, cv2.LINE_AA)
+        cv2.circle(out, b, 5, green, -1, cv2.LINE_AA)
+    for u, v in uv[3:]:
+        if np.isfinite([u, v]).all():
+            cv2.circle(out, (int(round(u)), int(round(v))), 2, green, -1, cv2.LINE_AA)
+    if np.isfinite(uv[2]).all():
+        center = (int(round(uv[2][0])), int(round(uv[2][1])))
+        cv2.circle(out, center, 6, green, 2, cv2.LINE_AA)
+        _text(out, "held", (center[0] + 8, center[1] - 6), green)
 
 
 def _text(image: np.ndarray, text: str, org: tuple[int, int], color: tuple[int, int, int]) -> None:
@@ -324,11 +414,20 @@ def plan_alignment(
     gain: float = 1.0,
     sidestep_m: float = 0.0,
     center: "WristPoint | None" = None,
+    hinge_gain: float | None = None,
+    object_axis: Sequence[float] | None = None,
+    nudge_m: Sequence[float] | None = None,
 ) -> Alignment:
     """Measure the object in `view` and plan the step that lines it up (the module docstring). Nothing moves.
 
     `advance` is the fraction (0-1) of the way to the aim point to move in along the approach; `gain` scales the move
-    across; `sidestep_m` adds a move that far square to both the approach and the jaws' closing line, for the parallax
+    across; `hinge_gain` (default `gain`) scales the part of it along the hinge (square to the jaws' closing line):
+    0 leaves it to the plan, as for an upright object grasped from the side, where it is the height on the object.
+    `object_axis` (root frame; (0, 0, 1) for an upright object): the measured center slides along it to the jaws'
+    line first, so ahead and across are measured where the jaws will close, not at the marks' height (bowl6: with
+    the approach pitched 40 deg, the hinge is not vertical, and leaving the along-hinge offset alone put the bottle
+    1 cm nearer than it was). `nudge_m`: a move (root frame, m) added as it is, e.g. back and up to look again.
+    `sidestep_m` adds a move that far across the jaws (toward the moving jaw; negative: the fixed one), for the parallax
     (the next look can triangulate the depth, and corrects the sidestep back). `center`: the object's center
     triangulated (`triangulate`), for its depth; else the width's.
     """
@@ -347,12 +446,21 @@ def plan_alignment(
         source = f"the triangulation ({center.parallax_deg:.0f} deg of parallax)"
     ray = view.rays(center_uv[None, :])[0]
     obj = _apply(view.pinch_from_camera, (distance * ray)[None, :])[0]
+    if object_axis is not None:  # slide it along the object's axis to where it passes the jaws' line
+        v = _unit(view.root_from_pinch[:3, :3].T @ np.asarray(object_axis, dtype=np.float64))
+        w0, b = obj - aim, float(v @ approach)
+        if 1 - b * b > 1e-6:
+            obj = obj + (b * float(approach @ w0) - float(v @ w0)) / (1 - b * b) * v
     offset = obj - aim
     ahead = float(offset @ approach)
     across = offset - ahead * approach
-    move = STEP_FACTOR * (gain * across + advance * max(ahead, 0.0) * approach)
     toward = _unit(aim - (aim @ approach) * approach)
-    move = move + sidestep_m * _unit(np.cross(approach, toward))
+    hinge = _unit(np.cross(approach, toward))
+    along_hinge = float(across @ hinge) * hinge
+    scaled = gain * (across - along_hinge) + (gain if hinge_gain is None else hinge_gain) * along_hinge
+    move = STEP_FACTOR * (scaled + advance * max(ahead, 0.0) * approach) + sidestep_m * toward
+    if nudge_m is not None:
+        move = move + view.root_from_pinch[:3, :3].T @ np.asarray(nudge_m, dtype=np.float64)
     roll = float(roll_deg)
     clipped = False
     if np.linalg.norm(move) > MAX_STEP_M:
@@ -433,9 +541,19 @@ class WristPoint:
 
 
 def triangulate(
-    view_a: WristView, uv_a: Sequence[float], view_b: WristView, uv_b: Sequence[float], label: str = "point"
+    view_a: WristView,
+    uv_a: Sequence[float],
+    view_b: WristView,
+    uv_b: Sequence[float],
+    label: str = "point",
+    to_axis_m: float = 0.0,
 ) -> WristPoint:
-    """The point marked at `uv_a` in `view_a` and at `uv_b` in `view_b` (same arm), from the two rays' closest points."""
+    """The point marked at `uv_a` in `view_a` and at `uv_b` in `view_b` (same arm), from the two rays' closest points.
+
+    `to_axis_m`: the mark is on an upright object's front (a label's corner, say), this far from its axis (its
+    radius): the point moves that far horizontally, away from `view_b`'s camera, onto the axis (bowl6: a step along
+    the ray instead went 12 cm down it, the wrist camera looking nearly straight down).
+    """
     if view_a.arm != view_b.arm:
         raise ValueError("triangulate views of the same wrist camera")
     origin_a, ray_a = view_a.root_rays(np.asarray(uv_a, dtype=np.float64).reshape(1, 2))
@@ -452,11 +570,17 @@ def triangulate(
         raise ValueError("the rays meet behind a camera: the marks are not the same point")
     pa, pb = origin_a + s * a, origin_b + t * b
     parallax = float(np.arccos(np.clip(cos, -1.0, 1.0)))
-    per_px = t / (
-        view_b.camera.fx * np.sin(parallax)
-    )  # one pixel turns a ray by ~1/fx: along the other ray, /sin
+    per_px = t / (view_b.camera.fx * np.sin(parallax))  # a pixel turns a ray ~1/fx: along the other, /sin
+    point = (pa + pb) / 2
+    if (
+        to_axis_m
+    ):  # horizontally, away from the camera (the height is `plan_alignment`'s `object_axis` slide's)
+        horizontal = np.array([b[0], b[1], 0.0])
+        if np.linalg.norm(horizontal) < 0.02:
+            raise ValueError("the view looks straight down: which side of the object faces it is not known")
+        point = point + to_axis_m * _unit(horizontal)
     return WristPoint(
-        (pa + pb) / 2,
+        point,
         label,
         float(np.degrees(parallax)),
         float(np.linalg.norm(pa - pb)),
@@ -479,10 +603,8 @@ def run_alignment(
     if not alignment.ok:
         raise RuntimeError("the step's solve missed its target: plan a smaller step, or re-plan the grasp")
     with client.session():
-        status = client.move_joints({key: alignment.joints}, max_vel=max_vel, max_accel=2 * max_vel, tol=1.0)
+        status, note = move_closely(client, key, alignment.joints, max_vel)
         client.keep_holding()
-    if status["state"] != "done":
-        raise RuntimeError(f"the step: {status['state']} ({status.get('reason')})")
     after = wrist_view(model, client.wrist_capture(view.arm, after=status.get("finished_at")))
     # where the object's center should now appear: fixed in the root frame, seen from after
     center_root = _apply(view.root_from_pinch, alignment.object_pinch[None, :])[0]
@@ -497,4 +619,42 @@ def run_alignment(
         after.timestamp,
         expected,
         alignment.center_uv,
+        note,
     )
+
+
+def move_closely(
+    client: "FelixClient", key: str, targets: Mapping[str, float], max_vel: float
+) -> tuple[dict, str]:
+    """Move to `targets`, then command again any joint `JOINT_SHORT_DEG` short, pushed past by its shortfall.
+
+    The servos' position control leaves a steady error under load (bowl6: the elbow, extending under the arm's weight,
+    stopped 1.2-1.3 deg short every time, 5-7 mm at the gripper), while their encoders read true: so the joints read
+    say how far to push. At most `JOINT_RETRIES` times. Returns the last status and what happened, in words.
+    """
+    asked = dict(targets)
+    command = dict(targets)
+    status: dict = {}
+    pushed: list[str] = []
+    for attempt in range(JOINT_RETRIES + 1):
+        status = client.move_joints({key: command}, max_vel=max_vel, max_accel=2 * max_vel, tol=1.0)
+        if status["state"] != "done":
+            raise RuntimeError(f"the step: {status['state']} ({status.get('reason')})")
+        reached = client.get_state()[key]
+        short = {k: asked[k] - reached[k] for k in asked if abs(asked[k] - reached[k]) > JOINT_SHORT_DEG}
+        if not short or attempt == JOINT_RETRIES:
+            break
+        pushed.append(", ".join(f"{k.removesuffix('.pos')} {v:+.1f}" for k, v in short.items()))
+        command = {k: command[k] + short.get(k, 0.0) for k in command}
+    reached = client.get_state()[key]
+    left = {k: asked[k] - reached[k] for k in asked if abs(asked[k] - reached[k]) > JOINT_SHORT_DEG}
+    note = ""
+    if pushed:
+        note = "joints pushed again (short by: " + "; then ".join(pushed) + ")"
+    if left:
+        note += (
+            ("; " if note else "")
+            + "still short: "
+            + ", ".join(f"{k.removesuffix('.pos')} {v:+.1f} deg" for k, v in left.items())
+        )
+    return status, note

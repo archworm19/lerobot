@@ -47,7 +47,11 @@ def test_the_grasp_point_is_midway_between_the_tips(model):
             width
         )  # the moving tip, `width` from the pinch point
         assert opening == pytest.approx(np.degrees(2 * np.arcsin(width / (2 * radius))))
-        np.testing.assert_allclose(model.grasp_offset("right", width), jaw[:3, 3] / 2)
+        # midway between the tips, in the middle of the fingers' thickness
+        np.testing.assert_allclose(
+            model.grasp_offset("right", width), jaw[:3, 3] / 2 + model.wrist_face("right") / 2
+        )
+        np.testing.assert_allclose(model.grasp_offset("right", width, mid_plane=False), jaw[:3, 3] / 2)
         np.testing.assert_allclose(jaw[:3, :3] @ jaw[:3, :3].T, np.eye(3), atol=1e-12)  # a rigid turn
     q = model.joint_vector()
     frame = model.frame_pose(pinch_frame("right"), q)
@@ -111,15 +115,15 @@ def test_the_held_object_is_centered_on_the_grasp_point(model):
 
 def test_a_margin_aims_toward_the_moving_jaw_and_the_object_ends_on_the_fixed_one(model):
     width, margin = 0.01, 0.01
-    plain = model.grasp_offset("right", width)
-    aimed = model.grasp_offset("right", width, margin)
+    plain = model.grasp_offset("right", width, mid_plane=False)
+    aimed = model.grasp_offset("right", width, margin, mid_plane=False)
     assert np.linalg.norm(aimed) == pytest.approx(
         width / 2 + margin
-    )  # the fixed tip that far from the center
+    )  # the fixed tip that far from the center (in the plane the jaws open in)
     np.testing.assert_allclose(
         aimed / np.linalg.norm(aimed), plain / np.linalg.norm(plain)
     )  # along the tips' line
-    assert np.linalg.norm(model.grasp_offset("right", 0.0, margin)) == pytest.approx(
+    assert np.linalg.norm(model.grasp_offset("right", 0.0, margin, mid_plane=False)) == pytest.approx(
         margin
     )  # no width: still aimed
 
@@ -131,7 +135,7 @@ def test_a_margin_aims_toward_the_moving_jaw_and_the_object_ends_on_the_fixed_on
     np.testing.assert_allclose(
         frame[:3, :3] @ pose.grasp + frame[:3, 3], PICK, atol=0.005
     )  # aimed at the target
-    np.testing.assert_allclose(pose.held, plain)  # and held at the plain grasp point once closed
+    np.testing.assert_allclose(pose.held, model.grasp_offset("right", width))  # held at the plain grasp point
     fixed_tip_to_center = np.linalg.norm(PICK - frame[:3, 3])
     assert fixed_tip_to_center == pytest.approx(width / 2 + margin, abs=0.005)
     assert np.linalg.norm(pose.open_jaw[:3, 3]) == pytest.approx(width + margin + OPEN_CLEARANCE_M)

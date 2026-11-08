@@ -46,6 +46,7 @@ from .objects import Capture, Object, Poses, angles_of
 from .primitives import AntipodalGrasp, Cylinder, Primitive, Ranges, Spacing
 from .reach import OPEN_CLEARANCE_M, POSITION_TOL_M, ROLL_TOL_DEG, SQUEEZE_M, ArmIK, FrameSolution
 
+SAG_LIFT_M = 0.01  # grasps aimed this much higher than the object (`GraspSettings.sag_lift`)
 ATTACK_M = 0.05  # the attack point: this far back along the approach from the grasp (`protocols.md`, rule 1)
 MARGIN_M = 0.008  # the fixed jaw this far clear of its contact (bowl1: 0.8-1.3 cm, every grasp landed)
 MIN_TIP_APART_M = 1e-3  # the tip-to-tip direction of jaws this little apart, for a grasp of no opening
@@ -81,6 +82,10 @@ class GraspSettings:
     )
     margin: float = MARGIN_M  # the fixed jaw this far clear of its contact
     attack: float = ATTACK_M  # the attack point this far back along the approach
+    # the grasp and its attack point aimed this much higher than the object: the arm lands low (its sag; bowl6: the
+    # elbow stopping 1.2-1.3 deg short under load), and the errors are not alike: too high grips higher on the
+    # object, too low hits what it stands on
+    sag_lift: float = SAG_LIFT_M
 
     def describe(self) -> str:
         """The settings in a line."""
@@ -90,7 +95,8 @@ class GraspSettings:
         return (
             f"accepted: turns up to ({bounds}) deg, the grasp point within {_cm(self.position_bound_m)} cm; "
             f"ranked by the antipodal error in {self.rank_step_deg:g} deg steps, then the joint margin; fixed jaw "
-            f"{_cm(self.margin)} cm clear, attack point {_cm(self.attack)} cm back"
+            f"{_cm(self.margin)} cm clear, attack point {_cm(self.attack)} cm back, aimed {_cm(self.sag_lift)} cm high "
+            "against the arm's sag"
         )
 
 
@@ -163,7 +169,7 @@ def to_claw(
         raise ValueError(f"fixed_side is 0 or 1, not {fixed_side}")
     # the claw in the pinch frame: the tip-to-tip direction at this opening, the hinge, and their cross product (toward
     # the fingertips)
-    tip_pinch = model.grasp_offset(arm, max(grasp.opening, MIN_TIP_APART_M))
+    tip_pinch = model.grasp_offset(arm, max(grasp.opening, MIN_TIP_APART_M), mid_plane=False)
     u_pinch = tip_pinch / np.linalg.norm(tip_pinch)
     hinge_pinch = np.array([0.0, 1.0, 0.0]) - u_pinch[1] * u_pinch
     hinge_pinch /= np.linalg.norm(hinge_pinch)
@@ -458,7 +464,10 @@ def grasp_candidates(
                 if too_wide:
                     rejected.append(Rejected(grasp, arm, fixed_side, "jaws", "too wide for the jaws"))
                     continue
-                claw = to_claw(grasp, model, arm, fixed_side, settings.margin, settings.attack)
+                claw = _shifted(
+                    to_claw(grasp, model, arm, fixed_side, settings.margin, settings.attack),
+                    np.array([0.0, 0.0, settings.sag_lift]),
+                )
                 if grasp.opening not in iks:
                     iks[grasp.opening] = ArmIK(
                         model, arm, capture.arms, capture.head_ticks, grasp.opening, settings.margin
@@ -500,7 +509,10 @@ def refine(
     where = {"t": (t, t), "phi": (old.params["phi"],) * 2, "psi": (old.params["psi"],) * 2}
     (grasp,) = primitive.antipodal_grasps(where)
     arm, timed = candidate.claw.arm, _Timer()
-    claw = to_claw(grasp, model, arm, candidate.claw.fixed_side, settings.margin, settings.attack)
+    claw = _shifted(
+        to_claw(grasp, model, arm, candidate.claw.fixed_side, settings.margin, settings.attack),
+        np.array([0.0, 0.0, settings.sag_lift]),
+    )
     if offset_root is not None:
         claw = _shifted(claw, -np.asarray(offset_root, dtype=np.float64))
     ik = ArmIK(model, arm, capture.arms, capture.head_ticks, grasp.opening, settings.margin)

@@ -643,7 +643,9 @@ def fingertips_in_wrist_image(
     opening = (
         max(model.opening_deg(arm, float(arm_pose["gripper.pos"])), 0.0) if arm in model.gripper_maps else 0.0
     )
-    tips = np.array([model.frame_pose(pinch_frame(arm), q)[:3, 3], model.moving_tip(arm, q, opening)])
+    pinch = model.frame_pose(pinch_frame(arm), q)
+    tips = np.array([pinch[:3, 3], model.moving_tip(arm, q, opening)])
+    tips = tips + pinch[:3, :3] @ model.wrist_face(arm)  # the face the wrist camera sees
     if camera.gripper_from_camera is None:
         raise ValueError("the camera's pose on the gripper is not known yet")
     root_from_camera = model.frame_pose(wrist_camera_link(arm), q) @ np.array(camera.gripper_from_camera)

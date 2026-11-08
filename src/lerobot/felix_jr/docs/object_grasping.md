@@ -1,6 +1,6 @@
 # Object-centric grasping (experiment)
 
-**Status: phases A-C built and tried on the robot (bowl3, bowl4); next, a coarse-to-fine redesign around the wrist cameras, 2026-11-07 (section 6)** (results below the phase table). Built: the primitives
+**Status: phases A-C built and tried on the robot (bowl3, bowl4); the wrist-camera alignment loop built and tried (bowl5/bowl6, 2026-11-08: centered, not picked; section 6); next, active sensing with the wrist camera: a scan, an approach sweep and a grasp tool (section 6.1)** (results below the phase table). Built: the primitives
 (`harness/primitives.py`), the claw mapping and the thin `grasp_candidates` (`harness/grasping.py`),
 `ArmIK.solve_frame` (`harness/reach.py`). It changes how the harness plans a grasp: today the model
 names a gripper pose (a point and pitch / heading / roll in the root frame) and searches for a good one itself; here
@@ -438,7 +438,7 @@ or the arm's model at all.
 3. **The measurement:** built 2026-11-08: `plan_alignment`, from the object's two sides marked in the wrist view
    (below, "The alignment loop").
 4. **The alignment step:** built 2026-11-08: `align_step` runs a `plan_alignment` (one approved move through the
-   model, `ArmIK.solve_frame`, rather than the model composing joint moves). Not yet run on the robot.
+   model, `ArmIK.solve_frame`, rather than the model composing joint moves). Run on the robot in bowl5/bowl6.
 5. **Grasp selection:** (b) in `grasp_candidates` ((a) waits on the experiment), the head camera's view filters
    removed (section 4, done 2026-11-07); the
    attack point along the gripper's axis in `plan_pick`.
@@ -446,43 +446,269 @@ or the arm's model at all.
    hold from the wrist camera.
 
 **The alignment loop** (`harness/wrist.py`; smoke test `test_wrist_align_smoke.py`, against the fake robot with its
-joints 1-2 deg off the truth):
+joints 1-2 deg off the truth). Revised after its first session on the robot (bowl5/bowl6, 2026-11-08: centered to
+1-4 mm across the jaws, the bottle not picked; [sessions.md](sessions.md)):
 
 1. At the attack point (`execute(..., hold=True)` of the pick plan up to "pick.back"): `wrist_look`, then
-   `render_wrist(view, pick)`. It draws the fingertips and the **approach line**: where the object's center appears
-   when it is lined up, a dot every 2 cm ahead of the aim point (`Poses.grasp`). The camera is off the jaws' axis, so
-   the line is not the picture's middle, and where on it the object belongs depends on how far ahead it is.
-2. Mark the object's two sides at the grasp height (check them on `render_wrist(..., marks=...)`); `plan_alignment`
-   measures its center (the bisector of the two rays) and its offset from the line, in the jaws' frame: toward the
-   moving jaw, square to that, how far ahead.
-3. **The first step is a sidestep** (`sidestep_m=0.02`, `gain=0`): it makes parallax for the depth (next item).
-   `triangulate_wrist` then locates the object's center from the views before and after it (the center pixel each
-   `plan_alignment` reports), and every later `plan_alignment` takes it (`center=`). Then steps across (each 80% of the correction: `STEP_FACTOR`, short of it rather than past it), and once near the line,
-   in along it too (`advance`, a fraction of the way), looking again after each. `roll_deg` turns the jaws about the
-   line (an angle needs no depth). Steps are clipped at 3 cm and 20 deg: past that, re-plan from the head camera.
-4. The last look is close; then the move in, the close, and the check of the grip.
+   `render_wrist(view, pick)`. It draws the fingertips (check first that they sit on the real ones: the right
+   camera's calibration was 7.8 deg off, fitted again from a gripper sweep), the **approach line** (where the
+   object's center appears when it is lined up, a dot every 2 cm ahead of the aim point), and the **closing line**
+   (the fixed tip to where the moving tip touches an object the plan's width, its sweep, and where the object's
+   center is once held: "held").
+2. Mark the object's two sides at one height (and, from a camera looking down at an upright object, its top's
+   center and rim: `midline_top`, `midline_sides` draw its middle line); `plan_alignment(..., object_axis=(0, 0, 1))`
+   measures its offset from the jaws' line, toward the moving jaw, square to that and how far ahead, after sliding the
+   measured center along the object's axis to the jaws' line (not along the hinge: with the approach pitched, the
+   hinge is not the axis, and the height of the marks then shifts "ahead"; bowl6 stopped 2 cm short on it).
+3. Steps across (80% of the correction each: `STEP_FACTOR`), then in along the approach in parts (`advance`, or a
+   `nudge_m` along it), looking after each; `roll_deg` turns the jaws. A step's joints left more than 0.5 deg short
+   are commanded again (the elbow stopped 1.2-1.4 deg short under load on every step). Aim against gravity
+   (`nudge_m` up; `GraspSettings.sag_lift` in the plan): too high grips higher on the object, too low hits its
+   support.
+4. **Go / no-go before closing, in the picture, rigid to the gripper:** "held" on the object's middle (an upright
+   object seen from above: on its top's center), the closing line's ends on the object's two sides. Then close, and
+   judge the grip by a small lift: the held object keeps its size in the wrist picture. The jaws' reading cannot tell
+   a grip across the middle from a chord near the front (0.4 of `gripper.pos`).
 
-**Depth is the hard part** (found building it, 2026-11-08). The camera is ~7 cm off the jaws' line on the robot
-(the calibrated pose: (11, 70, -6) mm in the gripper link), and the ray to the object crosses the line at an angle. So
-a depth off by a fraction e puts the object off the line by e times that offset (the camera's distance from the
-line), at any range: coming closer does not shrink it. A depth from the object's width (the fitted primitive's, good
-to 10-20%) is 7-14 mm off; shortening the depth on purpose to make the steps conservative (the first version) is the
-same error, and the steps settled on it. So:
+**Depth is the hard part.** The camera is ~7 cm off the jaws' line on the robot, and the ray to the object crosses
+the line at an angle, so a depth off by a fraction e puts the object off the line by e times that offset, at any
+range. What bowl6 found about each source:
 
-- **The depth comes from parallax:** two looks with a known move between them (the arm's small relative moves are
-  accurate: the model's errors mostly cancel between nearby poses) triangulate the object's center
-  (`triangulate_wrist`, a tool, so the model sees the parallax, how far apart the rays pass and the depth's
-  sensitivity to a pixel, and chooses the pair). A sideways move makes the best pair; an advance moves the camera
-  mostly along the ray, so its parallax is a small part of the move and more of it the arm's error (a first version
-  triangulated automatically after every step and lost 3 mm to the advances). The width's depth is shown beside it:
-  far apart, the plan's width is off.
-- **Staleness, narrowed:** every arm move makes earlier results stale (it may have moved things), but an
-  `align_step` stops short of the object, so wrist views and triangulated points from before alignment steps still
-  count for `triangulate_wrist` and `plan_alignment` (not from before any other arm move or a scan).
-- **Conservative is in the step, not the depth:** each step makes 80% of the measured correction.
-- In the smoke test, the object 25% wider than the plan says: after the sidestep, 26 -> 5.1 -> 0.3 -> 0.4 -> 0.3 mm
-  off the line while coming in from 6 cm to 1.4 cm; with the width right, 9.4 -> 1.3 -> 0.5 -> 0.3 mm without one.
-  The steps went 99-100% of the way predicted (the gain each look reports).
+- **The object's width** (the fitted primitive's): good when the fit is (3.6 cm, right). The default.
+- **Triangulation over the arm's moves** (`triangulate_wrist`): off by about (the baseline's error) / (the baseline),
+  and the baseline comes from the joints read through the model, without the arm's backlash, flex and changing sag:
+  10-20% on the 1.5-3 cm moves tried, as poor as the width or worse; the step's gain (the fraction of the predicted
+  shift that happened: 42-157% on the robot, 99% in the simulation) is the tell. A cross-check only, on a baseline of
+  4-5 cm or more, across the object (a sidestep across the jaws: the sides pin the correspondence; a move along an
+  upright object's axis needs a point that marks the same height twice, like a label's corner, then `to_axis_m`).
+- **The head camera:** blind to the jaws behind the arm.
+- **The checks rigid to the gripper** (the closing line, "held" on the midline) need no depth and were right when the
+  measurements were not; from a camera looking nearly straight down, nearer and lower look alike in them, so read
+  them with care.
+- Not solved: depth at the grasp. A depth camera on the wrist, or a head view from the side ([open_issues.md](open_issues.md) 15).
+
+In the smoke test (exact marks, fixed joint errors only), the object 25% wider than the plan says: after a sidestep,
+26 -> 5.1 -> 0.3 mm off the line; with the width right, 9.4 -> 1.3 -> 0.5 -> 0.3 mm. The robot's steps were far less
+exact than the simulation's.
+
+### 6.1 Next: active sensing with the wrist camera (proposal, 2026-11-08, after bowl6)
+
+bowl6 aligned by hand-sized steps, one approved move and one look at a time (a dozen to get in), with depth that was
+either as poor as the arm's motion or read by the person. The proposal: let the wrist camera *move* to sense, in
+sweeps a tool runs, and let the model judge pictures and choose rather than step.
+
+**The flow:**
+
+1. **Fit primitives to the objects** from the head camera (`fit_cylinder`), as now.
+2. **Choose a grasp** from the head (`grasp_candidates`, `plan_pick`), as now: aimed high against the sag
+   (`GraspSettings.sag_lift`).
+3. **Move to the attack point** and hold (`execute(..., hold=True)` up to "pick.back").
+4. **Structure from motion** (`wrist_scan`, to build): the object fitted again, in the jaws' own frame.
+5. **The revised attack:** the grasp solved again on the wrist-fitted object, a relative move from where the arm is.
+6. **The approach** (`approach_sweep`, to build): in along the gripper's axis to the step the closing-line check
+   passes at.
+7. **The grasp** (`grasp`, to build): close to contact, squeeze, and test the grip by a small lift.
+
+**4. `wrist_scan` (structure from motion).**
+
+- *The sweep:* only the wrist moves: roll +-30 deg in 15 deg steps and a couple of wrist-flex steps, ~8 frames, each
+  with its joints read, then back to the start (checked by comparing a fresh frame with the first). The camera is
+  ~7 cm off the gripper's axis, so a roll swings it through a 4-7 cm arc: a baseline 2-4 times bowl6's, by the two
+  joints that carry the least load and leave the arm above them still (bowl6's 42-157% step gains were shoulder and
+  elbow moves).
+- *The camera's real motion, from the images:* features on the table (its grain) matched across the frames, and a
+  small bundle adjustment: the camera poses (started from the model's) and the table's points, refined to the
+  matches; the scale from the wrist moves' length (or the table's height from the head camera). The arm's motion
+  error, which sank bowl6's triangulation, drops out. A by-product: **the table plane in the jaws' frame**, how high
+  the jaws are over it (bowl6's open question at the hold).
+- *The object, fitted again:* the model marks it in one or two frames (its two sides, or a box); the tool finds its
+  silhouette's edges in every frame and fits the same primitive as the head's (an upright cylinder, its radius the
+  head's, or free) to all of them, from the refined poses: the object relative to the jaws now, with residuals.
+- *Returned:* a contact sheet with the fitted outline drawn on every frame (it should hug the object in all) and the
+  table plane; the object in the jaws' frame, the jaws' height over the table, the residuals; and the grasp solved
+  again on it (step 5). Not depth images: dense stereo has little to work with on a white bottle.
+- *The model's part:* judge the overlays (does the outline hug the object, is the plane the table), approve or choose
+  the revised attack, mark more where the edges failed.
+
+**6. `approach_sweep` (the grasp depth by choosing a frame).** In along the gripper's axis in ~5 mm steps from the
+(revised) attack point, a wrist frame at each with the joints read, the closing line and "held" drawn on it; the far
+end bounded short of contact (the depth from the width plus a margin; stop early if the object's apparent width
+passes the closing line's ends). One contact sheet back; the model picks the step where "held" is on the object's
+middle and the closing line's ends on its sides; the tool returns to that step's recorded joints. That depends on the
+arm repeating a pose (~0.5 deg with the push-again), not on the model or a depth. A by-product: the object's growth
+over known steps is a depth by looming, independent of its width.
+
+**7. `grasp` (close by contact, then squeeze).** The gripper is position controlled: step its target closed and watch
+the reading; contact is where the reading stops following the target, the realized width. Then the target the model
+asks past contact (the squeeze: it sets the force; bowl6's 1.3 of `gripper.pos` was too weak, open issue 14), and a
+report: the contact width against the object's (a contact much narrower than the object warns of a chord near its
+front, though 4 mm off the middle is only 0.4 of `gripper.pos`). Last, the lift test: up 1-2 cm, the object's size in
+the wrist picture before and after (a held object keeps it).
+
+**Protocol: aim against gravity.** Every plan aims `sag_lift` (1 cm) high, the person's rule from bowl6. Toward a
+model: log at every hold the pose, the reach, the load and the measured error (`arm_error`, or the wrist scan's
+table plane), then fit the sag to the horizontal reach and the load. The joints' own shortfall is already corrected
+(`align_step` pushes again); what is left is link flex and gear play, which reach and load should predict.
+
+**Build order:** a grip-force bench test first (the bottle between the jaws by hand, closed to 17, 13 and 10, lifted:
+which squeeze holds); then `grasp` and `approach_sweep` (bowl6's failures directly); then `wrist_scan`, the wrist-only
+sweep and the object's refit first, the feature-based motion second if the wrist joints' motion is not exact enough.
+
+**Open questions (for 6.1):** the wrist's repeatability on return (backlash); whether the table's grain matches across
+a 30 deg roll; how well silhouette edges come out on a white object against a light table; how many frames a contact
+sheet can show the model legibly.
+
+### 6.2 Structure from motion: `sfm_light`, `sfm_torch` (built 2026-11-08, not yet on a sweep)
+
+`harness/sfm.py`; unit tests `test_sfm.py` (a textured table rendered exactly from a wrist-roll sweep, the "model"
+poses off by 3 mm and 1 deg per frame). Not COLMAP/GLOMAP: few frames, a calibrated lens, every pose known to a few mm,
+so a small bundle adjustment from the model's poses with a prior on the corrections (`refine`): features, matches per
+pair, an essential matrix per pair (RANSAC), tracks, triangulation, the adjustment (SciPy, sparse), the table plane.
+`sfm_light` matches with OpenCV's SIFT; `sfm_torch` with DISK and LightGlue (kornia, in the `felix_jr` extra).
+
+What it does, and does not:
+
+- **It fixes the turns and the directions of the moves; one scale stays the model's.** Images fix a moving camera's
+  motion up to one scale factor, here the prior's (the model's translations averaged over the frames). Synthetic
+  sweep: the moves' directions to within 0.5-1 deg (7 deg before), the turns to 0.1-0.3 deg (0.5), every length off
+  by the same ~3% (and the table's distance with it). 3% of 12 cm is ~4 mm (bowl6's triangulation: 10-20%); the
+  object's known width or the table's height (head camera) could set the scale.
+- **DISK and LightGlue are not rotation invariant**, and a wrist roll turns the picture: pairs 45 deg or more apart
+  did not match at all. The frames are turned back by the model's roll before the features (all pairs then match).
+- **On the robot's frames the learned features win by far.** bowl6's held frames (w17-w19, ~1 cm moves): SIFT kept
+  22-26 inliers per pair (32 points), DISK+LightGlue 747-883 (800 points); both put the arm's real motion 2-4 mm and
+  0.2-0.8 deg off the model's per move. No table plane from moves that small (the points too noisy): a sweep's
+  4-7 cm baselines are for that.
+- **The jaws are in every frame**, rigid to the camera: matches that did not move between two frames (`STATIC_PX`)
+  are dropped before the essential matrix.
+- Not yet: the scale from the object's width, a learned server (below).
+
+**The wrist scan (`harness/wrist_scan.py`, built 2026-11-08; tests `test_wrist_scan.py`, smoke
+`test_wrist_scan_smoke.py`).** `wrist_scan(arm)` (moves the wrist only: roll -30..30, flex +-10, and back; the arm
+holds) or `scan_views(views)` (frames already taken) give a `WristScan`: the frames, their refined poses, and the
+frame the arm is at now. The model works on it like a head capture:
+
+- `render_scan(scan, frames=, points=, objects=)`: a contact sheet of the frames (or one, full size) with points and
+  fitted outlines drawn in each; what sits right in every frame is right.
+- `scan_locate(scan, frame, uv)`: a pixel's 3D point from the scene's points around it (the table, textured
+  surfaces) or the table plane; with a second mark (`frame_b`, `uv_b`), triangulated (an object's feature: a label's
+  corner, a cap's center). `scan_find`: the second mark found by the tool along the epipolar line (refused on a
+  smooth or repeating surface).
+- `scan_fit_cylinder(scan, sides={frame: [[u, v], [u, v]]})`: an upright object from its sides in a few frames (each
+  a ray tangent to it), on the table plane: an `Object` for `grasp_candidates` (with a fresh `capture` for the arm).
+- Answers are in the jaws' (pinch) frame now and in the root frame through it as the model has it at the joints now,
+  so a plan from there cancels the model's error; the scale is the model's.
+
+Synthetic (the model's poses off 2 mm, 0.5 deg per frame): a table point by lookup 2.4 mm off, a point 5 cm up from
+two marks 2.5 mm, one found by the tool 3.6 mm, a cylinder's foot 3.3 mm (radius 17.6 for 18 mm); against the fake
+robot with its joints 1-2 deg off, the sweep's turns refined to under 0.1 deg. Not yet on the robot.
+
+**`sfm_ml_server` (proposed, the person's idea).** `sfm_torch` loads torch and the weights on every call (~3-5 s of
+its ~10). A local server holding DISK and LightGlue on the GPU, started by the first `sfm_torch` call (a subprocess on
+the laptop, a localhost socket), answering "features and matches for these frames", and shutting itself down after
+some idle time (~10 min); `sfm_torch` falls back to running in process if it cannot reach it. The adjustment stays in
+the caller.
+
+### 6.3 Hardware-in-the-loop test: the head's depth against the wrist's structure from motion (design, 2026-11-08)
+
+**Question:** how well does each wrist method (`sfm_light`, `sfm_torch`, the model's poses alone) know the camera's
+motion and the scene, against the head camera's depth, at attack-like poses; which to build the scan on.
+
+**Ground truth that needs neither calibration:** the wrist calibration's checkerboard (8 x 6 inner corners, 25 mm)
+flat on the table, in view of both cameras. Each wrist frame's pose relative to the board comes from the board's
+corners (PnP: ~1 mm, a few tenths of a degree at 15-25 cm), so the camera's real motion between frames is known
+without the arm, the model or the head. The head sees the board too (its pose from the color image's corners), which
+puts the head's depth points in the board's frame, again without the head's calibration (its ~2 cm at home). The board
+is masked out of the features the methods use (they work from the table and the objects, as in a session); it is only
+the referee.
+
+**Procedure** (a script in `checks/`, each move approved, recordings in `scratch/`):
+
+1. The scene: the board, the bottle and a box of known size on the table.
+2. Head: a capture aimed at the scene: the board's pose (head frame), the depth's points in the board's frame, the
+   objects fitted (`fit_cylinder`): their positions and the table, the head's numbers.
+3. Arm: to an attack-like pose over the objects (the camera 12-20 cm away); a wrist sweep: roll -30..30 deg in 15 deg
+   steps, wrist flex +-10 deg; each frame saved with the joints read.
+4. For each frame, from the board: the true pose; from the model: its pose; from each method: the refined pose.
+   Scored: the relative motion's error against the board's (mm, deg; the turns, the directions, the one scale), the
+   table plane's height and tilt against the board's plane, the jaws' height over the table.
+5. The objects: marked in a few frames, triangulated with each method's poses (and the board's), compared in the
+   board's frame with the head's fit (position, width).
+6. Repeat over scenarios: 3-4 attack poses (heights 12-20 cm, pitch -40 to -70), the sweep's size (roll +-15, +-30),
+   lighting; the box and bottle moved.
+
+**First run, hil3 (2026-11-08;** `checks/hil_wrist_sfm.py`; the right arm's tip 16 cm over the board, 8 cm toward the
+robot from its center so the closed jaws do not cover it (hil1/hil2: they did, the board found in no frame); a sweep
+of 8 frames, the board found in 6; the bottle, chapstick, screwdriver and the table's edge in view):
+
+| | turn error, max | direction error, max | scale | table (board frame) |
+| --- | --- | --- | --- | --- |
+| the model (joints read) | 3.6 deg | 6.1 deg | 0.92 +- 0.05 | - |
+| `sfm_light` | 2.5 deg | 40 deg | 0.77 +- 0.26 | wrong |
+| `sfm_torch` | 0.9 deg | 13 deg | 0.89 +- 0.04 | wrong (another plane) |
+| the head's depth | | | | +2.9 mm, 0.4 deg |
+
+- **The model's relative motion is far off even for wrist-only moves:** turns up to 3.6 deg (likely much of it the
+  right camera's pose on the gripper: hil3's board views can fit it, a hand-eye fit).
+- **SIFT's matches are wrong on the robot's frames** (16 px against the board's poses); DISK and LightGlue's agree with
+  them to 1.3 px: `sfm_torch` is the one to build on.
+- **The adjustment did not converge** with SciPy's finite differences (every run stopped at 1000 evaluations, near
+  its start); replaced by Levenberg-Marquardt with the Schur complement (`_bundle_adjust`): `sfm_torch` from the
+  model's poses now ends 0.9 deg from the truth (2.8 before), at 0.89 px (the true poses: 0.88).
+- **Still wrong:** the moves' directions (short moves along the camera's view are poorly fixed by images) and the
+  table plane (the points' dominant plane was not the table). Next: score positions after a similarity alignment
+  (what matters is mm, not the direction of a 1 cm move), find the table among the points near where the model puts
+  it, and the hand-eye fit from the board views.
+
+**The right wrist camera's pose, again (hand-eye from the board, 2026-11-08).** The model's 3.6 deg of relative
+turns on wrist-only moves pointed at the camera's pose on the gripper. `checks/hil_wrist_sfm.py handeye-record`
+(the calibration's `POSE_VIEWS` by IK: 5 + 3 views with the board, most others out of reach; `--joints`: joint offsets
+about the hold, nothing out of reach, 8) and `handeye-fit` (the calibration's `fit_extrinsics`, with hil3's 6 board
+frames): 22 views, settled: the camera at (1, 85, -12) mm in the gripper link +- 3-4 mm, 0.7 deg; 18 mm and 5.7 deg
+from bowl5's patch.
+
+- **A pinch point moved 3 cm along the fingers fitted the wrist picture, but the head camera refuted it:**
+  `calibration.check` with that candidate (5 views, the gripper at 4-65 deg; driven by a script,
+  `CheckSession.next_view`) drew its tips ~3 cm beyond the real ones, the current model's **on** them in every view.
+- **The answer, from the person: the fingers have two faces.** Both are ~1 cm thick at the tip, along the hinge.
+  The pinch point is calibrated (and checked) on the face the head camera sees; the wrist camera sees the other
+  face, 1 cm away along the hinge (the pinch frame's +y; its -y is the hinge axis, which points toward the head when
+  `visible_side` is "positive"). bowl5's 7.8 deg turn of the camera had absorbed that 1 cm. Built in
+  (`JAW_THICKNESS_M`, `XleRobotModel.wrist_face`): the wrist camera's fingertips, the closing line and the sweep are
+  drawn on its face; with it, the original calibration's tips are 22 px off (44 without), and a turn of 5.2 deg
+  (not 7.8) fits them to 8 px: `urdfs/xle_calib_1008_wrist2.urdf`, now `api.MODEL`. The board's hand-eye fit (18 mm,
+  5.7 deg from the patch) relates the camera to the gripper through the arm's model at every pose and absorbs its
+  errors: not used. hil3's 3.6 deg of model motion error is then mostly the arm's kinematics, which structure from
+  motion measures from the images anyway.
+- **Grasps aim at the fingers' middle** (`grasp_offset(..., mid_plane=True)`, the default): half a thickness along
+  the hinge from the pinch point, which is on one face. For a side grasp, ~0.5 cm in height.
+
+**hil3 again, with `xle_calib_1008_wrist2.urdf` (the fingers' thickness in), and the table and scale fixed:**
+
+| | turn error, max | direction error, max | scale | table (board frame) |
+| --- | --- | --- | --- | --- |
+| the model (joints read) | 1.9 deg (3.6 before) | 6.4 deg | 0.92 +- 0.05 | - |
+| `sfm_torch` | 0.38 deg | 6.2 deg | 0.88 +- 0.03 | -30 mm, 1.8 deg |
+| `sfm_torch`, scaled by the head's table (`scan_scale`) | 0.38 deg | 6.2 deg | **1.005 +- 0.03** | **+2.4 mm**, 1.8 deg |
+| the head's depth | | | | +2.9 mm, 0.4 deg |
+
+- Half the model's motion error was the camera's pose on the gripper (the 1 cm thickness fix).
+- **The table search** now takes only near-level planes (`TABLE_TILT_DEG`), 4 mm thick: the points' dominant plane had
+  been a tilted slab across the table's band (the forearm, objects and the floor beyond the edge in view too).
+- **Scale is the one thing structure from motion cannot measure**, and here it came out 12% short: the arm moves the
+  camera ~9% further than the model says even for wrist-only moves (the board's squares checked metric: 25.1 mm by
+  the head's depth; a joint fit of the camera's pose to the fingertips and hil3's motions (tips 2.5 px, turns 0.42
+  deg) did not change it, so not the camera's place on the gripper). `scan_scale` sets it from the scene: the table's
+  height by the head's depth (x1.14 here; relies on the model only for the camera's height now) or the object's
+  width from the head's fit (independent of the arm). Scaled, the scan's table sits 2.4 mm from the board's plane.
+- Open: the cause of the ~9% (the wrist camera's focal length, the wrist joints' geometry). A test: the head and the
+  wrist camera see the board together, the head's depth giving its true distance against the wrist's PnP.
+
+**What comes out:** a table per scenario (each method's motion error, scale, table, object position; the head's
+object positions), and the choice of method and sweep. Smoke tests from it: the recorded frames are images, which do
+not go in git (`felix_jr/CLAUDE.md`), so the frozen data is numbers: each scenario's tracks (the matched pixels), the
+model's and the board's poses, in `tests/felix_jr/reference/` (a few hundred kB as JSON); the tests replay the
+adjustment on them and check its error against the board's.
 
 **Open questions:**
 
