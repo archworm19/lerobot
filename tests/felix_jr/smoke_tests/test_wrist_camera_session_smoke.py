@@ -116,12 +116,10 @@ def test_a_session_calibrates_the_lens_and_the_pose_by_keys(robot, model, tmp_pa
                 break
         fit = session.pose_fit
         assert fit is not None and fit.settled, (len(session.record.extrinsic_views), fit and fit.describe())
-        assert "SETTLED" in "\n".join(session.status())
+        assert "SETTLED" in session.status()[0] and session.status()[1].startswith("c: accept")
         assert session.next_view <= len(POSE_VIEWS)  # the suggested views were enough
-        session.handle("calibrate")
-        assert session.phase == "check" and session.camera.gripper_from_camera is not None
-        session.handle("calibrate")
-        assert session.done
+        session.handle("calibrate")  # settled: one c ends the arm
+        assert session.done and session.camera.gripper_from_camera is not None
     fitted = np.array(session.camera.gripper_from_camera)
     np.testing.assert_allclose(fitted[:3, 3], GRIPPER_FROM_CAMERA[:3, 3], atol=0.004)
     path = write(start, [session.record], out)
@@ -141,3 +139,53 @@ def test_a_session_calibrates_the_lens_and_the_pose_by_keys(robot, model, tmp_pa
     np.testing.assert_allclose(
         np.array(again.gripper_from_camera), np.array(written.gripper_from_camera), atol=1e-6
     )
+
+
+def test_a_pose_not_settled_takes_a_second_c_and_a_skip_a_second_x(robot, model, tmp_path, monkeypatch):
+    """calib1008_full3 (2026-11-08): the left camera skipped by mistake (x read as "on to the right camera"). An
+    unsettled pose is accepted on a second c, a skip needs a second x, and the picture says what comes next."""
+    fake, client, held = robot
+    monkeypatch.setattr("lerobot.felix_jr.calibration.wrist_camera.POSE_SETTLED_M", 1e-9)  # never settled
+    start = model.with_wrist_camera("right", TRUE_CAMERA)  # the lens known: the pose step only
+    start.arm_calibration["right"] = arm_record(client.arm_calibration()["right_arm"])
+    out = tmp_path / "out"
+    out.mkdir()
+    said: list[str] = []
+    with client.session():
+        session = WristCameraSession(
+            client,
+            start,
+            "right",
+            BOARD,
+            out,
+            lambda image: None,
+            only="extrinsics",
+            focus=False,
+            next_arm="left",
+            say=said.append,
+        )
+        assert session.start()
+        assert said and said[0].startswith("right CAMERA POSE")  # the step's keys, in the terminal
+        session.handle("calibrate")  # the board is down
+        for _ in POSE_VIEWS:
+            session.handle("next")
+            if session.pose_fit is not None:
+                break
+        assert session.pose_fit is not None and not session.pose_fit.settled
+        assert len(session.status()) <= 3 and "c: accept anyway" in session.status()[1]
+        session.handle("skip")  # one x only asks
+        assert not session.done and "x again" in session.message
+        session.handle("calibrate")  # not the skip's second key: it is dropped; the pose asks for a second c
+        assert not session.done and "c again" in session.message and "next the left" in session.message
+        session.handle("next")  # anything else in between: the c is asked for again
+        session.handle("calibrate")
+        assert not session.done
+        session.handle("calibrate")
+        assert session.done and not session.skipped and "NOT settled" in said[-1]
+        last = WristCameraSession(
+            client, start, "right", BOARD, out, lambda image: None, focus=False, say=said.append
+        )
+        last.handle("skip")
+        assert "then the calibration is written" in last.message
+        last.handle("skip")
+        assert last.done and last.skipped

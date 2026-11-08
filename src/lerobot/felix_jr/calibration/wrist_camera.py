@@ -24,8 +24,13 @@ camera; the keys move the arm (each a small move, the gripper's tip as the refer
   n             camera pose: move the arm to the next suggested view (`POSE_VIEWS`) and take it
   space         take this view (the board must be found: its corners are drawn)
   u             drop the last view
-  c             calibrate with the views so far, and go on
+  c             fit this step and go on; the camera pose's `c` ends the arm (on to the next arm's camera). A pose not
+                settled yet takes a second `c`
+  x x           skip this arm's camera (twice: once only asks)
   q or Esc      stop (what is calibrated so far is written)
+
+The picture carries three lines at most: the arm, the step and how far along; the key to press next; the last
+message. The keys of each step are printed in the terminal as it starts.
 
 0. **Focus.** First the window streams the camera with a sharpness score (`sharpness`: of the board where it is
    found, else of the middle of the picture) and the best so far. Hold the board about 20 cm in front of the camera
@@ -41,9 +46,10 @@ camera; the keys move the arm (each a small move, the gripper's tip as the refer
    the arm by keys and take a view with space, as many as you like. From `MIN_EXTRINSIC_VIEWS` the camera's pose in
    `<arm>_gripper_link` and the board's on the table are fitted together after every new view (`fit_extrinsics`:
    `cv2.calibrateRobotWorldHandEye`, then refined on the corners' pixels), with how well the views pin it down (each
-   view left out in turn), and the model's fingertips are drawn on the live picture from it. `c` accepts it once
-   settled (`ExtrinsicsFit.settled`: turned `MIN_SPREAD_DEG` about two axes, known to `POSE_SETTLED_M` and
-   `POSE_SETTLED_DEG`); until then the status line says what would help.
+   view left out in turn), and the model's fingertips are drawn on the live picture from it: they should sit on the
+   real ones. `c` accepts the pose and ends the arm; once settled (`ExtrinsicsFit.settled`: turned `MIN_SPREAD_DEG`
+   about two axes, known to `POSE_SETTLED_M` and `POSE_SETTLED_DEG`) at once, before that on a second `c` (the
+   report says it was not settled). Until then the status line says what would help.
 
 The fit uses the arm's measured joints and the model (`--start-from`), so the arm's own error (its sag, its
 calibration) averages into the camera's pose; many views across the workspace keep it small. The output,
@@ -160,11 +166,13 @@ KEY_ACTIONS = {
     ord("u"): "undo",
     ord("c"): "calibrate",
     ord("n"): "next",
+    ord("x"): "skip",
     ord("q"): "quit",
     27: "quit",
     13: "accept",  # Enter
     10: "accept",
 }
+PHASE_TITLES = {"focus": "1/3 FOCUS", "intrinsics": "2/3 LENS", "extrinsics": "3/3 CAMERA POSE"}
 FINGERTIP_COLORS = ((0, 255, 255), (255, 0, 255))  # RGB: the pinch point (fixed tip), the moving tip
 LAST_FRAME_FILE = (
     "last_frame.png"  # the latest frame the board was not found in (to see why), every few seconds
@@ -486,8 +494,8 @@ class ExtrinsicsFit:
         if self.settled:
             return ""
         if self.spread_deg[1] < MIN_SPREAD_DEG:
-            return "tilt ([ ]) and turn (, .) the gripper between views: they all turn about one axis"
-        return "more views, from new poses (n, or keys and space)"
+            return "tilt [ ] and turn , . the gripper"
+        return "more views"
 
     def describe(self) -> str:
         """The pose and how well it is known, in a line."""
@@ -767,6 +775,26 @@ def refit(start_from: Path, out_dir: Path, square_m: float | None = None) -> Pat
 # ---- the session --------------------------------------------------------------------------------------------
 
 
+def wrap(lines: Sequence[str], width_px: int, scale: float = 0.5) -> list[str]:
+    """`lines` broken where they would run wider than `width_px` on the picture: at " | ", else at spaces."""
+
+    def width(text: str) -> int:
+        return cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, 1)[0][0]
+
+    def greedy(parts: list[str], sep: str) -> list[str]:
+        out: list[str] = []
+        for part in parts:
+            if out and width(out[-1] + sep + part) <= width_px:
+                out[-1] += sep + part
+            elif width(part) > width_px and sep != " ":
+                out += greedy(part.split(" "), " ")
+            else:
+                out.append(part)
+        return out
+
+    return [piece for line in lines for piece in greedy(line.split(" | "), " | ")]
+
+
 def annotate(image: np.ndarray, lines: Sequence[str], corners: np.ndarray | None, board: Board) -> np.ndarray:
     """A copy of the RGB `image` with the found corners and the status lines."""
     out = image.copy()
@@ -774,7 +802,7 @@ def annotate(image: np.ndarray, lines: Sequence[str], corners: np.ndarray | None
         cv2.drawChessboardCorners(
             out, (board.cols, board.rows), corners.reshape(-1, 1, 2).astype(np.float32), True
         )
-    for row, text in enumerate(lines):
+    for row, text in enumerate(wrap(lines, out.shape[1] - 16)):
         org = (8, 20 + 20 * row)
         cv2.putText(out, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
         cv2.putText(out, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
@@ -801,12 +829,21 @@ class WristCameraSession:
         only: str | None = None,
         focus: bool = True,
         resume: bool = False,
+        next_arm: str | None = None,
+        say: Callable[[str], None] = print,
     ):
         """Set up the session; `only` is "intrinsics" or "extrinsics" (the latter needs the lens in `model`).
 
         With `focus`, it starts by streaming the camera for the lens to be focused (accepted with `accept`). With
-        `resume`, the views saved in `out_dir` for this arm (`<arm>_views.json`) are kept and added to.
+        `resume`, the views saved in `out_dir` for this arm (`<arm>_views.json`) are kept and added to. `next_arm` is
+        the arm whose camera comes after this one (None: this is the last), for the status line. `say` prints
+        each step's keys as it starts (to the terminal).
         """
+        self.next_arm = next_arm
+        self.skipped = False  # `x x`: this arm's camera left out
+        self.confirming: str | None = None  # "calibrate" or "skip": the action waiting for its second key
+        self.say = say
+        self.announced: str | None = None  # the phase whose keys were last printed
         self.client, self.model, self.arm, self.board, self.out_dir, self.show = (
             client,
             model,
@@ -975,7 +1012,7 @@ class WristCameraSession:
             self.hint = pattern_hint(self.frame.color, self.board)
         if self.corners is None:
             n = self.board.cols * self.board.rows
-            self.seen = f"board NOT found (all {n} inner corners must show; frame saved as {LAST_FRAME_FILE})"
+            self.seen = f"board NOT found (all {n} corners must show)"
             if time.time() - self.last_frame_saved > LAST_FRAME_EVERY_S:
                 cv2.imwrite(
                     str(self.out_dir / LAST_FRAME_FILE), cv2.cvtColor(self.frame.color, cv2.COLOR_RGB2BGR)
@@ -992,7 +1029,7 @@ class WristCameraSession:
                 else:
                     self.seen = "not kept: the pattern looks wrong"
             else:
-                self.seen = "board found, like a kept view: tilt, turn or move it (space keeps it)"
+                self.seen = "board found, like a kept view"
         self.render()
 
     def _keep_intrinsic(self, signature: np.ndarray) -> None:
@@ -1008,66 +1045,76 @@ class WristCameraSession:
         self.message = f"view {index + 1} kept"
 
     def status(self) -> list[str]:
-        """The status lines drawn on the picture."""
+        """The lines drawn on the picture: where things stand, the key to press next, the last message."""
+        title = f"{self.arm.upper()} {PHASE_TITLES[self.phase]}"
         if self.phase == "focus":
-            verdict = "in focus" if self.sharpness >= SHARP_ENOUGH else "blurred"
+            verdict = "sharp" if self.sharpness >= SHARP_ENOUGH else "blurred"
             lines = [
-                f"{self.arm} FOCUS: hold the board ~20 cm away, turn the lens until the number peaks",
-                f"sharpness {self.sharpness:.0f} ({verdict}; best {self.best_sharpness:.0f})"
-                + (" | board found" if self.corners is not None else "")
-                + " | Enter or click: accept",
+                f"{title}: sharpness {self.sharpness:.0f} ({verdict}, best {self.best_sharpness:.0f})",
+                "turn the lens until the number peaks | Enter: accept",
             ]
         elif self.phase == "intrinsics":
             n = len(self.record.intrinsic_views)
-            lines = [
-                f"{self.arm} LENS: tilt, turn, raise the board for new views (space: keep this one): "
-                f"{n} of {MIN_INTRINSIC_VIEWS} kept",
-            ]
             missing = lens_coverage_missing(self.signatures)
-            if missing:
-                lines.append(f"would help: the board {'; '.join(missing)} (held up, tilted)")
-            if n >= MIN_INTRINSIC_VIEWS:
-                lines.append(
-                    "c: fit the lens (if the views pin it down; then the board goes flat on the table)"
-                )
+            lines = [
+                f"{title}: {n} views (of {MIN_INTRINSIC_VIEWS}) | {self.seen}",
+                "c: fit the lens"
+                if n >= MIN_INTRINSIC_VIEWS
+                else f"move the board: {missing[0]}"
+                if missing
+                else "tilt, turn, raise the board",
+            ]
         elif self.phase == "extrinsics" and not self.board_fixed:
             lines = [
-                f"{self.arm} CAMERA POSE: lay the board flat on the table under the camera (its corners drawn here),",
-                "where it stays from now on; then c.",
+                f"{title}: board flat on the table, under the camera | {self.seen}",
+                "c: the board is down",
             ]
-        elif self.phase == "extrinsics":
-            n = len(self.record.extrinsic_views)
-            spread = self.spread()
-            lines = [
-                f"{self.arm} CAMERA POSE: the board stays put; the arm looks at it from several poses",
-                f"n: the arm moves to suggested view {min(self.next_view + 1, len(POSE_VIEWS))} of {len(POSE_VIEWS)} "
-                "and takes it | space: take this view (after moving the arm by keys)",
-                f"{n} views (fitted from {MIN_EXTRINSIC_VIEWS}); turns {spread[0]:.0f} and {spread[1]:.0f} deg "
-                f"(need {MIN_SPREAD_DEG:.0f} each)",
-            ]
-            if self.pose_fit is not None:
-                lines.append(self.pose_fit.describe())
-                lines.append(
-                    "SETTLED: c accepts (more views first: fine)"
-                    if self.pose_fit.settled
-                    else f"not settled (under {POSE_SETTLED_M * 1000:.0f} mm, {POSE_SETTLED_DEG:.0f} deg): "
-                    + self.pose_fit.needs()
-                )
         else:
-            lines = [
-                f"{self.arm} CHECK: the drawn fingertips should sit on the real ones | c: done, u: more views"
-            ]
+            n = len(self.record.extrinsic_views)
+            view = f"n: next view ({min(self.next_view + 1, len(POSE_VIEWS))}/{len(POSE_VIEWS)})"
+            fit = self.pose_fit
+            if fit is None:
+                lines = [f"{title}: {n} views (fitted from {MIN_EXTRINSIC_VIEWS}) | {self.seen}", view]
+            else:
+                known = (
+                    f"+-{np.nanmax(fit.position_sd_m) * 1000:.0f} mm {np.nanmax(fit.rotation_sd_deg):.1f} deg"
+                )
+                lines = [
+                    f"{title}: {n} views, {known}, {'SETTLED' if fit.settled else 'not settled'} | {self.seen}",
+                    f"c: accept, {self.after()}"
+                    if fit.settled
+                    else f"{view} | {fit.needs()} | c: accept anyway",
+                ]
         if self.hint:
             lines.append(self.hint)
-        if self.seen and self.phase != "focus":
-            lines.append(self.seen)
-        lines.append("arrows / w s: move | [ ]: pitch | , .: roll | u: undo | q: quit")
-        if self.message:
+        elif self.message:
             lines.append(self.message)
         return lines
 
+    def keys(self) -> str:
+        """This phase's keys, in words (printed to the terminal as it starts)."""
+        move = "arrows / w s: move the arm, [ ]: tilt, , .: turn"
+        rest = f"x x: skip the {self.arm} camera ({self.after()}), q: quit"
+        if self.phase == "focus":
+            return f"{self.arm} FOCUS: hold the board ~20 cm from the camera, turn the lens; Enter or click: accept"
+        if self.phase == "intrinsics":
+            return (
+                f"{self.arm} LENS: hold the board under the camera, tilted every way, near and far, in the corners "
+                f"of the picture; views are kept by themselves. space: keep this one, u: drop the last, c: fit "
+                f"the lens. {rest}"
+            )
+        return (
+            f"{self.arm} CAMERA POSE: lay the board flat on the table, where it stays, and press c. Then n, again "
+            f"and again (the arm moves to suggested views), or {move} and space to take a view; u: drop the last. "
+            f"The fingertips drawn should sit on the real ones. c: accept the pose, {self.after()} (twice if "
+            f"not settled). {rest}"
+        )
+
     def render(self) -> None:
         """Show the frame with the found corners, the fingertips (once the pose is known) and the status."""
+        if self.phase != self.announced:
+            self.announced = self.phase
+            self.say(self.keys())
         if self.frame is None:
             return
         out = annotate(self.frame.color, self.status(), self.corners, self.board)
@@ -1142,14 +1189,18 @@ class WristCameraSession:
                 self.signatures.pop()
             self.record.save(self.out_dir)
             self.message = f"dropped the last view ({len(views)} left)"
-            if self.phase in ("extrinsics", "check"):
+            if self.phase == "extrinsics":
                 self.refit_pose()
-        if self.phase == "check":
-            self.phase, self.message = "extrinsics", "take more views, then c"
         self.render()
 
-    def calibrate(self) -> None:
-        """`c`: fit this phase and go on (intrinsics -> extrinsics -> check -> done)."""
+    def after(self) -> str:
+        """What comes after this arm's camera, in words."""
+        return (
+            f"next the {self.next_arm} wrist camera" if self.next_arm else "then the calibration is written"
+        )
+
+    def calibrate(self, confirmed: bool = False) -> None:
+        """`c`: fit this phase and go on (intrinsics -> extrinsics -> done); `confirmed` accepts an unsettled pose."""
         if self.phase == "intrinsics":
             views = [np.asarray(v) for v in self.record.intrinsic_views]
             if len(views) < MIN_INTRINSIC_VIEWS:
@@ -1186,8 +1237,9 @@ class WristCameraSession:
             fit = self.pose_fit
             if fit is None:
                 self.message = f"{MIN_EXTRINSIC_VIEWS} views first"
-            elif not fit.settled:
-                self.message = f"not settled: {fit.needs()}"
+            elif not fit.settled and not confirmed:
+                self.confirming = "calibrate"
+                self.message = f"NOT settled ({fit.needs()}): c again accepts it anyway, {self.after()}"
             else:
                 assert self.camera is not None
                 self.camera = replace(
@@ -1199,10 +1251,9 @@ class WristCameraSession:
                     extrinsics_views=len(fit.errors_px),
                 )
                 self.model = self.model.with_wrist_camera(self.arm, self.camera)
-                self.phase = "check"
-                self.message = f"pose accepted: {fit.describe()}"
-        else:
-            self.done = True
+                self.done = True
+                self.message = f"pose accepted{'' if fit.settled else ' (NOT settled)'}: {fit.describe()}"
+                self.say(f"the {self.arm} wrist camera {self.message}")
         self.render()
 
     def accept_focus(self) -> None:
@@ -1246,6 +1297,7 @@ class WristCameraSession:
         """Do one action from `decode_key`. Returns False when the person quits."""
         if action == "quit":
             return False
+        confirmed, self.confirming = self.confirming == action, None
         if action == "accept" or (action == "calibrate" and self.phase == "focus"):
             self.accept_focus()
         elif action == "next":
@@ -1255,7 +1307,13 @@ class WristCameraSession:
         elif action == "undo":
             self.undo()
         elif action == "calibrate":
-            self.calibrate()
+            self.calibrate(confirmed)
+        elif action == "skip" and confirmed:
+            self.skipped = self.done = True
+        elif action == "skip":
+            self.confirming = "skip"
+            self.message = f"x again skips the {self.arm} camera ({self.after()}); any other key: no"
+            self.render()
         else:
             self.jog(action)
         return True
@@ -1398,8 +1456,13 @@ def main() -> None:
                         raise SystemExit(f"the {arm} arm did not reach its start pose: {session.message}")
             else:
                 arms = []
-            for arm in arms:
+            for index, arm in enumerate(arms):
                 session = sessions[arm]
+                session.next_arm = arms[index + 1] if index + 1 < len(arms) else None
+                print(
+                    f"the {arm} wrist camera"
+                    + (f" (then the {session.next_arm})" if session.next_arm else "")
+                )
                 session.start()
                 cv2.setMouseCallback(window, on_mouse)
                 keep_going = True
@@ -1411,9 +1474,13 @@ def main() -> None:
                         session.refresh()
                         continue
                     keep_going = session.handle(action)
-                records.append(session.record)
-                for other in sessions.values():  # the next arm's model has this arm's camera
-                    other.model = session.model
+                if session.skipped:
+                    print(f"the {arm} wrist camera: skipped")
+                else:
+                    records.append(session.record)
+                    for other in sessions.values():  # the next arm's model has this arm's camera
+                        other.model = session.model
+                    print(f"the {arm} wrist camera: done")
                 if not keep_going:
                     break
         finally:

@@ -412,3 +412,15 @@ def test_views_turned_about_one_axis_do_not_settle_the_pose(model):
     one_axis = fit_extrinsics(model, "right", TRUE_CAMERA, panned, BOARD)
     assert one_axis.spread_deg[1] < 5.0 and not one_axis.settled
     assert "tilt" in one_axis.needs() and "turn" in one_axis.needs()
+
+
+def test_long_status_lines_wrap_inside_the_picture():
+    import cv2
+
+    from lerobot.felix_jr.calibration.wrist_camera import wrap
+
+    line = "n: next view (9/15) | tilt [ ] and turn , . the gripper | c: accept anyway, next the right wrist camera"
+    pieces = wrap([line, "short"], 300)
+    assert len(pieces) > 2 and pieces[-1] == "short"
+    assert all(cv2.getTextSize(p, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0][0] <= 300 for p in pieces)
+    assert " | ".join(pieces[:-1]).replace(" | ", " ").split() == line.replace(" | ", " ").split()

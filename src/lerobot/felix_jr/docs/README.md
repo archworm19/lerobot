@@ -262,7 +262,9 @@ the jaws' frame (`object_grasping.md`, section 6).
    questions; `--lens fisheye` for a lens wider than about 120 deg). For each arm in turn, after a `y` in the terminal,
    the arm goes to a start pose (the gripper tilted 70 deg down, about 18 cm over the table) and a window shows its
    wrist camera. Keys: arrows, `w` / `s` move the arm; `[` / `]` tilt it; `,` / `.` turn it about its axis;
-   space takes a view; `u` drops the last one; `c` goes on; `q` stops.
+   space takes a view; `u` drops the last one; `c` goes on; `x x` skips the arm's camera; `q` stops. The picture
+   shows three lines: the arm and step (1/3 focus, 2/3 lens, 3/3 camera pose) with how far along, the key to press
+   next, and the last message; the terminal prints each step's keys as it starts.
    - **The focus:** the window streams the camera with a sharpness score and the best so far. Hold the board about
      20 cm in front of the camera and turn the lens (it screws in and out of its holder) until the score peaks:
      "in focus" from about 100 (out-of-focus lenses read ~2), and the board's corners are drawn once it is found.
@@ -285,8 +287,11 @@ the jaws' frame (`object_grasping.md`, section 6).
      about two axes); until then it says what would help. Turns about one axis only (moving the arm about, which
      only pans it) leave the camera's offset along that axis free: tilt (`[ ]`) and turn (`, .`) the gripper too.
      The start pose keeps every joint 15 deg from its bounds, so both turns are in reach.
-   - **The check:** the model's fingertips are drawn on the live picture (cyan the fixed tip, magenta the moving
-     one): they should sit on the real ones. `c` to finish the arm (`u` for more views).
+   - **Ending the arm:** the model's fingertips are drawn on the live picture from the pose so far (cyan the fixed
+     tip, magenta the moving one): they should sit on the real ones. `c` accepts the pose and goes on to the other
+     arm's camera (or writes the calibration): at once when SETTLED, else on a second `c` (the report says it was
+     not settled). `x` twice skips the arm's camera instead (once only asks: calib1008_full3 lost the left camera
+     to a single `x`); its views are kept, and `--refit` fits them later.
 5. It writes `calibration.urdf` (the start with the wrist cameras) and `wrist_cameras.md` (the lens, the pose, the
    errors) in the folder, and keeps the views: `wrist_camera --refit --start-from <urdf> --out-dir <folder>` fits
    them again with no robot.
