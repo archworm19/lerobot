@@ -561,6 +561,7 @@ class TestApi:
             "wrist_look": api.Effect.SENSE,
             "align_step": api.Effect.MOVE_ARM,
             "wrist_scan": api.Effect.MOVE_ARM,
+            "wrist_hold_views": api.Effect.MOVE_ARM,
             "scan": api.Effect.MOVE_HEAD,
             "look_at": api.Effect.MOVE_HEAD,
             "look_at_pixel": api.Effect.MOVE_HEAD,

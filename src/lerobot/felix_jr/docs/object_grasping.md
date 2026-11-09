@@ -796,8 +796,7 @@ were not. Details and numbers: [sessions.md](sessions.md), sections 6-6.3 above.
 
 - **Moves along the approach fall ~1 cm short** over a few cm (bowl7, bowl8 twice): the wrist joints' geometry
   (calibrate from head-observed roll and flex motions), or plan the last centimeters from a fresh view (which works).
-- **The checkpoint as a tool** (`scratch/da3_check.py` today), posed by the joints (the ablation), with the contact
-  shift's sign computed (bowl8: applied by hand with the wrong sign once), and tests; then the deprecated tools removed.
+- **The deprecated tools removed** (below), now that the checkpoint is a tool (`wrist_contacts`, below).
 - **The VLM's part:** choosing the graspable part (the box, the height band) and judging the overlays; the person did
   the final checks in bowl7/8.
 
@@ -840,16 +839,38 @@ synthetic frames, `reference/da3_small_parity.npz`; skipped without the weights 
 on the laptop's CPU / MPS. To upgrade DA3: bump the pin, regenerate the parity reference from the package's own
 `inference`, re-run the test.
 
+### The checkpoint as tools (2026-11-09)
+
+`harness/contacts.py`, in `api.py`:
+
+- `wrist_hold_views(arm, rolls_deg=(-15, 15))` (moves the arm): a frame now, at each roll, and back (`HoldViews`;
+  the current frame is the last).
+- `wrist_contacts(views, box, band, radius=None, gap=0.003, into=0.01, table_z=None)`: DA3 on the hold's frames,
+  posed by the model's joints (the ablation), the flying pixels and the least confident third dropped, scaled about
+  the current camera by the table's height (`table_z`) or by the fixed finger; the points in the box and the height
+  band, without the table-coloured pixels; an upright cylinder; the widest chord in the fingers' middle plane; the
+  move (`advance = ahead + into`, `shift = fixed contact - gap`: its sign computed, bowl8's hand error). Also one
+  `wrist_look` when too close to roll: **a single view is always scaled by the fixed finger** (bowl8's last frame by
+  the table: the chord 1.2 cm off from what the person saw; by the finger: right).
+- `render_contacts` (the overlay), `plan_wrist_move(view, contacts or move_m, fraction)` -> `align_step` (a
+  translation, the turn kept, at most 3 cm).
+
+Run on bowl8's saved data: cp2 (four frames, the table's scale): chord +2.35, fixed -0.18 cm (the ablation's A:
++2.27, -0.18); the last frame by the finger: chord -0.22, fixed +0.67 (the one-off at the time: -0.12, +0.78).
+The table-coloured mask had to be closed (not opened) over the object's edges: with table pixels left in the band,
+cp2 read +2.78 / +0.18. Tests: `test_contacts.py` (the contacts and the move's signs on synthetic cylinders),
+`smoke_tests/test_wrist_align_smoke.py` (the hold and a planned move on the fake robot).
+
 ### Deprecated by these findings (2026-11-08)
 
 Marked in `harness/api.py` (`@tool(..., deprecated=...)`: shown in the model's tool documentation and logged when
-called); kept for now, to be removed once the DA3 checkpoint is a tool:
+called); kept for now, to be removed next (the checkpoint is now a tool: `wrist_contacts`):
 
 | Tool | Why | Instead |
 | --- | --- | --- |
 | `sfm_light` | SIFT's matches failed on the robot's frames | DA3 posed by the model's joints (the ablation above) |
 | `triangulate_wrist` | triangulating over the arm's moves inherits its motion error (bowl6) | DA3 on a short wrist roll |
-| `scan_fit_cylinder` | a sparse silhouette fit: a wrong radius (bowl7) | a cylinder on DA3's points (`scratch/da3_check.py`) |
+| `scan_fit_cylinder` | a sparse silhouette fit: a wrong radius (bowl7) | `wrist_contacts` |
 | `scan_locate`, `scan_find` | sparse depth; never used on the robot | DA3's dense depth |
 | `refine`, `arm_error` | the head's re-measure at the hold, through the joints | the wrist refines (DA3 at the hold) |
 

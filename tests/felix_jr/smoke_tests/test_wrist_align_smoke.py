@@ -202,3 +202,30 @@ def test_a_joint_that_stops_short_is_pushed_again(model, client):
     reached = client.get_state()[f"{ARM}_arm"]
     assert all(abs(reached[k] - v) <= 0.5 for k, v in alignment.joints.items()), (reached, alignment.joints)
     assert "pushed again" in after.describe() and "still short" not in after.describe(), after.describe()
+
+
+def test_hold_views_then_a_planned_move(model, client):
+    """The contacts' flow without the depth: wrist_hold_views rolls and comes back, plan_wrist_move -> align_step moves
+    the pinch point by the move asked, its turn kept; the hold's views go stale."""
+    joints, _, _ = start_joints(model, ARM)
+    with client.session():
+        client.move_joints({f"{ARM}_arm": {**joints, "gripper.pos": 30.0}}, tol=0.5)
+        client.keep_holding()
+    h = api.Harness(ask=lambda spec, preview: True, client=client, model=model)
+    start = client.get_state()[f"{ARM}_arm"]
+    hold = h.call("wrist_hold_views", ARM)
+    assert hold.labels == ("start", "roll -15", "roll +15", "back") and hold.current == 3, hold.labels
+    rolls = [v.arm_pose["wrist_roll.pos"] - start["wrist_roll.pos"] for v in hold.views]
+    assert np.allclose(rolls, [0.0, -15.0, 15.0, 0.0], atol=0.5), rolls
+    assert abs(rolls[hold.current]) < 0.5  # back where it was
+    view = hold.views[hold.current]
+    before = view.root_from_pinch
+    move = np.array([0.01, -0.005, 0.01])
+    planned = h.call("plan_wrist_move", hold, move_m=move)
+    assert planned.ok and not planned.clipped, planned.describe()
+    after = h.call("align_step", planned)
+    reached = after.root_from_pinch
+    assert np.linalg.norm(reached[:3, 3] - before[:3, 3] - move) < 0.002, reached[:3, 3] - before[:3, 3]
+    assert np.allclose(reached[:3, :3], before[:3, :3], atol=0.02)
+    with pytest.raises(ValueError, match="before the arm last moved"):
+        h.call("plan_wrist_move", hold, move_m=move)

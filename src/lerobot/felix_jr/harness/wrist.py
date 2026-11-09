@@ -43,7 +43,7 @@ own error mostly cancels.
 """
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, ClassVar
 
 import cv2
@@ -588,8 +588,57 @@ def triangulate(
     )
 
 
+@dataclass(frozen=True, eq=False)
+class WristMove:
+    """A move of the gripper by `move_root` (root frame, m) from where `view` saw it, solved (`plan_move`)."""
+
+    view: WristView
+    move_root: np.ndarray  # (3,)
+    target_root_from_pinch: np.ndarray  # (4, 4)
+    joints: dict[str, float]  # the solve, LeRobot degrees (the five arm joints)
+    solve_error_m: float
+    ok: bool
+    clipped: bool  # the move was cut to MAX_STEP_M
+    label: str = ""
+
+    def describe(self) -> str:
+        """The move and its solve."""
+        return (
+            f"{self.label + ': ' if self.label else ''}move the gripper {np.round(100 * self.move_root, 2).tolist()} cm "
+            f"(root frame), no turn{' (clipped to ' + str(int(MAX_STEP_M * 100)) + ' cm)' if self.clipped else ''}; "
+            + (
+                f"the solve lands {_mm(self.solve_error_m)} mm off"
+                if self.ok
+                else f"NOT reached: {_mm(self.solve_error_m)} mm off"
+            )
+        )
+
+
+def plan_move(
+    model: XleRobotModel, view: WristView, move_root: Sequence[float], label: str = ""
+) -> WristMove:
+    """The joints that move the gripper by `move_root` (m, root frame) from where `view` saw it, its turn kept."""
+    move = np.asarray(move_root, dtype=np.float64)
+    clipped = bool(np.linalg.norm(move) > MAX_STEP_M)
+    if clipped:
+        move = move * MAX_STEP_M / np.linalg.norm(move)
+    target = view.root_from_pinch.copy()
+    target[:3, 3] += move
+    ik = ArmIK(model, view.arm, {view.arm: dict(view.arm_pose)})
+    solution = ik.solve_frame(
+        target,
+        target[:3, :3],
+        STEP_ROTATION_TOLS_DEG,
+        position_tol=STEP_POSITION_TOL_M,
+        init=ik.radians(view.arm_pose),
+        position_bound=3 * STEP_POSITION_TOL_M,
+    )
+    error = float(np.linalg.norm(solution.root_from_pinch[:3, 3] - target[:3, 3]))
+    return WristMove(view, move, target, solution.joints, error, bool(solution.ok), clipped, label)
+
+
 def run_alignment(
-    client: "FelixClient", model: XleRobotModel, alignment: Alignment, max_vel: float = STEP_VEL
+    client: "FelixClient", model: XleRobotModel, alignment: "Alignment | WristMove", max_vel: float = STEP_VEL
 ) -> WristView:
     """Make the step (`alignment.joints`), hold there, and return the wrist view after it (with the expectation)."""
     view = alignment.view
@@ -606,6 +655,8 @@ def run_alignment(
         status, note = move_closely(client, key, alignment.joints, max_vel)
         client.keep_holding()
     after = wrist_view(model, client.wrist_capture(view.arm, after=status.get("finished_at")))
+    if isinstance(alignment, WristMove):  # no object measured: no expectation
+        return replace(after, step_note=note)
     # where the object's center should now appear: fixed in the root frame, seen from after
     center_root = _apply(view.root_from_pinch, alignment.object_pinch[None, :])[0]
     expected = after.camera.project(_apply(np.linalg.inv(after.root_from_camera), center_root[None, :]))[0]

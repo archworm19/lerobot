@@ -35,6 +35,7 @@ import numpy as np
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 
 from . import (
+    contacts as _contacts,
     execute as _execute,
     grasping as _grasping,
     look as _look,
@@ -45,6 +46,7 @@ from . import (
     wrist as _wrist,
     wrist_scan as _wrist_scan,
 )
+from .contacts import ContactPatches, HoldViews
 from .objects import (
     ArmError,
     ArmPath,
@@ -62,7 +64,7 @@ from .objects import (
 from .render import contact_sheet as _contact_sheet, render as _render  # the package re-exports `render`
 from .sfm import SfmResult
 from .workspace import Workspace
-from .wrist import Alignment, WristPoint, WristView
+from .wrist import Alignment, WristMove, WristPoint, WristView
 from .wrist_scan import ScanPoint, WristScan
 
 if TYPE_CHECKING:
@@ -819,6 +821,71 @@ def sfm_torch(
 
 
 @tool(Effect.SOFTWARE)
+def wrist_contacts(
+    h: Harness,
+    views: HoldViews | WristView,
+    box: Sequence[float],
+    band: Sequence[float],
+    radius: float | None = None,
+    gap: float = _contacts.GAP_M,
+    into: float = _contacts.INTO_M,
+    table_z: float | None = None,
+) -> ContactPatches:
+    """Where the jaws would touch the object, and the move that gets them there, from the wrist camera at a hold.
+
+    `views`: `wrist_hold_views`' frames (a short wrist roll), or one `wrist_look` when too close to roll. `box`: (u0, v0,
+    u1, v1) around the graspable part in the current frame (the body, not a cap or a lid); `band`: (low, high) its
+    heights above the table (m); `radius` (m) if known (thin objects' free fits run wide). `table_z`: the table's height
+    (m, root frame, from the head's depth) sets the scale of a hold's views; without it, and always for a single
+    view, the fixed finger does (it must be in the picture).
+
+    Depth Anything 3 gives dense depth on every frame (posed by the arm's joints), an upright cylinder is fitted to the
+    graspable part, and its widest chord in the jaws' closing plane gives the contacts. The move puts that chord `into`
+    the fingers (m) and the fixed finger `gap` (m) from its contact, both relative to where the jaws are now; plan it
+    with `plan_wrist_move`. The description says the cylinder, how far beyond the fingertips the chord is, both
+    contacts along the closing line (+ toward the moving jaw) and the scale; `render_contacts` draws it. Re-measure
+    after every move (a measurement carried through the arm's model over centimeters goes wrong). Nothing moves.
+    """
+    _aligned_since(h, views, "the views")
+    return _contacts.contact_patches(h.model, views, box, band, radius, gap, into, table_z)
+
+
+@tool(Effect.SOFTWARE)
+def render_contacts(h: Harness, contacts: ContactPatches) -> np.ndarray:
+    """The current wrist frame with `wrist_contacts`' evidence drawn on it.
+
+    The box (white), the points used (yellow), the fitted cylinder (orange rings at the band's ends), the fixed (cyan)
+    and moving (magenta) contacts at the widest chord, and the closing line now (green). Nothing moves.
+    """
+    return contacts.image
+
+
+@tool(Effect.SOFTWARE)
+def plan_wrist_move(
+    h: Harness,
+    view: WristView | HoldViews,
+    contacts: ContactPatches | None = None,
+    move_m: Sequence[float] | None = None,
+    fraction: float = 1.0,
+) -> WristMove:
+    """A small move of the gripper from where `view` saw it (a hold's: its current view), solved for `align_step`.
+
+    `contacts`' move (times `fraction`: e.g. 0.5 to stop short and look again), or `move_m` (m, root frame: e.g.
+    straight up, or forward with no drop toward the table). The gripper's turn is kept; at most 3 cm (more is clipped
+    and said). Nothing moves.
+    """
+    _fresh(h, view, "the wrist view")
+    if contacts is not None:
+        _fresh(h, contacts, "the contacts")
+    if (contacts is None) == (move_m is None):
+        raise ValueError("give either the contacts or a move")
+    move = np.asarray(move_m, dtype=np.float64) if move_m is not None else fraction * contacts.move_root  # type: ignore[union-attr]
+    label = f"{fraction:g} of the contacts' move" if contacts is not None else "the move given"
+    now = view.views[view.current] if isinstance(view, HoldViews) else view
+    return _wrist.plan_move(h.model, now, move, label)
+
+
+@tool(Effect.SOFTWARE)
 def scan_views(h: Harness, views: Sequence[WristView], method: str = "light", current: int = -1) -> WristScan:
     """A wrist scan of `views` already taken (one arm's frames from different poses): structure from motion over them.
 
@@ -1122,17 +1189,27 @@ def wrist_scan(
 
 
 @tool(Effect.MOVE_ARM)
-def align_step(h: Harness, alignment: Alignment, max_vel: float = _wrist.STEP_VEL) -> WristView:
-    """Make one alignment step (`plan_alignment`): a small move of the arm, which then holds there.
+def wrist_hold_views(h: Harness, arm: str, rolls_deg: Sequence[float] = (-15.0, 15.0)) -> HoldViews:
+    """At a hold: a wrist frame now, at each wrist roll of `rolls_deg` (deg) about where the wrist is, and back.
+
+    Only the wrist roll moves (the fixed fingertip is on its axis; the moving jaw swings ~1 cm per 15 deg: not when
+    the jaws are already around the object). For `wrist_contacts`. Moves the arm: a person approves first.
+    """
+    return _contacts.hold_views(h.client, h.model, arm, rolls_deg)
+
+
+@tool(Effect.MOVE_ARM)
+def align_step(h: Harness, alignment: Alignment | WristMove, max_vel: float = _wrist.STEP_VEL) -> WristView:
+    """Make one small move (`plan_wrist_move`, or `plan_alignment`): the arm moves, then holds there.
 
     Returns the wrist view after it, which also says where the object's center should appear if the step went as
     planned (`render_wrist` draws it): measure again with `plan_alignment` on it. Everything seen before becomes
     stale. Moves the arm: a person approves first, seeing the step.
     """
-    view = (
-        alignment.view
-    )  # its center may be older (`triangulate_wrist`): the view it was planned from must be fresh
-    if h.ws.id_of(view) is None or h.ws.is_stale(view):
+    # an alignment's center may be older (`triangulate_wrist`): the view it was planned from must be fresh; a move's
+    # view may be a hold's (not recorded on its own): the move itself must be
+    source = alignment if isinstance(alignment, WristMove) else alignment.view
+    if h.ws.id_of(source) is None or h.ws.is_stale(source):
         raise NotStartedError("this alignment comes from before the arm last moved: look and measure again")
     return _wrist.run_alignment(h.client, h.model, alignment, max_vel)
 
