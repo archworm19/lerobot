@@ -877,8 +877,9 @@ only they used (`execute.arm_error` and `ArmError`, `grasping.refine`, `wrist_sc
 | `scan_locate`, `scan_find` | sparse depth; never used on the robot | DA3's dense depth |
 | `refine`, `arm_error` | the head's re-measure at the hold, through the joints | the wrist refines (DA3 at the hold) |
 
-Also removed: `scan_scale`'s width path (bowl7: x1.6 from a wrong width; the table path stays). Still deprecated, a
-decision pending: `plan_alignment`'s
+Also removed: `scan_scale`'s width path (bowl7: x1.6 from a wrong width; the table path stays). Kept for now and
+marked deprecated in `api.py` (2026-11-09): `plan_alignment` (for a given move, `plan_wrist_move` does it), and the
+structure-from-motion tools (`sfm_torch`, `wrist_scan`, `scan_views`, `scan_scale`, `render_scan`). `plan_alignment`'s
 measurement from marked edges (depth from the width, `center`, `sidestep_m`, `hinge_gain`: superseded by the DA3
 checkpoint; as the planner of a given move, `nudge_m`, it stays; `wrist.triangulate`, no longer a tool, stays
 for its `center` until then). Outside the harness: `checks/hil_wrist_sfm.py`'s

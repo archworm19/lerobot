@@ -669,7 +669,13 @@ def render_wrist(
     return _wrist.render_wrist(h.model, view, pick, marks, labels, midline_top, midline_sides, object_axis)
 
 
-@tool(Effect.SOFTWARE)
+_SFM_DEPRECATED = "structure from motion is not needed at a hold: DA3 posed by the arm's joints does as well (object_grasping.md 7); use wrist_hold_views and wrist_contacts"
+
+
+@tool(
+    Effect.SOFTWARE,
+    deprecated="measuring from marked edges is superseded by wrist_contacts; for a given move, plan_wrist_move (object_grasping.md 7)",
+)
 def plan_alignment(
     h: Harness,
     view: WristView,
@@ -728,7 +734,7 @@ def plan_alignment(
     )
 
 
-@tool(Effect.SOFTWARE)
+@tool(Effect.SOFTWARE, deprecated=_SFM_DEPRECATED)
 def sfm_torch(
     h: Harness, views: Sequence[WristView], prior_mm: float = _sfm.PRIOR_MM, prior_deg: float = _sfm.PRIOR_DEG
 ) -> SfmResult:
@@ -811,7 +817,7 @@ def plan_wrist_move(
     return _wrist.plan_move(h.model, now, move, label)
 
 
-@tool(Effect.SOFTWARE)
+@tool(Effect.SOFTWARE, deprecated=_SFM_DEPRECATED)
 def scan_views(h: Harness, views: Sequence[WristView], method: str = "light", current: int = -1) -> WristScan:
     """A wrist scan of `views` already taken (one arm's frames from different poses): structure from motion over them.
 
@@ -824,7 +830,7 @@ def scan_views(h: Harness, views: Sequence[WristView], method: str = "light", cu
     return _wrist_scan.scan_views(views, method, current)
 
 
-@tool(Effect.SOFTWARE)
+@tool(Effect.SOFTWARE, deprecated=_SFM_DEPRECATED)
 def scan_scale(
     h: Harness,
     scan: WristScan,
@@ -839,7 +845,7 @@ def scan_scale(
     return _wrist_scan.scale_from_table(scan, table_z)
 
 
-@tool(Effect.SOFTWARE)
+@tool(Effect.SOFTWARE, deprecated=_SFM_DEPRECATED)
 def render_scan(
     h: Harness,
     scan: WristScan,
@@ -981,7 +987,7 @@ def wrist_look(h: Harness, arm: str) -> WristView:
     return _wrist.wrist_view(h.model, h.client.wrist_capture(arm))
 
 
-@tool(Effect.MOVE_ARM)
+@tool(Effect.MOVE_ARM, deprecated=_SFM_DEPRECATED)
 def wrist_scan(
     h: Harness,
     arm: str,
