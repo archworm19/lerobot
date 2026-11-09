@@ -293,7 +293,7 @@ records the servo signs to match. The URDF's camera is a generic `head_camera_li
 
 ## The rework: one joint calibration of the head, the arms and the wrist cameras (design, 2026-11-09)
 
-Branch `calibration_rework`. **Status: design; nothing built.** It replaces how the model is calibrated, so it is
+Branch `calibration_rework`. **Status: design; built so far: the boards (`calibration/boards.py`, below).** It replaces how the model is calibrated, so it is
 built beside the current pipeline (`collect` + `xle_fit`, then `wrist_camera`'s pose step) and replaces it only once
 it passes the checks at the end of this section.
 
@@ -346,6 +346,12 @@ the fingers as well as to the arm.
   ChArUco board, an ArUco grid, ...) gives, per picture, the points it found as (id, pixel), and the board gives each
   id's position on it. The fit takes whatever subset each view found: a partial board, or a different number of
   points in each view and camera, needs nothing special (the residuals are per point, not per view).
+  **Built** (`calibration/boards.py`, tests `test_boards.py`): `Detection` (ids, pixels), `Checkerboard` (the
+  current one's detection, moved; `wrist_camera.Board` is it) and `CharucoBoard`, each with its points, `detect`,
+  `readings` (two for a symmetric checkerboard), a printable `image`, and `parse_board` / `board_from_dict`;
+  `board_pose` (PnP from any detection). On synthetic views (30-45 cm, tilted) the points land within 0.2-0.3 px of
+  the truth, a ChArUco board half hidden still gives its corners. OpenCV's ChArUco corners alone sat 0.44 px off in
+  x and y at any square size (as if half a pixel): they are refined again on the picture (`cornerSubPix`, 5 x 5).
 - **Every point is a residual**, in each camera that sees it: its pixel against the projection of the board's
   corner through the whole chain (the head: root -> head joints -> camera mount -> RealSense lens; the wrist: root ->
   arm mount -> joints -> `gripper_from_camera` -> wrist lens), with the board's pose a shared unknown. Not the
