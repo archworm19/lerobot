@@ -291,6 +291,149 @@ records the servo signs to match. The URDF's camera is a generic `head_camera_li
 - Lock with the uv version CI pins (`UV_VERSION` in `.github/workflows`, 0.11.30), e.g.
   `uvx --from uv==0.11.30 uv lock`: other versions rewrite the whole lock file's format.
 
+## The rework: one joint calibration of the head, the arms and the wrist cameras (design, 2026-11-09)
+
+Branch `calibration_rework`. **Status: design; nothing built.** It replaces how the model is calibrated, so it is
+built beside the current pipeline (`collect` + `xle_fit`, then `wrist_camera`'s pose step) and replaces it only once
+it passes the checks at the end of this section.
+
+### Why
+
+The current pipeline calibrates in two steps with the first frozen: the clicks fit the arm and head, then
+`wrist_camera` fits each wrist camera's pose on the gripper from views of a board, holding the arm's model fixed
+(`fit_extrinsics`: only the camera's pose and the board's are free). The arm's errors had nowhere to go but into the
+camera's pose:
+
+- **On the robot:** the right camera's pose came out 7.8 deg off (bowl5: the drawn fingertips 34-51 px from the
+  real ones), and the script's own numbers (settled, ~1 px) did not show it. A fingertip fit at one arm pose
+  (`urdfs/xle_calib_1008_wrist2.urdf`) fixed it; the board's fit, refitted on hil3's views, landed 18 mm and 5.7 deg
+  from it (`object_grasping.md` 6.3).
+- **On the saved board data** (a scratch test, 2026-11-09: three board placements, each seen once by the head with
+  the arms at rest and by the right wrist camera from 5-22 arm poses, 32 in all, with the calib1007 clicks):
+  - With the current model, the board as the wrist sees it is tilted 5.2-5.7 deg from the board as the head sees it,
+    in all three placements.
+  - With the arm frozen, no camera pose and board pose satisfy both cameras: the head's corners stay 5.4 px off.
+  - With the arm's parameters free, both fit (the head 0.6 px, the wrist 1.4 px): the cameras agree once the arm can
+    move.
+  - But that data cannot calibrate. The October clicks then fit at ~4 px instead of 2 (a month apart). The free
+    parameters trade off, the mounts and the wrist roll's origin moving 7-25 mm from one variant of the fit to the
+    next (one head view per placement, from nearly one head pose). And the camera's pose came out 20 mm and 4 deg
+    from the fingertip fit in every variant: the board places the camera against the arm's chain, the fingertips
+    against the fingers, and the two disagree when the gripper's geometry between them is off (the fixed tip's
+    offset moved ~6 mm in the free fits).
+
+So: one fit with everything free, on data collected for it in one session, with observations that tie the camera to
+the fingers as well as to the arm.
+
+### The stages
+
+1. **The gripper's opening** (`calibration.gripper_step`, as now: calipers on the fingertips at several
+   `gripper.pos`): the map from `gripper.pos` to the jaw's angle. It depends on no camera and not on the arm's model
+   (only the hinge's radius is compared with the model's, as a warning), so it comes first, and the joint fit uses it
+   to place the moving tip at any opening.
+2. **The robot model, jointly, one arm at a time** (the head and the board shared; each arm's session adds its own
+   unknowns, and a refit takes every session, as `xle_fit` does with the clicks of both arms now):
+   - a. **Each wrist camera's focus and lens** (`calibration.wrist_camera`'s first two steps, as now). The lens fits
+     289 hand-held views to 0.64 px and passed every check (`object_grasping.md` 6.3); it stays fixed in the joint
+     fit. The head camera's lens is the RealSense's factory one.
+   - b. **Board views by both cameras** (new): see below.
+   - c. **The fingertips, seen by both cameras at once** (new; replaces the clicks of `collect`): see below.
+   - d. **One fit** of everything (an extension of `xle_fit`), then the checks.
+
+### 2b. The board, seen by the head and a wrist camera
+
+- **Any board, any number of points.** The detection is behind one interface: a board kind (a checkerboard, a
+  ChArUco board, an ArUco grid, ...) gives, per picture, the points it found as (id, pixel), and the board gives each
+  id's position on it. The fit takes whatever subset each view found: a partial board, or a different number of
+  points in each view and camera, needs nothing special (the residuals are per point, not per view).
+- **Every point is a residual**, in each camera that sees it: its pixel against the projection of the board's
+  corner through the whole chain (the head: root -> head joints -> camera mount -> RealSense lens; the wrist: root ->
+  arm mount -> joints -> `gripper_from_camera` -> wrist lens), with the board's pose a shared unknown. Not the
+  board's pose solved per view and compared (the hand-eye way): pixels keep the information a pose throws away (how
+  well each direction is seen, the distortion at the picture's edges, partial boards), weigh every view by what it
+  really constrains, and are what both cameras measure. The test above already fitted corners this way.
+- **The board stays put** for a set of views (one placement), and the head need not see it at the same instant as the
+  wrist: the board's pose is one unknown for the placement, pinned down by every view of it. What has to be
+  simultaneous is only what moves: the gripper's pose, seen by the head (2c) and set by the joints at that instant.
+- **The arm in the head's way.** The head sees the board over or beside the arm, not through it, and the wrist
+  camera looks down at it from 15-30 cm: a board right under the gripper is hidden from the head. So:
+  - **A ChArUco board** (a checkerboard with an ArUco marker in each white square; OpenCV's `cv2.aruco`, in our
+    OpenCV 4.13), as the first board kind after the checkerboard: each corner is identified by the markers around
+    it, so a board half hidden by the arm still gives the corners it shows, and the symmetric board's two readings
+    (`orient_views`) go away. A new board to print.
+  - **The views planned for both cameras** (as `views.py` plans the clicks): arm poses where the wrist camera sees
+    the board, aimed so the gripper is off to the side of it from the head's side, and the head turned at each so
+    the board and the gripper are both in its picture; the model (and the arm's skeleton, `arm_path`) predicts what
+    the arm hides. Views where the head sees too little of the board still count for the wrist.
+  - **Head views of the board on their own:** with the arm moved away, from several head poses (the pan and tilt
+    varied): they fix the board's pose and the head's joints apart from the arm's.
+  - **Two or three placements**, across where the arm works (in front, to each side, near and far), so the arm's
+    parameters are seen from different directions (the test's single head pose per placement let them trade off).
+- **Depth:** the RealSense's depth on the board is a check, not a residual (dark, shiny and near parts read poorly;
+  under ~35 cm it reads nothing: jnt1).
+
+### 2c. The fingertips, by both cameras at once
+
+Clicks are still worth it: the board ties the cameras to the arm's chain, but only something on the fingers ties
+them to the fingers (where the grasp is), and the gripper's geometry between the chain and the fingertips is where
+the test found disagreement. What changes:
+
+- **Each camera clicks the tip on the face it sees, at the same instant.** The two cameras cannot see the same
+  point: the fingers are ~1 cm thick, the head sees the bottom face's tip (the pinch point as calibrated now) and the
+  wrist camera the top face's. So the person clicks the fixed tip (and the moving tip, at a few openings: it tests
+  the hinge and stage 1's map) on the face each camera sees, in the head's picture and the wrist camera's, shown
+  side by side. The two points are tied by the gripper's geometry: the same tip, one thickness apart along the
+  hinge, the axis square to the grasp plane (the pinch frame's y; `JAW_THICKNESS_M`, `wrist_face`). The thickness
+  is a parameter with a tight prior (1.0 +- 0.1 cm, measured). Each click is a residual through its own chain: the
+  head's (the arm's model) and the wrist's (its pose on the gripper). Together they tie the two chains at the
+  fingers, which the board alone does not.
+- **The model's prediction drawn in every view** as the fit improves (as `collect` does now), so a bad click or a
+  wrong model shows at once in all of them.
+- **A gripper sweep at a few poses** in the wrist camera alone (the moving tip's arc, the fixed tip, points along the
+  fixed finger's face): the fingertip fit that fixed the right camera, now one more set of residuals.
+- **Later, markers:** small colored dots or tiny ArUco markers on the fingers' faces, found automatically in both
+  cameras; the fit does not change.
+
+### 2d. The fit
+
+The unknowns: the model's estimates (`default_parameters`: the head, the camera mount, each arm's mount, joint zeros
+and origins and tip offset), each wrist camera's pose on its gripper (6), each board placement's pose (6) and the fingers' thickness, with
+the current priors (`SIGMAS`); the lenses fixed. The residuals: board points (head, wrist), fingertip clicks (head:
+the bottom face, wrist: the top face, one thickness apart), the sweep's tips (wrist), the priors. Huber, as now. Identifiability to watch:
+
+- **The wrist roll's zero against the camera's turn on the gripper:** both turn the camera about the roll axis, and
+  the fixed tip sits on that axis. Only the moving tip and points along the finger (off the axis) and the head's view
+  of the fingers tell them apart.
+- **The arm's mount against the head camera's mount:** both shift what the head sees of the arm; head views at varied
+  head poses and board views separate them (the test, from one head pose, could not).
+- The posterior covariance and the learned column (as now) say what was determined; poses the views missed show up
+  in the checks, not in the fit's residuals.
+
+### Checks before it replaces the current calibration
+
+1. **Held-out views:** the fingertips predicted in both cameras at poses left out, near the click noise (2-3 px in
+   the head; a few px in the wrist), and the board's corners likewise.
+2. **The board's tilt:** the wrist's and the head's agree within ~0.5 deg (5.2-5.7 deg now).
+3. **Motion:** a move of a few cm along the approach, planned and run, measured by the head's depth and the wrist
+   camera; today it falls ~1 cm short (bowl7, bowl8). The wrist roll's travel against the head's ICP (4-6% more
+   than the model now).
+4. **A session:** `wrist_contacts` and a pick on the robot with the new calibration, nothing patched by hand.
+
+### What it replaces, once it passes
+
+`collect`'s pinch-point clicks (2c does them in more views), `wrist_camera`'s pose step and `fit_extrinsics`
+(`calibrate_extrinsics`, `orient_views`, and their tests), the hand patches of the camera's pose
+(`urdfs/xle_calib_1008_wrist*.urdf`), and `checks/hil_wrist_sfm.py`'s `handeye-*`. The output stays one
+`calibration.urdf` (`XleRobotModel.save`), so the harness does not change.
+
+### Open questions
+
+- The clicking window: the head's picture and the arm's wrist camera's, side by side (one arm at a time).
+- How many views and placements: simulate first, as was done for the clicks (`Trusting a result`, item 5).
+- Whether the head's lens needs fitting too (the RealSense's factory intrinsics, unverified at the picture's edges).
+- Gravity sag: the board views have the arm still and unloaded; a pick's arm is loaded. Separate (`open_issues.md`
+  item 16).
+
 ## Not done yet, and open questions
 
 - **Runtime:** projecting planned trajectories into the image with the calibration (`model.project`), and a
