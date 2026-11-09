@@ -1,6 +1,6 @@
 # Object-centric grasping (experiment)
 
-**Status: phases A-C built and tried on the robot (bowl3, bowl4); the wrist-camera alignment loop built and tried (bowl5/bowl6, 2026-11-08: centered, not picked; section 6); next, active sensing with the wrist camera: a scan, an approach sweep and a grasp tool (section 6.1)** (results below the phase table). Built: the primitives
+**Status: phases A-C built and tried on the robot (bowl3, bowl4); the wrist-camera alignment loop built and tried (bowl5/bowl6, 2026-11-08: centered, not picked; section 6); bowl7 and bowl8 picked and placed with the head planning and the wrist refining by DA3 (section 7: what worked and what did not)** (results below the phase table). Built: the primitives
 (`harness/primitives.py`), the claw mapping and the thin `grasp_candidates` (`harness/grasping.py`),
 `ArmIK.solve_frame` (`harness/reach.py`). It changes how the harness plans a grasp: today the model
 names a gripper pose (a point and pitch / heading / roll in the root frame) and searches for a good one itself; here
@@ -701,8 +701,27 @@ from bowl5's patch.
   deg) did not change it, so not the camera's place on the gripper). `scan_scale` sets it from the scene: the table's
   height by the head's depth (x1.14 here; relies on the model only for the camera's height now) or the object's
   width from the head's fit (independent of the arm). Scaled, the scan's table sits 2.4 mm from the board's plane.
-- Open: the cause of the ~9% (the wrist camera's focal length, the wrist joints' geometry). A test: the head and the
-  wrist camera see the board together, the head's depth giving its true distance against the wrist's PnP.
+- **The cause of the ~9%, tested (jnt1, jnt2, roll1, lens2; `checks/hil_wrist_sfm.py joint-record`, `lens-record
+  --show`, `lens-check`):** the head and the wrist camera together, the arm turning only its wrist roll.
+  - Distances to the board agree: the head's depth (on the wrist camera's module; the head must be >= ~35 cm from it,
+    jnt1's 25 cm was inside the RealSense's range), the wrist's PnP and the model within 3-4%.
+  - The camera's travel per roll: the head's depth (ICP of the module's points, the same answer from starts 13% apart)
+    4-6% more than the model; the wrist's PnP 14% more (the board's symmetric corner order chosen consistently),
+    10% with the lens refit on 289 hand-held views (the current lens fits them to 0.64 px, the edges included: the
+    lens is fine). So the arm's wrist roll is close to the model (~5%), and the wrist's PnP overstates sideways
+    motion by another 5-8% for a reason not found: a poor referee for scale (hil3's board scores carry it).
+  - Structure from motion's scale, examined offline: the adjustment is unbiased on synthetic data (an exact model:
+    1.000; a model off on average: its average). On hil3 the scale depended on the prior's strength (0.96 of the
+    model's moves with a 1 mm prior, 0.87 with 20 mm): the images' error is the same at any scale, the prior pulls on
+    it weakly, and the solver drifted along it and stopped. Fixed exactly (`sfm._model_scale`: after the adjustment,
+    the one factor that best matches the cameras' spread to the model's; the fit is unchanged): 0.958 at any prior.
+    What is left on hil3, the table 11% too near before `scan_scale`, is the model's own motion: the head measured
+    the wrist's rolls 4-6% longer than modeled, and the flex frame's ratio is the lowest (0.88: the wrist flex is off
+    more than the roll). So a scan at the model's scale is short; `scan_scale` sets it from the scene (hil3: 1.005,
+    the table within 2.4 mm). A fix at the source: calibrate the wrist joints' geometry (their zero offsets and the
+    links' lengths) from roll and flex motions seen by the head.
+  - A detour, recorded: the roll motions by PnP alone asked for the camera 1 cm further along the hinge; the person's
+    ruler (6.5 cm from the lens to the fingers' camera-side plane; wrist2: 6.7) and the head's ICP said no.
 
 **What comes out:** a table per scenario (each method's motion error, scale, table, object position; the head's
 object positions), and the choice of method and sweep. Smoke tests from it: the recorded frames are images, which do
@@ -724,3 +743,81 @@ adjustment on them and check its error against the board's.
   close slower as well (the fourth chapstick tipped when closed off center).
 - Whether to keep a head-camera check of anything at the hold (the hand's neighbors, the support) that the wrist
   camera cannot see.
+
+## 7. What worked and what did not (2026-11-08, after bowl5-bowl8)
+
+bowl7 (the bottle) and bowl8 (the chapstick, never touched) were picked and placed with the pattern below; bowl5/6
+were not. Details and numbers: [sessions.md](sessions.md), sections 6-6.3 above.
+
+### The pattern that worked
+
+0. **The head plans, the wrist refines.** The head camera's depth finds the object and plans the grasp and the attack
+   point; at the hold, the wrist camera measures the object in the jaws' own frame and plans the last centimeters.
+1. **Primitives fitted to the graspable part** (`fit_cylinder`, and at the wrist a cylinder on DA3's points). The
+   graspable part is the model's (the VLM's) choice: the body, not the cap (bowl7's head fit took in the cap, 3.8 cm
+   against the body's 2.9, and every plan and overlay inherited it). Hold the radius when it is known and the free
+   fit disagrees.
+2. **The head's depth for the targets:** the object's place and the initial grasp (within 1-2 cm: good enough to get
+   the wrist camera there).
+3. **A short wrist roll + DA3 at a hold:** a +-15 deg roll (3 frames, the wrist only), posed by structure from motion
+   (`sfm_torch`: DISK + LightGlue) and scaled by the head's table height (`scan_scale`); DA3-SMALL (isolated
+   environment: its packaging conflicts with ours) gives dense depth on every frame; a cylinder fitted to all the
+   graspable part's points (the table measured locally, the object's pixels by color, DA3's flying pixels at depth
+   edges and its least confident third dropped); the contact patches where the jaws' closing plane meets it
+   (`harness/scratch/da3_check.py`). bowl7: radius 1.52 cm (1.45 measured), "advance 1.9 cm": it worked.
+4. **The final attack from DA3 with the fingers and the table as rulers:** too close to roll, DA3 on the current frame
+   alone, scaled by points along the fixed finger (rigid to the camera), placed the chapstick at the fingertips with
+   the fixed finger 8 mm clear, as the person saw.
+5. **For this gripper (one fixed jaw):** the closing line on the object's middle, then either the shoulder pan to
+   press the fixed finger on (bowl7; the wrist roll does not move the fixed tip: it is on the roll axis) or, for an
+   object that must not be nudged, the fixed finger a few mm clear (bowl8); then a firm close (the target 6-8 of
+   `gripper.pos` past contact: held, where 1.3 had not); the lift test judged by the object's size in the wrist picture.
+6. **Supporting fixes that mattered:** the fingers' 1 cm thickness (the wrist camera sees their other face); plans aimed
+   1 cm high against the sag; joints left short pushed again (`align_step`); the 4 deg settle tolerance when loaded.
+
+### What did not work
+
+1. **Structure from motion as a depth source:** triangulating the object over the arm's moves (bowl6: 10-20% depth
+   errors, the arm's motion error), and sparse-point fits on white objects (`scan_fit_cylinder`, `scale_from_width`:
+   wrong widths). Its scale is the arm model's (~5% short for the wrist, more for the elbow). **As a pose provider for
+   DA3 it did work** (above), with the learned matcher.
+2. **SIFT matching (`sfm_light`)** on the robot's frames: 16 px off the board's truth, 22-26 inliers per pair (the
+   learned matcher: ~1 px, 750-1100).
+3. **The image and the closing line alone:** rigid to the gripper and right about "not far enough", but from a camera
+   looking nearly straight down they could not say how far (nearer and lower look alike); every last move needed
+   DA3's depth (or the person) to complete the picture.
+4. **Carrying a measurement through the arm's model over centimeters:** the scan's fit 6 cm of moves away (bowl7), the
+   checkpoint's fit 3.4 cm away (bowl8: it put the chapstick through the fixed finger). Re-measure at the pose.
+5. **Depth from the object's width** (when the width was wrong), **single-frame DA3 scaled by two fingertips** (20%
+   apart; many points along a finger worked), **the board hand-eye fit over arm poses** (it absorbs the arm model's
+   errors), **the jaws' reading as a grip check** (a chord 4 mm off the middle reads 0.4 of `gripper.pos` less).
+
+### Still open
+
+- **Moves along the approach fall ~1 cm short** over a few cm (bowl7, bowl8 twice): the wrist joints' geometry
+  (calibrate from head-observed roll and flex motions), or plan the last centimeters from a fresh view (which works).
+- **DA3 in the harness:** a local service in its own environment (the person's idea: started on first use, shut down
+  when idle), the checkpoint as a tool with the contact shift's sign computed (bowl8: applied by hand with the wrong
+  sign once), and tests.
+- **The VLM's part:** choosing the graspable part (the box, the height band) and judging the overlays; the person did
+  the final checks in bowl7/8.
+
+### Deprecated by these findings (2026-11-08)
+
+Marked in `harness/api.py` (`@tool(..., deprecated=...)`: shown in the model's tool documentation and logged when
+called); kept for now, to be removed once the DA3 checkpoint is a tool:
+
+| Tool | Why | Instead |
+| --- | --- | --- |
+| `sfm_light` | SIFT's matches failed on the robot's frames | `sfm_torch` (as DA3's pose provider) |
+| `triangulate_wrist` | triangulating over the arm's moves inherits its motion error (bowl6) | DA3 on a short wrist roll |
+| `scan_fit_cylinder` | a sparse silhouette fit: a wrong radius (bowl7) | a cylinder on DA3's points (`scratch/da3_check.py`) |
+| `scan_locate`, `scan_find` | sparse depth; never used on the robot | DA3's dense depth |
+| `refine`, `arm_error` | the head's re-measure at the hold, through the joints | the wrist refines (DA3 at the hold) |
+
+In part: `scan_scale`'s width path (bowl7: x1.6 from a wrong width; the table path stays); `plan_alignment`'s
+measurement from marked edges (depth from the width, `center`, `sidestep_m`, `hinge_gain`: superseded by the DA3
+checkpoint; as the planner of a given move, `nudge_m`, it stays). Outside the harness: `checks/hil_wrist_sfm.py`'s
+`handeye-record` / `handeye-fit` (the board's hand-eye fit over arm poses absorbs the arm model's errors: not for the
+camera's pose on the gripper; the fingertip fit is). Still current: `wrist_look`, `render_wrist` (the closing line,
+the midline), `wrist_scan` / `scan_views` / `sfm_torch` (poses for DA3), `scan_scale` (the table), `align_step`.

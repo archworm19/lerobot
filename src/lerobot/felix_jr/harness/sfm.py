@@ -475,6 +475,7 @@ def refine(
             prior_mm / 1000,
             np.radians(prior_deg),
         )
+        refined, pts = _model_scale(refined, pts, model)
         rms_after = _rms(refined, pts, obs_frame, obs_point, obs_xy, fx)
         return refined, pts, len(obs_frame), rms_start, rms_after
 
@@ -502,6 +503,25 @@ def refine(
         camera_from_pinch,
         started,
     )
+
+
+def _model_scale(poses: np.ndarray, points: np.ndarray, model: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """`poses` and `points` scaled (about the cameras' centroid) so the cameras' spread best matches the model's.
+
+    The images' error is exactly the same at any scale, so only the prior sets it, weakly: the adjustment drifted along
+    it and stopped there (hil3: 0.96 of the model's scale with a 1 mm prior, 0.87 with 20 mm). This sets it, at no
+    cost to the fit, to the model's (least squares over the cameras' positions about their centroids).
+    """
+    refined = poses[:, :3, 3]
+    wanted = model[:, :3, 3]
+    a, b = refined - refined.mean(axis=0), wanted - wanted.mean(axis=0)
+    if float((a * a).sum()) < 1e-12:
+        return poses, points
+    factor = float((a * b).sum() / (a * a).sum())
+    center = refined.mean(axis=0)
+    out = poses.copy()
+    out[:, :3, 3] = center + factor * a
+    return out, center + factor * (points - center)
 
 
 def _rms(

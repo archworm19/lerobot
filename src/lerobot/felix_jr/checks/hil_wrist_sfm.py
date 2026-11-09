@@ -209,6 +209,141 @@ def joint_record(
     print(f"saved in {out}; the arm back where it was")
 
 
+# ---- the wrist camera's lens (the board held by a person, the arm still) ----------------------------------------
+
+
+def lens_record(name: str, arm: str, seconds: float = 120.0, show: bool = False) -> None:
+    """Stream the wrist camera for `seconds`, keeping each new view of the board (as the calibration does).
+
+    Prints the views kept and what is missing every few seconds; `last.png` in the run's folder is the latest frame.
+    """
+    import time
+
+    from lerobot.felix_jr.calibration.wrist_camera import is_new_view, lens_coverage_missing, view_signature
+
+    out = RUNS / name
+    out.mkdir(parents=True, exist_ok=True)
+    client = api.Harness().client
+    kept: list[list[list[float]]] = []
+    signatures: list[np.ndarray] = []
+    size = None
+    start = last_print = time.time()
+    while time.time() - start < seconds:
+        frame = client.wrist_capture(arm)
+        size = (frame.color.shape[1], frame.color.shape[0])
+        corners = find_board(frame.color, BOARD)
+        if corners is not None:
+            signature = view_signature(corners, size, BOARD)
+            if is_new_view(signature, signatures):
+                signatures.append(signature)
+                kept.append(corners.tolist())
+                cv2.imwrite(
+                    str(out / f"lens_{len(kept):03d}.png"), cv2.cvtColor(frame.color, cv2.COLOR_RGB2BGR)
+                )
+        if show:  # the picture, the board's corners when found, every kept view's outline, the count
+            picture = frame.color.copy()
+            for view in kept:
+                hull = cv2.convexHull(np.asarray(view, dtype=np.float32)).astype(np.int32)
+                cv2.polylines(picture, [hull], True, (0, 160, 0), 1, cv2.LINE_AA)
+            if corners is not None:
+                cv2.drawChessboardCorners(
+                    picture, (BOARD.cols, BOARD.rows), corners.reshape(-1, 1, 2).astype(np.float32), True
+                )
+            text = f"{len(kept)} views, {seconds - (time.time() - start):.0f} s left; q to stop"
+            cv2.putText(picture, text, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(
+                picture, text, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA
+            )
+            cv2.imshow(
+                "lens check: move the board into every corner, tilted, near and far",
+                cv2.cvtColor(picture, cv2.COLOR_RGB2BGR),
+            )
+            if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+                break
+        if time.time() - last_print > 5:
+            cv2.imwrite(str(out / "last.png"), cv2.cvtColor(frame.color, cv2.COLOR_RGB2BGR))
+            reach = np.array([s[:2] for s in signatures]) if signatures else np.zeros((0, 2))
+            corners_hit = sum(
+                bool(((np.abs(reach - c) < 0.18).all(axis=1)).any())
+                for c in ((0.2, 0.2), (0.8, 0.2), (0.2, 0.8), (0.8, 0.8))
+            )
+            print(
+                f"   {time.time() - start:5.0f} s: {len(kept)} views; picture corners reached {corners_hit} of 4; "
+                f"missing: {', '.join(lens_coverage_missing(signatures)) or 'nothing'}",
+                flush=True,
+            )
+            last_print = time.time()
+    if show:
+        cv2.destroyAllWindows()
+    (out / "lens.json").write_text(json.dumps({"arm": arm, "size": size, "views": kept}) + "\n")
+    print(f"{len(kept)} views saved in {out}")
+
+
+def lens_check(name: str, write: str | None = None) -> None:
+    """The current lens on the recorded views (by where in the picture), a refit, and jnt1/jnt2's roll motions with each."""
+    from lerobot.felix_jr.calibration.wrist_camera import calibrate_intrinsics
+
+    info = json.loads((RUNS / name / "lens.json").read_text())
+    arm, size = info["arm"], tuple(info["size"])
+    views = [np.asarray(v, dtype=np.float64) for v in info["views"]]
+    model = XleRobotModel.load(api.MODEL)
+    old = model.wrist_cameras[arm]
+
+    def per_view(camera) -> tuple[np.ndarray, np.ndarray]:
+        errors, edge = [], []
+        for v in views:
+            pose = board_pose(camera, v, BOARD)
+            points = BOARD.points() @ pose[:3, :3].T + pose[:3, 3]
+            uv = camera.project(points)
+            errors.append(float(np.sqrt(np.mean(np.sum((uv - v) ** 2, axis=1)))))
+            center = v.mean(axis=0) / np.array(size)
+            edge.append(bool(np.abs(center - 0.5).max() > 0.25))
+        return np.array(errors), np.array(edge)
+
+    new, _ = calibrate_intrinsics(views, BOARD, size, old.model)
+    print(f"{len(views)} views")
+    for label, camera in (("current lens", old), ("refit on these views", new)):
+        e, edge = per_view(camera)
+        print(
+            f"{label:22s} fx {camera.fx:.1f} fy {camera.fy:.1f} center ({camera.ppx:.1f}, {camera.ppy:.1f}) | reprojection "
+            f"{np.sqrt(np.mean(e**2)):.2f} px; middle {np.sqrt(np.mean(e[~edge] ** 2)) if (~edge).any() else float('nan'):.2f}, "
+            f"near the edges {np.sqrt(np.mean(e[edge] ** 2)) if edge.any() else float('nan'):.2f} ({edge.sum()} views)"
+        )
+    for label, camera in (("current lens", old), ("refit", new)):
+        ratios = []
+        for run in ("jnt1", "jnt2"):
+            if not (RUNS / run / "joint.json").exists():
+                continue
+            frames = json.loads((RUNS / run / "joint.json").read_text())["frames"]
+            cams: list[np.ndarray] = []
+            grips: list[np.ndarray] = []
+            for f in frames:
+                c = find_board(
+                    cv2.cvtColor(cv2.imread(str(RUNS / run / f["image"])), cv2.COLOR_BGR2RGB), BOARD
+                )
+                if c is None:
+                    continue
+                g = model.wrist_camera_pose(arm, model.joint_vector({arm: f["arm_pose"]}))[:3, 3]
+                options = [np.linalg.inv(board_pose(camera, cc, BOARD))[:3, 3] for cc in (c, c[::-1])]
+                if (
+                    cams
+                ):  # the symmetric board: the corner order that keeps the board where the first frame had it
+                    want = np.linalg.norm(g - grips[0])
+                    options.sort(key=lambda p: abs(np.linalg.norm(p - cams[0]) - want))
+                cams.append(options[0])
+                grips.append(g)
+            for a in range(len(cams)):
+                for b in range(a + 1, len(cams)):
+                    ratios.append(np.linalg.norm(cams[b] - cams[a]) / np.linalg.norm(grips[b] - grips[a]))
+        if ratios:
+            print(
+                f"{label:22s} roll motions by PnP / the model: {np.mean(ratios):.3f} +- {np.std(ratios):.3f} (the head's ICP: ~1.03)"
+            )
+    if write:
+        model.with_wrist_camera(arm, replace(new, gripper_from_camera=old.gripper_from_camera)).save(write)
+        print(f"written: {write} (the refit lens, the same pose on the gripper)")
+
+
 # ---- the camera's pose on the gripper, again (a hand-eye fit from the board) ------------------------------------
 
 
@@ -612,6 +747,16 @@ def main() -> None:
     p.add_argument(
         "--height-cm", type=float, default=None, help="the start pose's tip this far above the arm's base"
     )
+    p = sub.add_parser("lens-record", help="keep views of the board held under the wrist camera (no motion)")
+    p.add_argument("name")
+    p.add_argument("--arm", default="right")
+    p.add_argument("--seconds", type=float, default=120.0)
+    p.add_argument(
+        "--show", action="store_true", help="a live window of the wrist camera (run it from your terminal)"
+    )
+    p = sub.add_parser("lens-check", help="the lens on those views, a refit, the roll motions with each")
+    p.add_argument("name")
+    p.add_argument("--write", default=None)
     p = sub.add_parser("analyze", help="score the methods against the board (no robot)")
     p.add_argument("name")
     p.add_argument("--methods", default="light,torch")
@@ -629,6 +774,10 @@ def main() -> None:
     elif args.cmd == "joint-record":
         heights = (args.height_cm / 100,) if args.height_cm is not None else START_HEIGHTS_M
         joint_record(args.name, args.arm, args.skip_head, heights)
+    elif args.cmd == "lens-record":
+        lens_record(args.name, args.arm, args.seconds, args.show)
+    elif args.cmd == "lens-check":
+        lens_check(args.name, args.write)
     elif args.cmd == "handeye-fit":
         handeye_fit(args.name, args.write, [r for r in args.also.split(",") if r])
     else:

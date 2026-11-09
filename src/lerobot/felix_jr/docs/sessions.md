@@ -7,6 +7,82 @@ renders and the workspace log; `session.py log <name>` prints the calls and obje
 (`workspace.pkl`) of the sessions before pen1 (`cable1`, `cable1_new`, `chapstick1`, `desk1`) no longer loads: it
 holds objects removed since (`Plan`, `Reach`) or lacks the call log. Their images and `log.jsonl` still read.
 
+## bowl8 (2026-11-08): the chapstick, by DA3 contact patches, without touching, into the container (done)
+
+**Setup.** The bottle in the container from bowl7; the chapstick (1.75 cm) upright at (-51, 7) cm, near the right arm's
+far reach. The pattern: the head plans, the wrist refines (DA3 on a few views at a hold, a cylinder fitted to the
+graspable part, the contact patches in the jaws' frame); the person: no nudging, the fixed finger close but not touching.
+`harness/scratch/da3_check.py` (`checkpoint`), DA3-SMALL in its isolated environment.
+
+1. **Head:** the body only (below the cap), radius held at the measured 0.875 cm; grasp B (2.7 cm up, pitch -30).
+   The approach stopped at "stage" (the elbow 2.7 deg short of 2.5) with the jaws still closed (their "open" was in
+   that step): re-planned to the attack point with 4 deg, then the jaws opened by hand.
+2. **Checkpoint 1** (a +-15 deg wrist roll, SfM scaled by the head's table, DA3 posed): the whole box first came out
+   "above the table" (the table there sits higher than the view's average): fixed with the table from a ring of
+   pixels around the box, the object's pixels by color (not the wood), and DA3's flying pixels at depth edges and its
+   low-confidence third dropped. The free radius came out 1.3 cm (0.875 measured: the edge filter leaves few points
+   on a thin object), so the radius was held: the widest chord 2.1 cm beyond the tips, 1.2 cm outside the fixed jaw.
+   Moved 1.5 cm sideways, 1.1 cm in.
+3. **Checkpoint 2:** sideways right (the contact 2-3 mm from the fixed jaw, as planned), but the chord 2.05 cm beyond
+   the tips where checkpoint 1 predicted 1.0: along the approach, the arm (or the estimate) fell ~1 cm short.
+   Moved in 2 cm, then 1 cm: by the joints read, done; by the picture (and the person), the chord still at the tips.
+4. **Too close to roll** (the person). Carried through the arm's model from checkpoint 2, DA3's cylinder overlapped the
+   fixed finger by 3.5 mm: impossible (the person saw a gap): measurements carried over 3.4 cm of modelled motion are
+   wrong. **DA3 on the current frame alone, scaled by 10 points along the fixed finger (6% spread):** the chord at
+   the tips, the fixed finger 8 mm from the chapstick. In 5 mm, then horizontally 4.4 mm (along the approach would hit
+   the table: the person), then the sideways correction (first applied with the wrong sign, by me: the contact was on
+   the moving jaw's side of the fixed finger, unlike at checkpoint 1; corrected).
+5. **Close to 2:** the jaws stopped at 3.94 (gripped). Lifted 2 cm: held. Carried at pitch -20 over the container
+   (refitted from a fresh head capture), released: in (the person; the server was shut down after).
+
+### Findings
+
+- **The pattern works on a narrow, light object without touching it:** head plan; at a hold, DA3 on a few views posed by
+  SfM and scaled by the table; a primitive on the graspable part (the radius held when the free fit disagrees); the
+  contact patches; small moves; the person's eye at the last centimeter.
+- **Close in, a single frame scaled by the fingers works** (many points along a finger; two tips did not, bowl7):
+  the last check needs no roll.
+- **Never carry a measurement through the arm's model over centimeters:** re-measure at the pose.
+- **Moves along the approach fall ~1 cm short** over a few cm (twice): plan the last centimeters from a fresh view.
+- **Sign conventions in the contact step** need care: which side of the fixed finger the contact is on decides the
+  shift's direction. Build it into the tool, not by hand.
+
+## bowl7 (2026-11-08): the bottle, by the wrist scan and DA3, into the container (done)
+
+**Setup.** bowl4's scene. Right arm, `urdfs/xle_calib_1008_wrist2.urdf` (the fingers' 1 cm thickness in; plans aimed
+1 cm high, at the fingers' middle), every move approved.
+
+1. **Head:** the bottle fitted 3.8 cm wide (the marked region took in the cap: the body is 2.9 cm, bowl4's measure); grasp
+   from the robot's side at pitch -41, to the attack point.
+2. **`wrist_scan`** (roll +-30, flex +-10, `torch`): 28 of 28 pairs matched, 0.71 px. The scale by the object's width
+   came out x1.60 (the width was wrong, and three marked frames too few); by the table, x1.12. `scan_fit_cylinder`
+   moved the bottle 1.6-2 cm from the head's fit; with a free radius it measured 1.3 cm (set aside then: it was right).
+3. **Revised attack, in by the closing line:** the closing line kept saying "not far enough" and the person agreed. The
+   first close (`gripper.pos` 10) caught the bottle's foot: too low, not far enough onto it.
+4. **The person's strategy for this gripper:** jaws wide, the closing line on the object, then the **shoulder pan** to
+   press the fixed finger onto it (only the moving jaw closes; the wrist roll does not move the fixed tip: it is on the
+   roll axis), then close.
+5. **Depth Anything 3 (DA3-SMALL, an isolated environment; its packaging conflicts with ours):** on the scan's 8 frames
+   with our poses, in 2 s: sharp depth on the bottle, chapstick, jaws, container; the bottle's axis within 5 mm of the
+   wrist fit, its radius 1.30 cm. On one frame scaled by the two fingertips: the tips' scales 20% apart and only 50 of
+   12,000 bottle pixels in the jaws' slab: no good. **On a 3-frame wrist roll at the current pose (poses from SfM,
+   scaled by the table), a cylinder fitted to all 9,238 bottle points: radius 1.52 cm (measured 1.45), the widest chord
+   0.9 cm beyond the fingertips, the fixed finger 1.15 cm from its contact:** "advance 1.9 cm, pan to contact".
+6. **Advance 1.9 cm, pan +0.8 deg, close to 6:** the jaws stopped at 9.05 (a real squeeze, 3 of `gripper.pos`); the person:
+   "a tad low, but will probably work". Lifted 1.65 cm: the bottle kept its place and size in the wrist picture.
+7. **The place:** the carry at pitch -20 (-39 and -30 do not reach over the container with this roll); stopped at
+   "up" (the loaded shoulder 2.8 deg short of 2.5), re-planned from there with 4 deg: released over the container, in.
+
+### Findings
+
+- **DA3 on a few wrist frames at the current pose, posed by SfM and scaled by the table, plus a primitive fitted to all
+  the object's points, gave the contact patches in the jaws' own frame**, and with them the move that worked. Its
+  depth does not go through the arm's model over large moves (the scan pose was 6 cm of modelled motion away).
+- **The object's width must come from its graspable part**: the head's fit took in the cap (3.8 against 2.9 cm), and every
+  overlay inherited it.
+- **Shoulder pan to contact, then close** (the person's): reliable with a fixed jaw.
+- **A firmer close** (target ~6-8 below contact) held where 1.3 had not.
+
 ## bowl5, bowl6 (2026-11-08): the bottle, aligned from the wrist camera (not picked)
 
 **Setup.** bowl4's scene again (the container, the white bottle and the chapstick upright). Right arm; the first

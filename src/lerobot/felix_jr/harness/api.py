@@ -507,7 +507,10 @@ def prepare_execution(
     return _execute.prepare_execution(h.model, poses, grip, pose_tol_deg=pose_tol_deg)
 
 
-@tool(Effect.SOFTWARE)
+@tool(
+    Effect.SOFTWARE,
+    deprecated="the joints through the model; the wrist camera measures the object in the jaws' frame now (object_grasping.md 7)",
+)
 def arm_error(h: Harness, poses: Poses, capture: Capture, label: str | None = None) -> ArmError:
     """Where the arm really is at a hold, against the pose `label` of `poses` it was sent to (default the last).
 
@@ -653,7 +656,10 @@ def plan_pick(
     return _grasping.plan_pick(h.model, candidates[name], candidates.capture, stage_up, lift)
 
 
-@tool(Effect.SOFTWARE)
+@tool(
+    Effect.SOFTWARE,
+    deprecated="the head's re-measure at the hold; the wrist refines now (DA3 at the hold, object_grasping.md 7)",
+)
 def refine(
     h: Harness,
     candidates: _grasping.GraspCandidates,
@@ -728,6 +734,9 @@ def plan_alignment(
 ) -> Alignment:
     """Measure the object in a wrist view against the pick plan, and plan one step that lines the jaws up on it.
 
+    (Its measurement from marked edges, with the depth from the width or `center`, is superseded by the DA3
+    checkpoint (object_grasping.md 7); as a planner of a move given in `nudge_m` it is current.)
+
     `edges`: the object's two sides in `view`, at the height (or place) it is to be grasped, as two pixels [[u, v],
     [u, v]] (mark them on `render_wrist` first). How far away it is matters (the camera is ~7 cm off the jaws'
     line: a depth 10% off is ~7 mm sideways). Pass `center`, the object's center triangulated from two wrist views
@@ -771,7 +780,10 @@ def plan_alignment(
     )
 
 
-@tool(Effect.SOFTWARE)
+@tool(
+    Effect.SOFTWARE,
+    deprecated="SIFT's matches failed on the robot's frames (hil3: 16 px off the board): use sfm_torch",
+)
 def sfm_light(
     h: Harness, views: Sequence[WristView], prior_mm: float = _sfm.PRIOR_MM, prior_deg: float = _sfm.PRIOR_DEG
 ) -> SfmResult:
@@ -829,7 +841,8 @@ def scan_scale(
 ) -> WristScan:
     """A wrist scan with its scale set by something metric in the scene, instead of the arm's model.
 
-    Structure from motion fixes everything but one scale, which comes from the arm's moves as the model has them (on
+    (The width path is deprecated: a wrong width gave x1.6 in bowl7; use the table.) Structure from motion fixes
+    everything but one scale, which comes from the arm's moves as the model has them (on
     the robot ~10% off: 1-2 cm at a grasp's distances). Set it with the object's width (`width`, m: the head's fit, and
     `sides`: its two sides in a few frames, as for `scan_fit_cylinder`; independent of the arm) or the table's height
     (`table_z`, m, root frame: the head's depth on the table; relies on the model only for the camera's height now).
@@ -842,7 +855,10 @@ def scan_scale(
     raise ValueError("give the object's width and its sides, or the table's height")
 
 
-@tool(Effect.SOFTWARE)
+@tool(
+    Effect.SOFTWARE,
+    deprecated="sparse depth, superseded by DA3's dense depth (object_grasping.md 7); untested on the robot",
+)
 def scan_locate(
     h: Harness,
     scan: WristScan,
@@ -862,7 +878,10 @@ def scan_locate(
     return _wrist_scan.locate(scan, frame, uv, frame_b, uv_b, label)
 
 
-@tool(Effect.SOFTWARE)
+@tool(
+    Effect.SOFTWARE,
+    deprecated="sparse depth, superseded by DA3's dense depth (object_grasping.md 7); untested on the robot",
+)
 def scan_find(
     h: Harness,
     scan: WristScan,
@@ -879,7 +898,10 @@ def scan_find(
     return _wrist_scan.find(scan, frame, uv, in_frame, label)
 
 
-@tool(Effect.SOFTWARE)
+@tool(
+    Effect.SOFTWARE,
+    deprecated="a sparse silhouette fit (bowl7: a wrong radius); fit the cylinder to DA3's points (object_grasping.md 7)",
+)
 def scan_fit_cylinder(
     h: Harness,
     scan: WristScan,
@@ -919,7 +941,10 @@ def render_scan(
     return _wrist_scan.render(scan, frames, points, objects)
 
 
-@tool(Effect.SOFTWARE)
+@tool(
+    Effect.SOFTWARE,
+    deprecated="triangulating over the arm's moves inherits its motion error (bowl6); use DA3 on a short wrist roll (object_grasping.md 7)",
+)
 def triangulate_wrist(
     h: Harness,
     view_a: WristView,
