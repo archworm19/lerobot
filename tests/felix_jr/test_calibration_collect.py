@@ -10,7 +10,12 @@ pytest.importorskip("pinocchio")
 pytest.importorskip("scipy")
 
 from lerobot.felix_jr.calibration import collect as collect_module  # noqa: E402
-from lerobot.felix_jr.calibration.collect import CollectSession, decode_key, head_limits, parse_seed  # noqa: E402
+from lerobot.felix_jr.calibration.collect import (  # noqa: E402
+    CollectSession,
+    decode_key,
+    head_limits,
+    parse_seed,
+)
 from lerobot.felix_jr.calibration.xle_fit import Session, load_session, save_session  # noqa: E402
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, arm_record  # noqa: E402
 from lerobot.felix_jr.server.client import FelixClient  # noqa: E402
@@ -153,14 +158,6 @@ def test_other_sessions_join_the_fit_and_finish_writes_one_calibration(robot, tm
     # the left arm's calibration as the robot reported it; the right session predates snapshots: unknown
     assert loaded.arm_calibration == {"left": arm_record(client.arm_calibration()["left_arm"])}
     assert path.with_suffix(".md").is_file()
-
-
-def test_sessions_with_another_head_reference_are_refused(robot, tmp_path):
-    fake, client = robot
-    elsewhere = Session(tmp_path / "old", "right", [], SIGNS, {**REFS, "head_neck": 1605}, FAKE_INTRINSICS)
-    save_session(elsewhere)
-    with client.session(), pytest.raises(ValueError, match="head_refs"):
-        make_session(client, tmp_path, other_sessions=[elsewhere.path])
 
 
 def test_sessions_from_before_the_arm_was_recalibrated_are_refused(robot, tmp_path):

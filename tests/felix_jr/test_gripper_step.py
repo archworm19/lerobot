@@ -122,7 +122,7 @@ def test_the_map_converts_both_ways():
 
 @pytest.fixture
 def client():
-    server = RobotServer(FakeHardware())
+    server = RobotServer(FakeHardware(arm_time_scale=0.02))
     address = server.bind("tcp://127.0.0.1:*")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

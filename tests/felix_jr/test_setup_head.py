@@ -1,4 +1,4 @@
-from lerobot.felix_jr.setup.head import HEAD, run
+from lerobot.felix_jr.setup.head import run
 
 
 class FakeRobot:
@@ -36,10 +36,6 @@ def run_script(robot, answers):
         return next(replies)
 
     return run(robot, ask=ask, say=lambda *a: None), prompts
-
-
-def test_head_order_is_eyes_first_then_neck():
-    assert list(HEAD) == ["head_eyes", "head_neck"]
 
 
 def test_eyes_are_set_up_alone_then_the_neck_is_found_by_scanning_past_the_eyes():

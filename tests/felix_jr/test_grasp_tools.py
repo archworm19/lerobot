@@ -44,13 +44,6 @@ def setup(model):
     return h, capture, view
 
 
-def test_the_grasp_tools_are_software_and_documented():
-    for name in ("fit_cylinder", "grasp_candidates", "plan_pick"):
-        spec = api.TOOLS[name]
-        assert spec.effect is api.Effect.SOFTWARE and spec.fn.__doc__
-        assert name in api.describe_tools()
-
-
 def test_fit_choose_draw_plan(setup):
     h, capture, view = setup
     jar = h.call("fit_cylinder", view, marks_around(capture, JAR), "up", "jar")

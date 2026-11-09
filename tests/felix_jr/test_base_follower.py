@@ -240,19 +240,18 @@ class TestNudgeHead:
 
 
 class FollowingBus(FakeBus):
-    """A fake bus whose head servos reach any goal they are given (or stay put if `stuck`), and whose wheels
-    report the speed they were last commanded."""
+    """A fake bus whose head servos reach any goal they are given, and whose wheels report the speed they were
+    last commanded."""
 
-    def __init__(self, motors, stuck=False, **kwargs):
+    def __init__(self, motors, **kwargs):
         super().__init__(motors, **kwargs)
-        self.stuck = stuck
         self.wheel_raw = {"base_left_wheel": 0, "base_right_wheel": 0}
         self.fail_on_nth_wheel_write = None
         self.wheel_writes = 0
 
     def write(self, register, motor, value, **kwargs):
         super().write(register, motor, value, **kwargs)
-        if register == "Goal_Position" and not self.stuck:
+        if register == "Goal_Position":
             self.start_position = value
 
     def sync_write(self, register, values, **kwargs):
@@ -264,44 +263,6 @@ class FollowingBus(FakeBus):
 
     def sync_read(self, register, motors, **kwargs):
         return {m: self.wheel_raw[m] for m in motors}
-
-
-class TestWiggleHead:
-    def robot(self, tmp_path, monkeypatch, signs=None, start=2000, **bus_kwargs):
-        monkeypatch.setattr(base_follower.time, "sleep", lambda *_: None)
-        robot = make_robot(tmp_path, with_head=True)
-        robot.head_signs.update(signs or {})
-        robot.bus = FollowingBus(robot.bus.motors, **bus_kwargs)
-        robot.bus.start_position = start
-        return robot
-
-    def test_goes_the_positive_way_then_the_other_way_and_returns(self, tmp_path, monkeypatch):
-        robot = self.robot(tmp_path, monkeypatch)
-        to_positive, to_negative = robot.wiggle_head("head_eyes", degrees=9.0)  # 9 deg = 102 ticks
-        assert [v for _, v in robot.bus.writes("Goal_Position")] == [2102, 2000, 1898, 2000]
-        assert (to_positive, to_negative) == (pytest.approx(9.0, abs=0.1), pytest.approx(9.0, abs=0.1))
-
-    def test_the_saved_sign_flips_which_raw_direction_is_positive(self, tmp_path, monkeypatch):
-        robot = self.robot(tmp_path, monkeypatch, signs={"head_neck": -1})
-        to_positive, to_negative = robot.wiggle_head("head_neck", degrees=9.0)
-        assert [v for _, v in robot.bus.writes("Goal_Position")] == [1898, 2000, 2102, 2000]
-        # measured in the semantic directions (down / left), so both are still positive
-        assert to_positive > 8.9 and to_negative > 8.9
-
-    def test_the_servo_keeps_holding_afterwards(self, tmp_path, monkeypatch):
-        robot = self.robot(tmp_path, monkeypatch)
-        robot.wiggle_head("head_eyes")
-        assert not [c for c in robot.bus.calls if c[0] in ("disable_torque", "torque_off")]
-
-    def test_goals_are_clamped_to_the_servo_range_and_the_shortfall_is_reported(self, tmp_path, monkeypatch):
-        robot = self.robot(tmp_path, monkeypatch, start=4090)
-        to_positive, _ = robot.wiggle_head("head_eyes", degrees=9.0)
-        assert max(v for _, v in robot.bus.writes("Goal_Position")) == 4095
-        assert to_positive == pytest.approx(5 * 360 / 4096, abs=0.01)  # could only move 5 ticks
-
-    def test_a_servo_that_does_not_move_reports_no_motion(self, tmp_path, monkeypatch):
-        robot = self.robot(tmp_path, monkeypatch, stuck=True)
-        assert robot.wiggle_head("head_eyes") == (0.0, 0.0)
 
 
 class TestExerciseBase:

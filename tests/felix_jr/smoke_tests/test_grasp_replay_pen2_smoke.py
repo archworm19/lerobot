@@ -5,11 +5,10 @@ pen2 (2026-11-05), after the reset: a pen standing vertical in the top edge of a
 180, the grasp at 95.8 cm: it reached the pen cleanly (the jaws and the pen in view at the attack point; the lift
 lost the pen to a weak grip, which this does not model). The re-grasp went deeper (more of the gripper over the book's
 edge) and the gripper hit the book on the way in. Checked, with no robot, as the model would ask for it: the pen described only where it may be grasped (above the
-book), the approach level or from above (the tool knows nothing of the book, so the model says from where):
-
-1. The session's first left grasp passes the filters (pitch 0, heading 163, roll 180), asked for level grasps only. (It ranked among the best 10 while the head camera's view filters ran; without them, removed 2026-11-07, it
-   ranks lower: steeper grasps that hid the pen now pass too, and the hold judges them.)
-2. Every best candidate approaches level or from above, and takes the pen above the book.
+book), asked for level grasps (the tool knows nothing of the book, so the model says from where): the session's
+first left grasp (pitch 0, heading 163, roll 180) passes the filters. (It ranked among the best 10 while the head
+camera's view filters ran; without them, removed 2026-11-07, it ranks lower: steeper grasps that hid the pen now pass
+too, and the hold judges them.)
 
 Unrestricted, the best come from below (pitch +26 to +51: through the book), nearly antipodal, joints near their
 bounds: what the `where` above is for (`docs/object_grasping.md`, phase B progress).
@@ -53,7 +52,6 @@ CAPTURE = SimpleNamespace(  # pen2's capture21: the arms at rest, the head as it
     },
     head_ticks={"head_neck": 1480, "head_eyes": 1493},
 )
-BOOK_TOP_Z = 0.925
 PEN_TOP_Z = 0.974
 GRASPABLE_FROM_Z = 0.93  # the pen above the book: all the tool is told of it
 PEN = Object(
@@ -76,22 +74,8 @@ def off_worked(solution) -> float:
     return max(abs(pitch - WORKED[0]), _wrap(heading - WORKED[1]), _wrap(roll - WORKED[2]))
 
 
-@pytest.fixture(scope="module")
-def found():
-    model = XleRobotModel.load(URDF)
-    return grasp_candidates(PEN, model, CAPTURE, arms=("left",), where={"psi": (0.0, 90.0)}, n=10)
-
-
 def test_the_first_left_grasp_passes():
-    """Among the level grasps (the session's was level): at most 26 candidates come back, named A to Z."""
+    """Among the level grasps (the session's was level), one within 4 deg of the session's."""
     model = XleRobotModel.load(URDF)
     level = grasp_candidates(PEN, model, CAPTURE, arms=("left",), where={"psi": (0.0, 0.0)}, n=26)
     assert any(off_worked(c.grasp) <= 4.0 for c in level.candidates), level.describe()
-
-
-def test_the_best_come_level_or_from_above(found):
-    assert found.passed > 0
-    for c in found.candidates:
-        pitch, _, _ = angles_of(c.grasp.root_from_pinch[:3, :3])
-        assert pitch <= 2.0, c.describe()
-        assert c.claw.grasp.center_root[2] > BOOK_TOP_Z

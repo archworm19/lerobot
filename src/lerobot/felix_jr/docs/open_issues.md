@@ -101,6 +101,18 @@ the IK smoke test is built on pen1).
       the arm model's errors (hil3, `object_grasping.md` 6.3).
     - Signals besides the camera: the gripper's load or current after closing; the object's size in the wrist picture
       after a small lift (a held object keeps it).
+    - **`wrist_contacts` has no end-to-end test, and a synthetic scene did not make one (2026-11-09).** Only
+      the contact geometry is tested (`test_contacts.py`, on synthetic points). A ray-cast scene (a striped
+      cylinder on a textured table, a flat fixed finger, the arm's poses at a hold 4 cm over the table, the test
+      camera tilted 10-20 deg to see the finger) gave: four frames with the table's scale, the object ~6 cm ahead
+      and on the approach line, within 0.7 mm ahead and 1.7 mm on the fixed contact; but 1 cm to either side, or
+      1-2 cm ahead, off by 0.4-3 cm or too few points; one frame by the finger, within 1.4 mm at 1 cm ahead and
+      2.5 cm short at 6 cm (one depth scale from the finger does not carry to an object twice as far). Seen there,
+      not yet on the robot: the fingers can fall in the ring of table pixels that sets the scale (the scale then
+      off ~10%). DA3's own lens guess was 55% off on these frames, yet on bowl8's real single frame it gave the
+      contacts the person saw and ours did not: the synthetic frames mislead DA3, so they cannot be the reference.
+      An end-to-end test needs real frames (not in git: a few reduced depth and pose arrays in `reference/`, as for
+      the DA3 parity test).
 
 ## Rendering
 

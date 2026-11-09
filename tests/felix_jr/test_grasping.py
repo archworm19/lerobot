@@ -235,7 +235,7 @@ def test_an_object_names_its_parts():
 
 
 @pytest.fixture(scope="module")
-def gripped(model):
+def gripped():
     with_map = XleRobotModel.load(URDF)
     with_map.gripper_maps["right"] = GripperMap(
         -1.37, 1.2718, {"drive_mode": 0, "homing_offset": -860, "range_min": 2046, "range_max": 3493}

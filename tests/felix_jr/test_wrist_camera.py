@@ -1,5 +1,6 @@
-"""`calibration.wrist_camera`: the board, the lens and hand-eye fits on synthetic views, and a session against the
-fake robot whose wrist cameras render a checkerboard on the table from the arm's pose (the truth is known)."""
+"""`calibration.wrist_camera`: the board, the lens and hand-eye fits on synthetic views of a checkerboard on the table
+rendered from the arm's pose (the truth is known). The session against the fake robot:
+`smoke_tests/test_wrist_camera_session_smoke.py`."""
 
 from pathlib import Path
 

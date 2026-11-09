@@ -20,7 +20,6 @@ import logging
 import time
 from pathlib import Path
 
-import numpy as np
 
 from lerobot.felix_jr.port_lock import acquire_port_lock, release_port_lock
 from lerobot.motors import Motor, MotorCalibration, MotorNormMode
@@ -248,25 +247,6 @@ class SO101FollowerWithBase(SO101Follower):
             if release:
                 self.bus.disable_torque([name])
         return direction
-
-    def wiggle_head(self, name: str, degrees: float = 8.0, seconds: float = 0.7) -> tuple[float, float]:
-        """Move head servo `name` `degrees` in its positive direction (down for the eyes, left for the neck),
-        then the same amount the other way, and back to where it started. The servo keeps holding its
-        position. Returns how far it actually moved in each direction, in degrees, measured in those
-        directions (so both should be close to `degrees` if it follows its commands)."""
-        sign = self.head_signs[name]
-        ticks = round(degrees * 4096.0 / 360.0)
-        start = int(self.bus.read("Present_Position", name, normalize=False))
-        moved = []
-        for direction in (+1, -1):
-            goal = int(np.clip(start + direction * sign * ticks, 0, 4095))
-            self.bus.write("Goal_Position", name, goal, normalize=False)
-            time.sleep(seconds)
-            reached = int(self.bus.read("Present_Position", name, normalize=False))
-            moved.append(direction * sign * (reached - start) * 360.0 / 4096.0)
-            self.bus.write("Goal_Position", name, start, normalize=False)
-            time.sleep(seconds)
-        return moved[0], moved[1]
 
     def save_head_signs(self, signs: dict[str, int]) -> Path:
         """`signs[name]` is +1 if the raw positive direction is down (eyes) / left (neck), else -1.

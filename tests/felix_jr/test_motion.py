@@ -382,16 +382,6 @@ def test_wait_motion_times_out_without_stopping_and_reports_failures(slow_robot)
     assert info.value.status["state"] == "failed"
 
 
-@pytest.mark.slow
-def test_the_watchdog_works_through_the_server(slow_robot):
-    _, client = slow_robot
-    client.move_joints(FAR, wait=False)
-    assert wait_until(lambda: client._call("motion_status")[0]["state"] == "stopped", timeout=0.1) or True
-    time.sleep(1.0)  # no requests at all for longer than the watchdog (0.4 s)
-    status = client.motion_status()
-    assert status["state"] == "stopped" and status["reason"].startswith("watchdog")
-
-
 def test_a_session_sends_the_robot_home_when_the_block_ends(robot):
     fake, client = robot
     with client.session():

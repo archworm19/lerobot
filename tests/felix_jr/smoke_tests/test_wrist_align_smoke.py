@@ -189,19 +189,10 @@ def test_a_joint_that_stops_short_is_pushed_again(model, client):
     with client.session():
         client.move_joints({f"{ARM}_arm": {**joints, "gripper.pos": 30.0}}, tol=0.5)
         client.keep_holding()
-    aim = model.grasp_offset(ARM, WIDTH, MARGIN)
-    pick = SimpleNamespace(
-        width=WIDTH,
-        grasp=aim,
-        labels=("pick.back", "pick"),
-        points=np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.05]]),
-        frames=np.array([np.eye(4), np.eye(4)]),
-    )
     h = api.Harness(ask=lambda spec, preview: True, client=ElbowShort(client), model=model)
     view = h.call("wrist_look", ARM)
-    center = view.project_pinch((aim + [0.0, 0.0, 0.06])[None, :])[0]
-    edges = [center - [30.0, 0.0], center + [30.0, 0.0]]
-    alignment = h.call("plan_alignment", view, pick, edges, gain=0.0, sidestep_m=0.015)
+    across = view.root_from_pinch[:3, 0]  # 1.5 cm across the jaws: the elbow has to move
+    alignment = h.call("plan_wrist_move", view, move_m=0.015 * across)
     after = h.call("align_step", alignment)
     reached = client.get_state()[f"{ARM}_arm"]
     assert all(abs(reached[k] - v) <= 0.5 for k, v in alignment.joints.items()), (reached, alignment.joints)
@@ -223,6 +214,8 @@ def test_hold_views_then_a_planned_move(model, client):
     assert np.allclose(rolls, [0.0, -15.0, 15.0, 0.0], atol=0.5), rolls
     assert abs(rolls[hold.current]) < 0.5  # back where it was
     view = hold.views[hold.current]
+    image = h.call("render_wrist", view, None, [[300.0, 240.0], [340.0, 240.0]], ["side", "side"])
+    assert image.shape == view.color.shape and (image != view.color).any()
     before = view.root_from_pinch
     move = np.array([0.01, -0.005, 0.01])
     planned = h.call("plan_wrist_move", hold, move_m=move)
@@ -233,3 +226,6 @@ def test_hold_views_then_a_planned_move(model, client):
     assert np.allclose(reached[:3, :3], before[:3, :3], atol=0.02)
     with pytest.raises(ValueError, match="before the arm last moved"):
         h.call("plan_wrist_move", hold, move_m=move)
+    h.call("home")
+    with pytest.raises(ValueError, match="before home"):  # another arm move: the hold's views no longer count
+        h.call("wrist_contacts", hold, (0, 0, 1, 1), (0.01, 0.03))

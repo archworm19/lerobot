@@ -69,7 +69,7 @@ def robot(tmp_path, model):
     server.close()
 
 
-def test_a_session_calibrates_the_lens_and_the_pose_by_keys(robot, model, tmp_path, monkeypatch):
+def test_a_session_calibrates_the_lens_and_the_pose_by_keys(robot, model, tmp_path):
     fake, client, held = robot
     start = model
     start.arm_calibration["right"] = arm_record(client.arm_calibration()["right_arm"])

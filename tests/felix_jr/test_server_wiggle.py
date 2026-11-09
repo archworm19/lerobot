@@ -1,16 +1,15 @@
-"""The server wiggle script against a fake robot behind a real local ZeroMQ socket."""
+"""The server wiggle script's refusals, against a fake robot behind a real local ZeroMQ socket (the runs themselves:
+`smoke_tests/test_server_wiggle_smoke.py`)."""
 
 import argparse
 import threading
 
 import pytest
 
-from lerobot.felix_jr.checks.server_wiggle import CENTER, run
+from lerobot.felix_jr.checks.server_wiggle import run
 from lerobot.felix_jr.server.client import FelixClient
 from lerobot.felix_jr.server.hardware import FakeArms, FakeHardware
 from lerobot.felix_jr.server.server import RobotServer
-
-HOME = FakeArms.HOME
 
 
 def make_args(**overrides):
@@ -52,10 +51,6 @@ def robot(tmp_path):
     server.close()
 
 
-def at_home(fake):
-    return all(pose == HOME for pose in fake.arm_backend.pos.values())
-
-
 def test_unknown_arms_and_missing_homes_are_refused_before_anything_moves(robot):
     fake, client = robot
     with pytest.raises(SystemExit, match="not on this server"):
@@ -69,14 +64,3 @@ def test_unknown_arms_and_missing_homes_are_refused_before_anything_moves(robot)
     with pytest.raises(SystemExit, match="no recorded home"):
         run(client, make_args(), ask=lambda p: "", say=print)
     assert fake.arm_backend.trajectories == []
-
-
-def test_center_is_the_same_pose_as_the_local_wiggle_test():
-    assert CENTER == {
-        "shoulder_pan.pos": 0.0,
-        "shoulder_lift.pos": 0.0,
-        "elbow_flex.pos": 0.0,
-        "wrist_flex.pos": 0.0,
-        "wrist_roll.pos": 0.0,
-        "gripper.pos": 50.0,
-    }

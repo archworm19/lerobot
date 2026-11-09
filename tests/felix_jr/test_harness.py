@@ -709,7 +709,7 @@ class TestLookAndArm:
         assert path.skeletons.shape[1:] == (len(execute_module.SKELETON), 3)
         assert "4 skeletons along the first move" in path.describe()
 
-    def test_render_without_labels_keeps_only_the_footer(self, capture):
+    def test_render_without_labels_differs_from_the_labeled_one(self, capture):
         view = full_view(capture)
         poses = make_poses(capture, (True, True))
         assert (render(view, poses, labels=False) != render(view, poses)).any()

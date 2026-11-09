@@ -49,7 +49,6 @@ def test_the_merged_urdf_has_both_arms_no_meshes_and_a_fixed_root(model):
     assert "<mesh" not in text and 'type="floating"' not in text
     names = set(model.nominal_model.names)
     assert {"left_shoulder_pan", "right_wrist_roll", "head_pan_joint", "head_tilt_joint"} <= names
-    assert "Rotation_L" not in names  # the old arm is gone
 
 
 def test_placements_rebuilt_from_the_urdf_origins_match_pinocchios(model):

@@ -1,4 +1,5 @@
-"""Wrist camera identification and the saved-camera cache, with a scripted list of video devices (no hardware)."""
+"""Wrist camera identification, the saved-camera cache, video device numbers and reopening a camera whose frames
+stop, with scripted video devices (no hardware)."""
 
 import argparse
 import logging
