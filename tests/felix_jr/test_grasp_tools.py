@@ -1,9 +1,8 @@
-"""The object-centric grasp tools as the model calls them (`harness.api`): fit, candidates, render, plan, refine, on a
+"""The object-centric grasp tools as the model calls them (`harness.api`): fit, candidates, render, plan, on a
 rendered scene through `Harness.call` (`docs/object_grasping.md`, phase C)."""
 
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 pytest.importorskip("pinocchio")
@@ -46,13 +45,13 @@ def setup(model):
 
 
 def test_the_grasp_tools_are_software_and_documented():
-    for name in ("fit_cylinder", "grasp_candidates", "plan_pick", "refine"):
+    for name in ("fit_cylinder", "grasp_candidates", "plan_pick"):
         spec = api.TOOLS[name]
         assert spec.effect is api.Effect.SOFTWARE and spec.fn.__doc__
         assert name in api.describe_tools()
 
 
-def test_fit_choose_draw_plan_refine(setup):
+def test_fit_choose_draw_plan(setup):
     h, capture, view = setup
     jar = h.call("fit_cylinder", view, marks_around(capture, JAR), "up", "jar")
     assert isinstance(jar, Object) and jar.part().radius == pytest.approx(JAR.radius, abs=0.002)
@@ -65,16 +64,12 @@ def test_fit_choose_draw_plan_refine(setup):
     assert isinstance(pick, Poses) and pick.labels == ("stage", "pick.back", "pick", "lift")
     hold = h.call("select_poses", pick, "stage", "pick.back")
     assert hold.labels == ("stage", "pick.back")
-    again = h.call("refine", found, "A", jar, capture)  # nothing moved, nothing missed: the same grasp
-    assert again.passed == 1
-    np.testing.assert_allclose(again["A"].claw.root_from_pinch, found["A"].claw.root_from_pinch, atol=1e-9)
-    assert [c["tool"] for c in h.calls][-6:] == [
+    assert [c["tool"] for c in h.calls][-5:] == [
         "fit_cylinder",
         "grasp_candidates",
         "render",
         "plan_pick",
         "select_poses",
-        "refine",
     ]
 
 
@@ -103,14 +98,12 @@ def test_stale_captures_are_refused(setup):
         h.call("grasp_candidates", jar, capture, arms=["right"], where=BOWL1_GRASP)
     with pytest.raises(ValueError, match="before the arm last moved"):
         h.call("plan_pick", found, "A")
-    with pytest.raises(ValueError, match="before the arm last moved"):
-        h.call("refine", found, "A", jar, capture)
-    # at the hold: a fresh capture; the refined grasp descends from the old candidates but plans (its capture is new)
+    # a fresh capture: fitted and planned again
     fresh = Capture(capture.scene, capture.x_root_camera, REST, {}, 1.0)
     h.ws.add(fresh, "look")
     jar2 = h.call("fit_cylinder", h.call("full_view", fresh), marks_around(fresh, JAR), "up", "jar")
-    again = h.call("refine", found, "A", jar2, fresh, None, None, margin=0.01)
-    assert again.passed == 1 and again.settings.margin == 0.01
+    again = h.call("grasp_candidates", jar2, fresh, arms=["right"], where=BOWL1_GRASP, margin=0.01)
+    assert again.passed > 0 and again.settings.margin == 0.01
     plan = h.call("plan_pick", again, "A")
     assert plan.labels[1] == "pick.back"
     go_in = h.call("select_poses", plan, "pick.back", "pick")

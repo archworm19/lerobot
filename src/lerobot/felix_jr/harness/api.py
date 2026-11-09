@@ -48,7 +48,6 @@ from . import (
 )
 from .contacts import ContactPatches, HoldViews
 from .objects import (
-    ArmError,
     ArmPath,
     Capture,
     Execution,
@@ -65,7 +64,7 @@ from .render import contact_sheet as _contact_sheet, render as _render  # the pa
 from .sfm import SfmResult
 from .workspace import Workspace
 from .wrist import Alignment, WristMove, WristPoint, WristView
-from .wrist_scan import ScanPoint, WristScan
+from .wrist_scan import WristScan
 
 if TYPE_CHECKING:
     from lerobot.felix_jr.server.client import FelixClient
@@ -499,30 +498,13 @@ def prepare_execution(
     `execute` counts a labeled pose reached when every joint is within `pose_tol_deg` (the ~1 cm steps between
     them: 4 deg); a loaded, extended arm sags further than 2.5 deg, so loosen it (e.g. 4) for a carry.
     """
-    # solved from a capture taken before the arm moved? (the capture, not the poses' node: `refine`'s poses are solved
-    # from the hold's capture but descend from candidates found before the move)
+    # solved from a capture taken before the arm moved? (the capture, not the poses' node)
     solved_from = poses.capture if h.ws.id_of(poses.capture) is not None else poses
     if h.ws.is_stale(solved_from):
         raise ValueError(
             "these poses come from before the arm last moved: capture again and solve them again"
         )
     return _execute.prepare_execution(h.model, poses, grip, pose_tol_deg=pose_tol_deg)
-
-
-@tool(
-    Effect.SOFTWARE,
-    deprecated="the joints through the model; the wrist camera measures the object in the jaws' frame now (object_grasping.md 7)",
-)
-def arm_error(h: Harness, poses: Poses, capture: Capture, label: str | None = None) -> ArmError:
-    """Where the arm really is at a hold, against the pose `label` of `poses` it was sent to (default the last).
-
-    `capture` is the one taken at the hold (`execute(..., hold=True)`), or a later one with the arm not moved since.
-    The description gives the gripper's error vertically, across the jaws and along the gripper axis, and the joints
-    that missed. The arm sags under its weight and load (~1 cm reaching out level), and it repeats in the same
-    configuration: to correct the next short move from the hold (the grasp from its attack point), aim it at its
-    target minus `.offset`. Not valid for other poses or loads. Nothing moves.
-    """
-    return _execute.arm_error(h.model, poses, capture, label)
 
 
 def _settings(
@@ -648,45 +630,13 @@ def plan_pick(
     "stage" is `stage_up` m above the attack point, "pick.back" the attack point, "pick" the grasp, "lift" `lift` m
     above it.
     For `prepare_execution` with grip {"start": "open", "pick": "close"}, or a part of it: following the protocol,
-    first `select_poses(pick, "stage", "pick.back")` and hold there, then `refine` before going in. Nothing moves.
+    first `select_poses(pick, "stage", "pick.back")` and hold there, then refine from the wrist camera
+    (`wrist_hold_views`, `wrist_contacts`) before going in. Nothing moves.
     """
     if candidates.capture is None:
         raise ValueError("these candidates have no capture")
-    _fresh(
-        h, candidates.capture, "the candidates' capture"
-    )  # not the candidates: `refine`'s come from older ones
+    _fresh(h, candidates.capture, "the candidates' capture")
     return _grasping.plan_pick(h.model, candidates[name], candidates.capture, stage_up, lift)
-
-
-@tool(
-    Effect.SOFTWARE,
-    deprecated="the head's re-measure at the hold; the wrist refines now (DA3 at the hold, object_grasping.md 7)",
-)
-def refine(
-    h: Harness,
-    candidates: _grasping.GraspCandidates,
-    name: str,
-    target: Object,
-    capture: Capture,
-    error: ArmError | None = None,
-    part: str | None = None,
-    **settings: Any,
-) -> _grasping.GraspCandidates:
-    """The chosen grasp (`name` of `candidates`) again, at the attack hold, from what it shows (protocol rule 1).
-
-    At the hold (the arm at "pick.back"): look at the grasp (`look_at`), fit the object again in that capture
-    (`target`, `fit_cylinder`), measure the arm (`error`, `arm_error(pick, capture, "pick.back")`); this re-solves the
-    same grasp (side, tilt, jaw, height on the object) on the object where it is now, from where the arm is, aimed to
-    cancel the arm's measured error, and checks again that the arm reaches it. One candidate, "A", or none and why.
-    Then `plan_pick` it and run "pick.back" -> "pick" -> "lift" with grip {"pick": "close"}. `**settings` change the
-    chosen candidate's (as for `grasp_candidates`): e.g. a wider `margin` for a light object. Nothing moves.
-    """
-    _fresh(h, capture, "the capture")
-    _fresh(h, target, "the object")
-    chosen = candidates[name]
-    offset = None if error is None else error.offset
-    changed = _settings(settings, chosen.settings)
-    return _grasping.refine(h.model, chosen, target, capture, offset, part, changed)
 
 
 @tool(Effect.SOFTWARE)
@@ -741,27 +691,23 @@ def plan_alignment(
 
     `edges`: the object's two sides in `view`, at the height (or place) it is to be grasped, as two pixels [[u, v],
     [u, v]] (mark them on `render_wrist` first). How far away it is matters (the camera is ~7 cm off the jaws'
-    line: a depth 10% off is ~7 mm sideways). Pass `center`, the object's center triangulated from two wrist views
-    (`triangulate_wrist`), for it; without one, the plan's width (`pick.width`, the fitted primitive's, good to
-    10-20%) gives it. So the first step should make parallax: `sidestep_m=0.015, gain=0` (1.5 cm across the jaws,
-    toward the moving one; negative: the fixed one; the next step corrects it back), then triangulate the center from
-    the views before and after (the middle between its two sides in each). `hinge_gain=0` leaves the offset along the
+    line: a depth 10% off is ~7 mm sideways). `center`, the object's center triangulated from two wrist views
+    (`wrist.triangulate`, no longer a tool), gives it; without one, the plan's width (`pick.width`, the fitted
+    primitive's, good to 10-20%) does. `sidestep_m` moves across the jaws (toward the moving one; negative: the fixed
+    one; the next step corrects it back). `hinge_gain=0` leaves the offset along the
     hinge (square to the closing line) to the plan: for an upright object grasped from the side it is the height on
     it, which any height on the body serves and which marks do not pin down. But give the object's axis too
     (`object_axis=(0, 0, 1)` for an upright one): the measured center slides along it to the jaws' line, so how far
     ahead it is is measured where the jaws close (unless the approach is level, the hinge is not the object's axis,
     and the marks' height shifts "ahead": bowl6 went 1 cm too far in on it). `nudge_m`: a root-frame move added as
-    it is (m), e.g. back along the approach and up, to look again and triangulate from that move. Each step makes 80% of the correction, so it falls
+    it is (m), e.g. back along the approach and up, to look again. Each step makes 80% of the correction, so it falls
     short rather than overshoots. The step moves the gripper across the approach line by the object's offset from it (times `gain`), in
     `advance` (0-1) of the way along it, and turns the jaws `roll_deg` about it (positive: counterclockwise, looking
     along the approach). At most 3 cm and 20 deg a step (more is clipped and said: re-plan from the head camera).
 
     The description says how far off the object is (toward the moving jaw, and square to that), how far ahead, the
     step, and, after an `align_step`, how much of the predicted shift the last step made (its real gain, with a fair
-    `gain` for the next step). Nothing moves: `align_step` runs it. The loop: wrist_look -> render_wrist -> a
-    sidestep (plan_alignment with `sidestep_m=0.015, gain=0` -> align_step) -> triangulate_wrist (the center pixels
-    before and after) -> plan_alignment(..., center=) -> align_step, until the object is on the line within a few
-    mm; then advance in parts, looking again each time, before the last move in and the close.
+    `gain` for the next step). Nothing moves: `align_step` runs it.
     """
     _fresh(h, view, "the wrist view")
     if center is not None:
@@ -782,36 +728,16 @@ def plan_alignment(
     )
 
 
-@tool(
-    Effect.SOFTWARE,
-    deprecated="SIFT's matches failed on the robot's frames (hil3: 16 px off the board): use sfm_torch",
-)
-def sfm_light(
-    h: Harness, views: Sequence[WristView], prior_mm: float = _sfm.PRIOR_MM, prior_deg: float = _sfm.PRIOR_DEG
-) -> SfmResult:
-    """The wrist camera's real motion between `views`, from the images: structure from motion (OpenCV's SIFT).
-
-    `views`: several frames of one arm from different poses. The model's poses are the start and a prior; a few s.
-
-    The arm does not move as its model says (bowl6: 42-157% of predicted steps), so depth from its moves was poor.
-    Here features on the scene (the table's grain) are matched across the frames and the poses refined to them: the
-    turns and the directions of the moves come out right; one scale for all of it stays the model's (a few %). The
-    description gives the fit's error before and after, how far each frame's motion was off, and the table: its
-    plane and how high the jaws are over it. Views from before alignment steps count (as for `triangulate_wrist`).
-    Nothing moves.
-    """
-    for i, view in enumerate(views):
-        _aligned_since(h, view, f"view {i}")
-    return _sfm.refine_views(views, "light", prior_mm, prior_deg)
-
-
 @tool(Effect.SOFTWARE)
 def sfm_torch(
     h: Harness, views: Sequence[WristView], prior_mm: float = _sfm.PRIOR_MM, prior_deg: float = _sfm.PRIOR_DEG
 ) -> SfmResult:
-    """As `sfm_light`, with learned features (DISK) and matches (LightGlue).
+    """The wrist camera's real motion between `views`: structure from motion (DISK features, LightGlue matches).
 
-    Better on weak texture and across large changes of view, slower (~10 s; the weights load on each call). The frames
+    `views`: several frames of one arm from different poses; the model's poses are the start and a prior. The
+    description gives the fit's error before and after, how far each frame's motion was off, and the table: its plane
+    and how high the jaws are over it. Views from before alignment steps count. ~10 s (the weights load on each call;
+    OpenCV's SIFT, the light alternative, failed on the robot's frames, hil3). The frames
     are first turned back by the wrist's roll as the model has it (these features are not rotation invariant). Nothing
     moves.
     """
@@ -891,7 +817,7 @@ def scan_views(h: Harness, views: Sequence[WristView], method: str = "light", cu
 
     `method` "light" (SIFT) or "torch" (DISK and LightGlue: far more matches on the robot's frames, ~10 s);
     `current`: the frame the arm is at now (default the last). As `wrist_scan`, without moving. Views from before
-    alignment steps count (as for `triangulate_wrist`).
+    alignment steps count.
     """
     for i, view in enumerate(views):
         _aligned_since(h, view, f"view {i}")
@@ -902,93 +828,15 @@ def scan_views(h: Harness, views: Sequence[WristView], method: str = "light", cu
 def scan_scale(
     h: Harness,
     scan: WristScan,
-    table_z: float | None = None,
-    width: float | None = None,
-    sides: Mapping[int, Sequence[Sequence[float]]] | None = None,
+    table_z: float,
 ) -> WristScan:
-    """A wrist scan with its scale set by something metric in the scene, instead of the arm's model.
+    """A wrist scan with its scale set by the table's height, instead of the arm's model.
 
-    (The width path is deprecated: a wrong width gave x1.6 in bowl7; use the table.) Structure from motion fixes
-    everything but one scale, which comes from the arm's moves as the model has them (on
-    the robot ~10% off: 1-2 cm at a grasp's distances). Set it with the object's width (`width`, m: the head's fit, and
-    `sides`: its two sides in a few frames, as for `scan_fit_cylinder`; independent of the arm) or the table's height
-    (`table_z`, m, root frame: the head's depth on the table; relies on the model only for the camera's height now).
-    Then locate and fit on the scan this returns. Nothing moves.
+    Structure from motion fixes everything but one scale, which comes from the arm's moves as the model has them (on
+    the robot ~10% off: 1-2 cm at a grasp's distances). `table_z` (m, root frame: the head's depth on the table) sets
+    it; it relies on the model only for the camera's height now. Nothing moves.
     """
-    if width is not None and sides is not None:
-        return _wrist_scan.scale_from_width(scan, dict(sides), width)
-    if table_z is not None:
-        return _wrist_scan.scale_from_table(scan, table_z)
-    raise ValueError("give the object's width and its sides, or the table's height")
-
-
-@tool(
-    Effect.SOFTWARE,
-    deprecated="sparse depth, superseded by DA3's dense depth (object_grasping.md 7); untested on the robot",
-)
-def scan_locate(
-    h: Harness,
-    scan: WristScan,
-    frame: int,
-    uv: Sequence[float],
-    frame_b: int | None = None,
-    uv_b: Sequence[float] | None = None,
-    label: str = "point",
-) -> ScanPoint:
-    """The 3D point at pixel `uv` of the scan's `frame`: in the jaws' frame now and the root frame, with how well known.
-
-    Alone, from the scan's scene points around the pixel (the table, a textured surface) or the table plane; with the
-    same point marked in a second frame (`frame_b`, `uv_b`), the two rays triangulated: for a feature on an object (a
-    label's corner, a cap's center), whose white sides have no points of their own. Check it on `render_scan`. Nothing
-    moves.
-    """
-    return _wrist_scan.locate(scan, frame, uv, frame_b, uv_b, label)
-
-
-@tool(
-    Effect.SOFTWARE,
-    deprecated="sparse depth, superseded by DA3's dense depth (object_grasping.md 7); untested on the robot",
-)
-def scan_find(
-    h: Harness,
-    scan: WristScan,
-    frame: int,
-    uv: Sequence[float],
-    in_frame: int | None = None,
-    label: str = "point",
-) -> ScanPoint:
-    """As `scan_locate` with a second mark, the tool finding it in another frame.
-
-    The pixel's patch is searched along its line in `in_frame` (default the farthest). Refused on a smooth or
-    repeating surface: mark it by hand. Nothing moves.
-    """
-    return _wrist_scan.find(scan, frame, uv, in_frame, label)
-
-
-@tool(
-    Effect.SOFTWARE,
-    deprecated="a sparse silhouette fit (bowl7: a wrong radius); fit the cylinder to DA3's points (object_grasping.md 7)",
-)
-def scan_fit_cylinder(
-    h: Harness,
-    scan: WristScan,
-    sides: Mapping[int, Sequence[Sequence[float]]],
-    radius: float | None = None,
-    top: tuple[int, Sequence[float]] | None = None,
-    height: float | None = None,
-    label: str = "object",
-) -> Object:
-    """An upright object as a cylinder, from its two sides marked in a few of the scan's frames.
-
-    `sides`: {frame: [[u, v], [u, v]]}, at any height (each side is a ray tangent to it). Its bottom on the table
-    plane; its top from `top` (a frame and the top's center pixel) or `height` (m); `radius` (m) if known (the head's
-    fit).
-
-    The same kind of object as `fit_cylinder`'s, placed relative to the jaws now: plan on it with `grasp_candidates`
-    (with a fresh `capture` for the arm's pose), and the move from where the arm is cancels the model's error. Draw it
-    on `render_scan`: its outline should sit on the object in every frame. Nothing moves.
-    """
-    return _wrist_scan.fit_upright_cylinder(scan, dict(sides), radius, top, height, label)
+    return _wrist_scan.scale_from_table(scan, table_z)
 
 
 @tool(Effect.SOFTWARE)
@@ -996,49 +844,15 @@ def render_scan(
     h: Harness,
     scan: WristScan,
     frames: Sequence[int] | None = None,
-    points: Sequence[ScanPoint] = (),
     objects: Sequence[Object] = (),
 ) -> np.ndarray:
-    """A wrist scan's frames, with points and objects drawn in each.
+    """A wrist scan's frames, with objects drawn in each.
 
     All as a contact sheet (default), or the ones in `frames` (one: full size), each labeled (its number, the wrist's
-    turn, "now" where the arm is), with `points` (green crosses) and `objects` (their outline, orange): what sits right
-    in every frame is right. Nothing moves.
+    turn, "now" where the arm is), with `objects` (their outline, orange): what sits right in every frame is right.
+    Nothing moves.
     """
-    return _wrist_scan.render(scan, frames, points, objects)
-
-
-@tool(
-    Effect.SOFTWARE,
-    deprecated="triangulating over the arm's moves inherits its motion error (bowl6); use DA3 on a short wrist roll (object_grasping.md 7)",
-)
-def triangulate_wrist(
-    h: Harness,
-    view_a: WristView,
-    uv_a: Sequence[float],
-    view_b: WristView,
-    uv_b: Sequence[float],
-    label: str = "object",
-    to_axis_m: float = 0.0,
-) -> WristPoint:
-    """Locate a point marked in two wrist views of the same arm, taken from different places: a stereo pair.
-
-    `uv_a` / `uv_b`: the same point in each (for the object's center, the middle between its two sides at the grasp
-    height). The move between the views is known through the model, and accurate for a small move, so this gives the
-    depth a single view cannot. Best from a sideways move (`plan_alignment(..., sidestep_m=0.02)`): a few degrees of
-    parallax; moving in along the view gives little. The description says the parallax, how far apart the two rays
-    pass (more than a few mm: the marks are not the same point) and how much one pixel of marking moves the depth.
-
-    The views may come from before alignment steps (`align_step` does not touch the object), but not from before any
-    other arm move. Nothing moves.
-
-    A point on an object's side marks well in both views even for a move up or down (the sides do not: nothing on a
-    smooth side marks the same height twice): a label's corner, a seam. Then `to_axis_m` (the object's radius, for an
-    upright one) carries it from the front onto the axis, which is what `plan_alignment`'s `center` is.
-    """
-    _aligned_since(h, view_a, "view_a")
-    _aligned_since(h, view_b, "view_b")
-    return _wrist.triangulate(view_a, uv_a, view_b, uv_b, label, to_axis_m)
+    return _wrist_scan.render(scan, frames, objects)
 
 
 @tool(Effect.SOFTWARE)
@@ -1181,8 +995,8 @@ def wrist_scan(
     gripper's axis, swings through a few cm: the parallax for depth), then back to the start. The frames' real
     poses come from the images (structure from motion, `method` as `scan_views`), so the arm's motion error drops out.
     The description says how far its motion was off, the table plane and how high the jaws are over it, and how well
-    the wrist came back (the first and last frames). Then: `render_scan` to see the frames, `scan_locate` /
-    `scan_find` for points, `scan_fit_cylinder` for the object. Moves the arm: a person approves first.
+    the wrist came back (the first and last frames). Then: `render_scan` to see the frames. Moves the arm: a person
+    approves first.
     """
     views, labels = _wrist_scan.sweep(h.client, h.model, arm, rolls_deg, flexes_deg)
     return _wrist_scan.scan_views(views, method, len(views) - 1, labels)
@@ -1206,7 +1020,7 @@ def align_step(h: Harness, alignment: Alignment | WristMove, max_vel: float = _w
     planned (`render_wrist` draws it): measure again with `plan_alignment` on it. Everything seen before becomes
     stale. Moves the arm: a person approves first, seeing the step.
     """
-    # an alignment's center may be older (`triangulate_wrist`): the view it was planned from must be fresh; a move's
+    # an alignment's center may be older (triangulated): the view it was planned from must be fresh; a move's
     # view may be a hold's (not recorded on its own): the move itself must be
     source = alignment if isinstance(alignment, WristMove) else alignment.view
     if h.ws.id_of(source) is None or h.ws.is_stale(source):

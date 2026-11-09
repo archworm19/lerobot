@@ -230,11 +230,12 @@ section 4 removes most of it).
 | `grasp_candidates(obj, part=None, arm=None, where=None, n=5) -> GraspCandidates` | **Built, thin** (`grasp_candidates(primitive, model, capture, arms, where, spacing, margin, attack, n)`; the checks and tiers of `Check` / `Score`; every rejected target kept, with its stage and reason; `Object` and `render` not yet). generate -> claw -> IK -> checks -> ranked; `arm=None` tries both. `where` narrows the family in object terms ("top 2 cm", "from above"). Returns the best `n` named A, B, ... plus a count of the rejected by reason. Drawn by `render` (each candidate's jaws, colored by rank). |
 | `GraspCandidate` | one ranked grasp: the `ClawTarget`, the solved `Poses` for attack and grasp, every check and score, `describe()`: "A: right arm, from the robot's side 40 deg down, jaws level; seen (-0.40); move in clear >= 0.8 cm; 7.6 cm from `white`; reaches". |
 | `plan_pick(candidate, lift=0.03) -> Poses` | stage, attack point, grasp, lift, with the grip actions, ready for `prepare_execution` (kept). **Built** (`plan_pick(model, candidate, capture, stage_up=0.06, lift=0.03)`): "stage" 6 cm above the attack point, "pick.back", "pick", "lift", as the harness's `Poses` (the new solver's frames and joints, its achieved angles as targets), so `prepare_execution` runs it unchanged with `PICK_GRIP`; rule 1 stops at `select_poses(pick, "stage", "pick.back")`. |
-| `refine(candidate, capture, error=None) -> GraspCandidates` (phase C) | at the attack hold: the same family member re-solved from the new capture, the object re-fitted, aimed to cancel `arm_error` (kept), the move in re-checked. |
+| `refine(candidate, capture, error=None) -> GraspCandidates` (phase C; removed 2026-11-09, section 7) | at the attack hold: the same family member re-solved from the new capture, the object re-fitted, aimed to cancel `arm_error` (kept), the move in re-checked. |
 | `plan_place(pick, onto, pose="upright", at=None) -> Poses` (phase D) | carry and place: the object's pose in the jaws is known from the grasp, so the gripper pose comes from where the object should end; lift height from the object's extent over what is between; release height above what is below. |
 
 Kept as they are: `Capture`, `View`, `Grid`, `Points`, `TableEstimate`, `Focus`, the `Workspace`, `render`,
-`contact_sheet`, `scan`, `look_at`, `prepare_execution`, `execute`, `arm_path`, `arm_error`, `home`, `history`.
+`contact_sheet`, `scan`, `look_at`, `prepare_execution`, `execute`, `arm_path`, `arm_error` (removed 2026-11-09),
+`home`, `history`.
 
 ## 3. Grasp solving flow
 
@@ -586,7 +587,8 @@ What it does, and does not:
 **The wrist scan (`harness/wrist_scan.py`, built 2026-11-08; tests `test_wrist_scan.py`, smoke
 `test_wrist_scan_smoke.py`).** `wrist_scan(arm)` (moves the wrist only: roll -30..30, flex +-10, and back; the arm
 holds) or `scan_views(views)` (frames already taken) give a `WristScan`: the frames, their refined poses, and the
-frame the arm is at now. The model works on it like a head capture:
+frame the arm is at now. The model works on it like a head capture (`scan_locate`, `scan_find`,
+`scan_fit_cylinder` and `render_scan`'s points were removed on 2026-11-09: DA3's dense depth replaced them, section 7):
 
 - `render_scan(scan, frames=, points=, objects=)`: a contact sheet of the frames (or one, full size) with points and
   fitted outlines drawn in each; what sits right in every frame is right.
@@ -861,10 +863,11 @@ The table-coloured mask had to be closed (not opened) over the object's edges: w
 cp2 read +2.78 / +0.18. Tests: `test_contacts.py` (the contacts and the move's signs on synthetic cylinders),
 `smoke_tests/test_wrist_align_smoke.py` (the hold and a planned move on the fake robot).
 
-### Deprecated by these findings (2026-11-08)
+### Deprecated by these findings (2026-11-08); the clear-cut ones removed (2026-11-09)
 
-Marked in `harness/api.py` (`@tool(..., deprecated=...)`: shown in the model's tool documentation and logged when
-called); kept for now, to be removed next (the checkpoint is now a tool: `wrist_contacts`):
+Marked in `harness/api.py` (`@tool(..., deprecated=...)`) on 2026-11-08. **Removed on 2026-11-09**, with the code
+only they used (`execute.arm_error` and `ArmError`, `grasping.refine`, `wrist_scan`'s `locate`, `find`,
+`fit_upright_cylinder`, `scale_from_width`, `ScanPoint`, `render_scan`'s points) and its tests:
 
 | Tool | Why | Instead |
 | --- | --- | --- |
@@ -874,11 +877,13 @@ called); kept for now, to be removed next (the checkpoint is now a tool: `wrist_
 | `scan_locate`, `scan_find` | sparse depth; never used on the robot | DA3's dense depth |
 | `refine`, `arm_error` | the head's re-measure at the hold, through the joints | the wrist refines (DA3 at the hold) |
 
-In part: `scan_scale`'s width path (bowl7: x1.6 from a wrong width; the table path stays); `plan_alignment`'s
+Also removed: `scan_scale`'s width path (bowl7: x1.6 from a wrong width; the table path stays). Still deprecated, a
+decision pending: `plan_alignment`'s
 measurement from marked edges (depth from the width, `center`, `sidestep_m`, `hinge_gain`: superseded by the DA3
-checkpoint; as the planner of a given move, `nudge_m`, it stays). Outside the harness: `checks/hil_wrist_sfm.py`'s
+checkpoint; as the planner of a given move, `nudge_m`, it stays; `wrist.triangulate`, no longer a tool, stays
+for its `center` until then). Outside the harness: `checks/hil_wrist_sfm.py`'s
 `handeye-record` / `handeye-fit` (the board's hand-eye fit over arm poses absorbs the arm model's errors: not for the
 camera's pose on the gripper; the fingertip fit is). After the ablation, `sfm_torch` and the structure from motion
-inside `wrist_scan` / `scan_views` are not needed for the checkpoint either (the model's poses do as well); kept until
-the checkpoint is a tool. Still current: `wrist_look`, `render_wrist` (the closing line, the midline), `wrist_scan`'s
+inside `wrist_scan` / `scan_views` are not needed for the checkpoint either (the model's poses do as well): also
+pending (SIFT stays inside `sfm` as `scan_views`' "light" method until then). Still current: `wrist_look`, `render_wrist` (the closing line, the midline), `wrist_scan`'s
 sweep (the frames), `align_step`.

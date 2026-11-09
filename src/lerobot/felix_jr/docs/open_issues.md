@@ -63,9 +63,6 @@ the IK smoke test is built on pen1).
       1.3 cm with the head aimed at the grasp; the scan read the table 1.4-2 cm lower from the home pose. Until the
       head's calibration is checked at home (`calibration.check` there), judge holds and plan moves in from a
       capture with the head aimed at the grasp (`look_at`).
-    - **`arm_error` sees the joints only:** it compares measured to commanded joints through the model, so a camera
-      (or arm calibration) error is invisible to it. A check of the fingertips in the image (depth or the drawn
-      fingertips against the real ones) at the hold would catch it.
     - **The move in goes sideways** (bowl4): `plan_pick` puts the attack point back along the grasp's approach, which
       `to_claw` leaves 8-19 deg off the gripper's own axis (the tip-line tilt); the fingers travel crabwise and sweep
       across a narrow object. Put the attack point back along the gripper axis (tried by hand in bowl4).
@@ -163,8 +160,8 @@ including the object being grasped. Revisit only if the model, given good render
     missed, with `.offset` to aim the next short move from there at its target minus it (by hand, this made pen2's
     book grasp land and container1's rim grasp). Checked on container1's attack hold: (0.25, 0.23, -0.52) cm, as
     measured by hand. **Used on bowl1** (four attack holds, 0.4-0.8 cm; each grasp aimed to cancel the full error
-    landed). TODO: a couple more sessions, then add it to `protocols.md` (rule 1's "measure the arm" step); and log
-    its measurements (pose, load, error) toward the sag model.
+    landed). **Removed (2026-11-09):** the wrist camera measures the object against the jaws at the hold now
+    (`object_grasping.md` section 7); it saw the joints only, so a camera or calibration error was invisible to it.
     **bowl6 (2026-11-08):** the elbow stopped 1.2-1.4 deg short under load on every step; `align_step` now commands a
     joint more than 0.5 deg short again, pushed past by the shortfall (it then lands within 0.5 deg). Every grasp
     plan is aimed 1 cm high against the sag (`GraspSettings.sag_lift`, the person's call).

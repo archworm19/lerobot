@@ -43,7 +43,7 @@ import numpy as np
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 
 from .objects import Capture, Object, Poses, angles_of
-from .primitives import AntipodalGrasp, Cylinder, Primitive, Ranges, Spacing
+from .primitives import AntipodalGrasp, Primitive, Ranges, Spacing
 from .reach import OPEN_CLEARANCE_M, POSITION_TOL_M, ROLL_TOL_DEG, SQUEEZE_M, ArmIK, FrameSolution
 
 SAG_LIFT_M = 0.01  # grasps aimed this much higher than the object (`GraspSettings.sag_lift`)
@@ -288,7 +288,7 @@ class GraspCandidates:
         default_factory=dict
     )  # stage -> (seconds, claw targets run)
     settings: GraspSettings = field(default_factory=GraspSettings)
-    capture: Capture | None = None  # what the arm's start and the camera were (`plan_pick`, `refine` use it)
+    capture: Capture | None = None  # what the arm's start and the camera were (`plan_pick` uses it)
     label: str = ""  # the object's
 
     def __getitem__(self, name: str) -> GraspCandidate:
@@ -480,48 +480,6 @@ def grasp_candidates(
     label = target.label if isinstance(target, Object) else ""
     return GraspCandidates(
         _ranked(passed, n), tried, len(passed), tuple(rejected), timed.timing(), settings, capture, label
-    )
-
-
-def refine(
-    model: XleRobotModel,
-    candidate: GraspCandidate,
-    target: Object | Primitive,
-    capture: Capture,
-    offset_root: np.ndarray | None = None,
-    part: str | None = None,
-    settings: GraspSettings | None = None,
-) -> GraspCandidates:
-    """The chosen grasp again, at the attack hold (`protocols.md` rule 1): from what the hold's capture shows.
-
-    The same grasp (the same side, tilt and fixed jaw, at the same height on the object) on `target` as fitted again
-    from the hold's view; solved from where the arm is now (`capture`'s joints: it is at the attack point); with its
-    grasp and attack frames moved by `offset_root`, to cancel what the arm was measured to
-    miss by at the hold (minus `arm_error(...).offset`: the arm sags the same way again on the short move in). The
-    filters run again; the result is one candidate, "A", or none and why.
-    """
-    settings = candidate.settings if settings is None else settings
-    primitive = target.part(part) if isinstance(target, Object) else target
-    if not isinstance(primitive, Cylinder):
-        raise ValueError(f"refine knows a cylinder's grasps, not a {type(primitive).__name__}'s")
-    old = candidate.claw.grasp
-    t = float(np.clip((old.center_root - primitive.bottom_root) @ primitive.axis_root, 0.0, primitive.length))
-    where = {"t": (t, t), "phi": (old.params["phi"],) * 2, "psi": (old.params["psi"],) * 2}
-    (grasp,) = primitive.antipodal_grasps(where)
-    arm, timed = candidate.claw.arm, _Timer()
-    claw = _shifted(
-        to_claw(grasp, model, arm, candidate.claw.fixed_side, settings.margin, settings.attack),
-        np.array([0.0, 0.0, settings.sag_lift]),
-    )
-    if offset_root is not None:
-        claw = _shifted(claw, -np.asarray(offset_root, dtype=np.float64))
-    ik = ArmIK(model, arm, capture.arms, capture.head_ticks, grasp.opening, settings.margin)
-    result = _evaluate(model, claw, ik, settings, timed)
-    passed = [result] if isinstance(result, GraspCandidate) else []
-    rejected = (result,) if isinstance(result, Rejected) else ()
-    label = target.label if isinstance(target, Object) else ""
-    return GraspCandidates(
-        _ranked(passed, 1), 1, len(passed), rejected, timed.timing(), settings, capture, label
     )
 
 

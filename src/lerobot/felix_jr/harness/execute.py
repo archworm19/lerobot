@@ -30,7 +30,7 @@ import numpy as np
 
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 
-from .objects import ArmError, ArmPath, Capture, Execution, HeldObject, Move, Poses
+from .objects import ArmPath, Capture, Execution, HeldObject, Move, Poses
 from .reach import OPEN_CLEARANCE_M, SQUEEZE_M, solve_path
 
 if TYPE_CHECKING:
@@ -221,38 +221,6 @@ def arm_path(model: XleRobotModel, execution: Execution, every: int = 5, first_s
         q = model.joint_vector({arm: pose}, capture.head_ticks or None)
         skeletons.append([model.frame_pose(f"{arm}_{link}", q)[:3, 3] for link in SKELETON])
     return ArmPath(arm, np.array(skeletons), tuple(kinds))
-
-
-def arm_error(model: XleRobotModel, poses: Poses, capture: Capture, label: str | None = None) -> ArmError:
-    """Where `poses`' arm really is in `capture` against the pose `label` (default the last): see `ArmError`."""
-    label = poses.labels[-1] if label is None else label
-    if label not in poses.labels:
-        raise ValueError(f"no pose {label!r}; have {poses.labels}")
-    if poses.arm not in capture.arms:
-        raise ValueError(f"the capture has no reading of the {poses.arm} arm")
-    i = poses.labels.index(label)
-    measured_joints = capture.arms[poses.arm]
-    joint_error = {
-        name.removesuffix(".pos"): float(measured_joints[name] - target)
-        for name, target in poses.joints[i].items()
-    }
-    q = model.joint_vector(capture.arms, capture.head_ticks or None)
-    frame = poses.frames[i]
-    # across the jaws: toward the open moving tip, without its part along the gripper axis (the tip's arc)
-    jaw = poses.open_jaw[:3, 3].copy() if poses.open_jaw is not None else np.zeros(3)
-    jaw[2] = 0.0  # the pinch frame's +z is the gripper axis
-    local = jaw / np.linalg.norm(jaw) if np.linalg.norm(jaw) > 1e-9 else np.array([1.0, 0.0, 0.0])
-    across = frame[:3, :3] @ local
-    return ArmError(
-        poses,
-        label,
-        capture,
-        joint_error,
-        frame[:3, 3].copy(),
-        model.pinch_point(poses.arm, q),
-        across,
-        frame[:3, 2].copy(),
-    )
 
 
 def held_object(

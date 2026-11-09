@@ -509,43 +509,6 @@ class ArmPath:
 
 
 @dataclass(frozen=True, eq=False)
-class ArmError:
-    """Where the arm really is at a hold against the solved pose it was sent to (`execute.arm_error`).
-
-    `measured` is the pinch point from the model at the joints `capture` read, `planned` the pose's own. The model is
-    right at measured joints (pen2: the fingertips it drew matched the real ones), so the gap is the servos not
-    reaching their targets, mostly sag under the arm's weight and its load.
-    """
-
-    poses: Poses
-    label: str
-    capture: Capture
-    joint_error_deg: Mapping[str, float]  # measured minus commanded, LeRobot degrees
-    planned: np.ndarray  # (3,) root frame, m
-    measured: np.ndarray  # (3,)
-    across: np.ndarray  # (3,) unit, root frame: the jaws' closing direction at the planned pose
-    axis: np.ndarray  # (3,) unit, root frame: the gripper axis (wrist to fingertips) at the planned pose
-
-    @property
-    def offset(self) -> np.ndarray:
-        """Measured minus planned pinch point (root frame, m): aim the next short move at its target minus this."""
-        return self.measured - self.planned
-
-    def describe(self) -> str:
-        """The gripper's error (vertical, across the jaws, along the axis) and the joints that missed."""
-        d = self.offset
-        joints = ", ".join(
-            f"{name} {err:+.1f}" for name, err in self.joint_error_deg.items() if abs(err) >= 0.5
-        )
-        return (
-            f"{self.poses.arm} arm at {self.label}: the gripper {_cm(float(np.linalg.norm(d)))} cm from plan: "
-            f"{_cm(float(d[2]))} cm vertically, {_cm(float(d @ self.across))} cm across the jaws, "
-            f"{_cm(float(d @ self.axis))} cm along the gripper axis (root frame "
-            f"({', '.join(_cm(float(x)) for x in d)}) cm); joints off (deg): {joints or 'none over 0.5'}"
-        )
-
-
-@dataclass(frozen=True, eq=False)
 class HeldObject:
     """An object held in the jaws, carried rigidly through some of `poses` (`execute.held_object`); text only.
 

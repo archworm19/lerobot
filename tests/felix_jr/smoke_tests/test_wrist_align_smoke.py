@@ -1,5 +1,6 @@
 """Lining the jaws up from the wrist camera (`harness.wrist`, `docs/object_grasping.md` section 6), end to end against
-the fake robot: wrist_look -> plan_alignment -> align_step, again and again.
+the fake robot: wrist_look -> plan_alignment -> align_step, again and again;
+and the contacts' flow without the depth: wrist_hold_views -> plan_wrist_move -> align_step.
 
 The robot's joints read 1-2 deg off the truth (the arm's error the head camera's plan carries), and an upright cylinder
 2 cm wide stands 6 cm ahead of the jaws, off the approach line. The two sides a person (the model) would mark are its
@@ -20,6 +21,7 @@ from test_wrist_camera import TRUE_CAMERA, URDF, _with_pose, start_joints  # noq
 
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, pinch_frame  # noqa: E402
 from lerobot.felix_jr.harness import api  # noqa: E402
+from lerobot.felix_jr.harness.wrist import triangulate  # noqa: E402
 from lerobot.felix_jr.server.client import FelixClient  # noqa: E402
 from lerobot.felix_jr.server.hardware import FakeHardware  # noqa: E402
 from lerobot.felix_jr.server.server import RobotServer  # noqa: E402
@@ -130,7 +132,9 @@ def test_the_jaws_are_lined_up_by_conservative_steps(model, client, true_width, 
         view = h.call("align_step", alignment)
         offsets = [offset_now()]
         after = h.call("plan_alignment", view, pick, true_edges()).center_uv
-        center = h.call("triangulate_wrist", first_view, before, view, after)  # from before the step: allowed
+        center = triangulate(
+            first_view, before, view, after
+        )  # (no longer a tool: `plan_alignment`'s `center`)
         assert center.parallax_deg > 3 and center.miss_m < 0.001, center.describe()
         # in the model's root frame, which the joints' error shifts as a whole: its distance from the camera is what
         # counts, against the truth's
@@ -158,7 +162,7 @@ def test_the_jaws_are_lined_up_by_conservative_steps(model, client, true_width, 
         assert all("triangulation" in source for source in sources), sources  # still good after the steps
     h.call("home")
     with pytest.raises(ValueError, match="before home"):  # another arm move: the old views no longer count
-        h.call("triangulate_wrist", first_view, [320.0, 240.0], view, [330.0, 240.0])
+        h.call("wrist_contacts", view, (0, 0, 1, 1), (0.01, 0.03))
     with pytest.raises(ValueError, match="before the arm last moved"):
         h.call("plan_alignment", view, pick, true_edges())
 

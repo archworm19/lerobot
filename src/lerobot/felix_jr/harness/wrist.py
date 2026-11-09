@@ -514,8 +514,8 @@ def plan_alignment(
 class WristPoint:
     """A point located in two wrist views (`triangulate`), root frame.
 
-    A measurement, so fresh when made (`sensed`), though its views may be older (`api.triangulate_wrist` checks that
-    only alignment steps came between).
+    A measurement, so fresh when made (`sensed`), though its views may be older (only alignment steps may come
+    between: `plan_alignment` checks).
     """
 
     sensed: ClassVar[bool] = True

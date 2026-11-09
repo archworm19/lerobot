@@ -20,13 +20,12 @@ along the gripper axis), hold there, and before going in:
    stands on or in, its neighbors).
 5. **Re-solve the grasp from this capture**, aimed to cancel the measured error, then go in and close.
 
-With the grasp tools (`docs/object_grasping.md`): 1 is `look_at`, 2 `fit_cylinder` in that capture, 3 `arm_error`,
-5 `refine` (the same grasp on the object as fitted again, from where the arm is, aimed to cancel its error), then
-`plan_pick` of its result from "pick.back". Check 4, what the move in passes, is yours, from the image.
-
-Being tried (2026-11-08, not yet a rule): 2, 3 and 5 from the wrist camera instead, at the attack point
-(`wrist_look`, `plan_alignment`, `triangulate_wrist`, `align_step`: [object_grasping.md](object_grasping.md) section 6, "The alignment
-loop").
+With the grasp tools (`docs/object_grasping.md`): 1 is `look_at` (or `wrist_look`); 2, 3 and 5 come from the wrist
+camera at the attack point, which measures the object against the jaws directly: `wrist_hold_views` (a short wrist
+roll), `wrist_contacts` on them (the contacts and the move), `render_contacts` to check it, then `plan_wrist_move` ->
+`align_step` in parts, measuring again after each ([object_grasping.md](object_grasping.md) section 7: what worked in
+bowl7 and bowl8). Check 4, what the move in passes, is yours, from the images; so is the final call before closing.
+(The head's re-measure at the hold, `arm_error` and `refine`, was removed on 2026-11-09.)
 
 If a check cannot be made (the jaws or the object hidden, no depth on it) or fails, do not go in: clear the arm and
 look again, or re-plan the attack (higher, another pitch, another side, the other arm).

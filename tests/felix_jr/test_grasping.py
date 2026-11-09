@@ -26,7 +26,6 @@ from lerobot.felix_jr.harness.grasping import (  # noqa: E402
     GraspSettings,
     grasp_candidates,
     plan_pick,
-    refine,
     to_claw,
 )
 from lerobot.felix_jr.harness.objects import Object, angles_of  # noqa: E402
@@ -283,22 +282,3 @@ def test_settings_are_the_callers(model):
     assert "approach 0.01" in narrow.describe() and "approach 45" in loose.describe()
     for c in loose.candidates:
         assert c.grasp.ok and max(c.grasp.rotation_error_deg) <= 45.0
-
-
-def test_refine_aims_to_cancel_the_arms_error(model):
-    """At the hold the arm was measured 1 cm low: the same grasp, re-solved from there, is aimed 1 cm higher; the
-    object (moved 5 mm) is where the new fit says."""
-    one = {"t": (0.069, 0.069), "phi": (60.0, 60.0), "psi": (45.0, 45.0)}  # bowl1's grasp
-    found = grasp_candidates(JAR, model, BOWL1_CAPTURE, arms=("right",), where=one)
-    chosen = found["A"]
-    moved = Cylinder.upright(JAR.bottom_root + np.array([0.005, 0.0, 0.0]), JAR.length, JAR.radius)
-    offset = np.array([0.0, 0.0, -0.01])  # measured minus planned: low
-    again = refine(model, chosen, moved, BOWL1_CAPTURE, offset)
-    assert again.passed == 1 and again["A"].claw.fixed_side == chosen.claw.fixed_side
-    expected = chosen.claw.root_from_pinch[:3, 3] + np.array([0.005, 0.0, 0.0]) - offset
-    np.testing.assert_allclose(again["A"].claw.root_from_pinch[:3, 3], expected, atol=1e-6)
-    np.testing.assert_allclose(
-        again["A"].claw.grasp.center_root, chosen.claw.grasp.center_root + [0.005, 0, 0], atol=1e-9
-    )
-    with pytest.raises(ValueError, match="cylinder"):
-        refine(model, chosen, object(), BOWL1_CAPTURE)  # type: ignore[arg-type]
