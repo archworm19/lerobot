@@ -163,6 +163,16 @@ accelerate-dep = ["accelerate>=1.14.0,<2.0.0"]
 can-dep = ["python-can>=4.2.0,<5.0.0"]
 peft-dep = ["peft>=0.18.0,<1.0.0"]
 scipy-dep = ["scipy>=1.14.0,<2.0.0"]
+kornia-dep = ["kornia>=0.8.2,<0.10.0"]
+# Depth Anything 3 as source only: its declared dependencies (numpy<2, opencv-python, moviepy, open3d, pycolmap, gradio,
+# ...) are replaced by the ones its inference modules import (`[[tool.uv.dependency-metadata]]` below); we never
+# import its `api.py` (exporters, viewers). felix_jr wraps the network (`harness/depth_anything.py`).
+depth-anything-dep = [
+    "depth-anything-3==0.1.1",
+    "omegaconf>=2.3.0,<3.0.0",
+    "addict>=2.4.0,<3.0.0",
+    "imageio>=2.30.0,<3.0.0",
+]
 diffusers-dep = ["diffusers>=0.38.0,<0.40.0"]
 qwen-vl-utils-dep = ["qwen-vl-utils>=0.0.11,<0.1.0"]
 matplotlib-dep = ["matplotlib>=3.10.3,<4.0.0", "contourpy>=1.3.0,<2.0.0"] # NOTE: Explicitly listing contourpy helps the resolver converge faster.
@@ -205,8 +215,8 @@ reachy2 = [
 # leader (motorbridge-smart-servo / FashionStar UART servos).
 rebot = ["lerobot[motorbridge-dep]", "lerobot[motorbridge-smart-servo-dep]"]
 kinematics = ["lerobot[placo-dep]"]
-# felix_jr camera calibration: pinocchio (via placo) for the kinematics, scipy for the fit.
-felix_jr = ["lerobot[placo-dep]", "lerobot[scipy-dep]"]
+# felix_jr camera calibration: pinocchio (via placo) for the kinematics, scipy for the fits, matplotlib for their plots.
+felix_jr = ["lerobot[placo-dep]", "lerobot[scipy-dep]", "lerobot[matplotlib-dep]", "lerobot[kornia-dep]", "lerobot[depth-anything-dep]"]
 intelrealsense = [
     "pyrealsense2>=2.55.1.6486,<2.57.0 ; sys_platform != 'darwin'",
     "pyrealsense2-macosx>=2.54,<2.57.0 ; sys_platform == 'darwin'",
@@ -396,6 +406,26 @@ explicit = true
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+
+# depth-anything-3's own metadata pins numpy<2 and pulls in exporters and a web app; these are what its network,
+# config and input / output processing import (checked with the heavy packages blocked, 2026-11-09).
+[[tool.uv.dependency-metadata]]
+name = "depth-anything-3"
+version = "0.1.1"
+requires-dist = [
+    "torch",
+    "torchvision",
+    "numpy",
+    "einops",
+    "opencv-python-headless",
+    "pillow",
+    "safetensors",
+    "huggingface-hub",
+    "omegaconf",
+    "addict",
+    "imageio",
+    "tqdm",
+]
 
 [tool.setuptools.package-data]
 lerobot = ["envs/*.json", "annotations/steerable_pipeline/prompts/*.txt"]

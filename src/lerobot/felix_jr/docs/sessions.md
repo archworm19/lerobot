@@ -12,7 +12,8 @@ holds objects removed since (`Plan`, `Reach`) or lacks the call log. Their image
 **Setup.** The bottle in the container from bowl7; the chapstick (1.75 cm) upright at (-51, 7) cm, near the right arm's
 far reach. The pattern: the head plans, the wrist refines (DA3 on a few views at a hold, a cylinder fitted to the
 graspable part, the contact patches in the jaws' frame); the person: no nudging, the fixed finger close but not touching.
-`harness/scratch/da3_check.py` (`checkpoint`), DA3-SMALL in its isolated environment.
+`harness/scratch/da3_check.py` (`checkpoint`), DA3-SMALL in an isolated environment (in the repo since 2026-11-09:
+`harness/depth_anything.py`).
 
 1. **Head:** the body only (below the cap), radius held at the measured 0.875 cm; grasp B (2.7 cm up, pitch -30).
    The approach stopped at "stage" (the elbow 2.7 deg short of 2.5) with the jaws still closed (their "open" was in

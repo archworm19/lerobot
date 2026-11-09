@@ -176,6 +176,9 @@ outputs/
 *.urdf
 *.xml
 *.part
+# felix_jr's URDFs and calibrations, and the frozen ones its tests use, are committed
+!src/lerobot/felix_jr/urdfs/*.urdf
+!tests/felix_jr/reference/*.urdf
 
 # Scratch work, anywhere in the repo
 **/scratch/

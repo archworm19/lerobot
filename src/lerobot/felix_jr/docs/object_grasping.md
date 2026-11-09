@@ -760,8 +760,8 @@ were not. Details and numbers: [sessions.md](sessions.md), sections 6-6.3 above.
 2. **The head's depth for the targets:** the object's place and the initial grasp (within 1-2 cm: good enough to get
    the wrist camera there).
 3. **A short wrist roll + DA3 at a hold:** a +-15 deg roll (3 frames, the wrist only), posed by structure from motion
-   (`sfm_torch`: DISK + LightGlue) and scaled by the head's table height (`scan_scale`); DA3-SMALL (isolated
-   environment: its packaging conflicts with ours) gives dense depth on every frame; a cylinder fitted to all the
+   (`sfm_torch`: DISK + LightGlue) and scaled by the head's table height (`scan_scale`); DA3-SMALL
+   (`harness.depth_anything`, below) gives dense depth on every frame; a cylinder fitted to all the
    graspable part's points (the table measured locally, the object's pixels by color, DA3's flying pixels at depth
    edges and its least confident third dropped); the contact patches where the jaws' closing plane meets it
    (`harness/scratch/da3_check.py`). bowl7: radius 1.52 cm (1.45 measured), "advance 1.9 cm": it worked.
@@ -796,11 +796,49 @@ were not. Details and numbers: [sessions.md](sessions.md), sections 6-6.3 above.
 
 - **Moves along the approach fall ~1 cm short** over a few cm (bowl7, bowl8 twice): the wrist joints' geometry
   (calibrate from head-observed roll and flex motions), or plan the last centimeters from a fresh view (which works).
-- **DA3 in the harness:** a local service in its own environment (the person's idea: started on first use, shut down
-  when idle), the checkpoint as a tool with the contact shift's sign computed (bowl8: applied by hand with the wrong
-  sign once), and tests.
+- **The checkpoint as a tool** (`scratch/da3_check.py` today), posed by the joints (the ablation), with the contact
+  shift's sign computed (bowl8: applied by hand with the wrong sign once), and tests; then the deprecated tools removed.
 - **The VLM's part:** choosing the graspable part (the box, the height band) and judging the overlays; the person did
   the final checks in bowl7/8.
+
+### Which poses DA3 needs (an ablation on the saved checkpoints, offline, 2026-11-08)
+
+The checkpoints fed DA3 the structure-from-motion poses (`sfm_torch`) scaled by the table. Run again on bowl7's and
+bowl8's saved frames, each scaled by the table under the object (the same fit and contacts, `scratch/da3_check.py`):
+
+| | bowl7 (radius 1.45) | bowl8 cp1 (0.875) | bowl8 cp2 (0.875) |
+| --- | --- | --- | --- |
+| B: SfM poses (as used) | free r 1.59; chord +1.32, fixed +1.02 | chord +2.65, fixed -1.20 | chord +2.27, fixed -0.19 |
+| A: the model's poses (joints read) | free r **1.45**; chord +1.20, fixed +0.93 | chord +2.65, fixed -1.16 | chord +2.27, fixed -0.18 |
+| C: DA3's own poses | free r 0.92; chord +2.67, fixed +0.31 | chord +2.95, fixed -0.25 | free fit failed; fixed +0.29 |
+
+(cm; the chord: the widest chord's distance beyond the fingertips; fixed: the fixed-side contact along the closing
+line; the radius held at the measured value unless "free".)
+
+- **The model's poses do as well as structure from motion** (within 1-2 mm on every contact; bowl7's free radius
+  exact): for a short, wrist-only roll the model's relative motion is good enough, once the table sets the scale.
+  Structure from motion (and with it the learned matcher, ~10 s per checkpoint) can be dropped from the checkpoint.
+- **DA3's own poses do not** (contacts 0.5-1.4 cm off, a free fit failing): give it poses.
+- So the checkpoint: a short wrist roll -> DA3 posed by the model's joints -> the table's scale -> the primitive ->
+  the contacts. (Rolls only: the model's motion was 5% off for the wrist roll, more for the elbow and the wrist flex.)
+
+### DA3 in the repo (2026-11-09)
+
+`harness/depth_anything.py` (`DepthAnything.from_hub()`, `.depth(images, world_from_camera, intrinsics)` -> `Depth`):
+DA3-SMALL in our own environment, in process. The `depth-anything-3` package (0.1.1, pinned) is a **source-only**
+dependency: its declared dependencies (numpy<2, opencv-python, moviepy, open3d, pycolmap, gradio, ...) are replaced
+in `pyproject.toml` (`[[tool.uv.dependency-metadata]]`) by what its network, config and input / output processing
+import (torch, torchvision, einops, OpenCV, PIL, safetensors, huggingface_hub, tqdm; new: omegaconf, addict, imageio:
+all small, pure Python), in the `felix_jr` extra (`depth-anything-dep`). Its `api.py` (which loads its exporters and
+web app at import) is not used: the wrapper builds the network from the package's config, loads the weights from the
+Hub (137 MB, cached; Apache-2.0: the larger DA3 models' licenses differ), uses the package's input and output
+processing and pose normalization, and aligns the prediction to our poses by a Umeyama fit of the camera centers (the
+package's `evo` dependency, the same fit). Parity with the package's own `inference`: the single-frame depth within
+0.01%, the posed depth within 0.2% per frame (`smoke_tests/test_depth_anything_smoke.py`, against frozen depths of
+synthetic frames, `reference/da3_small_parity.npz`; skipped without the weights cached). The checkpoint
+(`scratch/da3_check.py`) now runs it in process (bowl8's checkpoint 2 again: the same contacts within 0.1 mm), ~8 s
+on the laptop's CPU / MPS. To upgrade DA3: bump the pin, regenerate the parity reference from the package's own
+`inference`, re-run the test.
 
 ### Deprecated by these findings (2026-11-08)
 
@@ -809,7 +847,7 @@ called); kept for now, to be removed once the DA3 checkpoint is a tool:
 
 | Tool | Why | Instead |
 | --- | --- | --- |
-| `sfm_light` | SIFT's matches failed on the robot's frames | `sfm_torch` (as DA3's pose provider) |
+| `sfm_light` | SIFT's matches failed on the robot's frames | DA3 posed by the model's joints (the ablation above) |
 | `triangulate_wrist` | triangulating over the arm's moves inherits its motion error (bowl6) | DA3 on a short wrist roll |
 | `scan_fit_cylinder` | a sparse silhouette fit: a wrong radius (bowl7) | a cylinder on DA3's points (`scratch/da3_check.py`) |
 | `scan_locate`, `scan_find` | sparse depth; never used on the robot | DA3's dense depth |
@@ -819,5 +857,7 @@ In part: `scan_scale`'s width path (bowl7: x1.6 from a wrong width; the table pa
 measurement from marked edges (depth from the width, `center`, `sidestep_m`, `hinge_gain`: superseded by the DA3
 checkpoint; as the planner of a given move, `nudge_m`, it stays). Outside the harness: `checks/hil_wrist_sfm.py`'s
 `handeye-record` / `handeye-fit` (the board's hand-eye fit over arm poses absorbs the arm model's errors: not for the
-camera's pose on the gripper; the fingertip fit is). Still current: `wrist_look`, `render_wrist` (the closing line,
-the midline), `wrist_scan` / `scan_views` / `sfm_torch` (poses for DA3), `scan_scale` (the table), `align_step`.
+camera's pose on the gripper; the fingertip fit is). After the ablation, `sfm_torch` and the structure from motion
+inside `wrist_scan` / `scan_views` are not needed for the checkpoint either (the model's poses do as well); kept until
+the checkpoint is a tool. Still current: `wrist_look`, `render_wrist` (the closing line, the midline), `wrist_scan`'s
+sweep (the frames), `align_step`.
