@@ -347,6 +347,7 @@ class FakeHardware:
         head_range_path: Path | None = None,
         arm_time_scale: float = 0.25,
         wrist_renderer: Callable[[str, dict[str, Any]], np.ndarray] | None = None,
+        head_renderer: Callable[[dict[str, Any]], np.ndarray] | None = None,
         **motion_kwargs: Any,
     ):
         """A fake robot with arms named `arms`.
@@ -355,9 +356,12 @@ class FakeHardware:
         shortens simulated arm motions (see `FakeArms`); `motion_kwargs` go to `MotionController` (e.g. a
         short `watchdog_s` for tests). `wrist_renderer(arm, state)` draws a wrist camera's frame (RGB) from the
         joint state (tests render a scene with it); by default each arm's wrist camera shows a gradient.
+        `head_renderer(state)` likewise draws the head camera's color frame (`WIDTH` x `HEIGHT`, `FX`), in place of
+        the gradient (the depth stays the synthetic one).
         """
         self.captures = 0
         self.wrist_renderer = wrist_renderer
+        self.head_renderer = head_renderer
         self.arm_backend = FakeArms(arms, arm_time_scale)
         self.head: HeadController | None = HeadController(
             FakeHeadBackend(), {"head_neck": -1, "head_eyes": 1}, RangeStore(head_range_path)
@@ -397,6 +401,8 @@ class FakeHardware:
         if self.head is not None:
             shift = round((self.head.backend.read_ticks("head_eyes") - 2048) * self.PIXELS_PER_TICK)
             color, depth = np.roll(color, shift, axis=0), np.roll(depth, shift, axis=0)
+        if self.head_renderer is not None:
+            color = self.head_renderer(self.state())
         intr = {"width": w, "height": h, "fx": self.FX, "fy": self.FX, "ppx": w / 2, "ppy": h / 2}
         calibration = {
             "depth_scale_m_per_unit": 0.001,

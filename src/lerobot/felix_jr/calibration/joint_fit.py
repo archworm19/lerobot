@@ -17,22 +17,33 @@ and the fingers' thickness (with a tight prior). The residuals, all in pixels ov
 The lenses are fixed (the wrist's from `calibration.wrist_camera`, the head's the RealSense's). Huber-weighted least
 squares from the model's current estimates (`scipy.optimize.least_squares`, finite differences, grouped by
 what each unknown touches: a moment's joint errors only what was seen at it).
+
+**Sessions** (`JointSession`, `joint_collect` writes them): a folder with `joint_session.json` (the board, the head's
+servo map and lens, the arm's LeRobot calibration, the moments, the sightings and clicks) and their pictures.
+`calibrate` fits sessions, holding out some moments' clicks to check the result on, and writes the calibration.
+
+Usage: uv run python -m lerobot.felix_jr.calibration.joint_fit SESSION [SESSION ...] --start-from calibration.urdf
+       --out calibration.urdf [--holdout-every 5]
 """
 
+import argparse
+import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import cv2
 import numpy as np
 
-from lerobot.felix_jr.calibration.boards import Board, Detection, board_pose
+from lerobot.felix_jr.calibration.boards import Board, Detection, board_from_dict, board_pose
 from lerobot.felix_jr.calibration.merge_urdf import SO101_JOINTS
 from lerobot.felix_jr.calibration.xle_robot_model import (
     JAW_THICKNESS_M,
     WristCamera,
     XleRobotModel,
     arm_joint,
+    arm_record,
     pinch_frame,
     wrist_camera_link,
 )
@@ -67,6 +78,7 @@ class BoardSighting:
     placement: str
     look: Look
     detection: Detection
+    image: str = ""  # the picture, in its session's folder
 
 
 @dataclass(frozen=True)
@@ -80,6 +92,7 @@ class TipClick:
     arm: str
     look: Look
     pixel: np.ndarray
+    image: str = ""  # the picture, in its session's folder
 
 
 @dataclass
@@ -345,3 +358,309 @@ class JointProblem:
             for k, v in self.residual_parts(result.x, theta0).items()
         }
         return JointFit(theta, gcs, boards, thickness, rms, int(result.nfev), str(result.message))
+
+
+# ---- sessions ---------------------------------------------------------------------------------------------------
+
+SESSION_FILE = "joint_session.json"
+
+
+@dataclass
+class JointSession:
+    """One arm's joint-calibration session: the board, what the robot was set up as, what was seen and clicked."""
+
+    path: Path
+    arm: str
+    board: Board
+    head_signs: dict[str, int]
+    head_refs: dict[str, int]
+    intrinsics: dict[str, float]
+    arm_calibration: dict[str, dict[str, int]] | None
+    sightings: list[BoardSighting] = field(default_factory=list)
+    clicks: list[TipClick] = field(default_factory=list)
+    placements: dict[str, list[list[float]]] = field(default_factory=dict)  # where the session put each board
+
+
+def save_session(session: JointSession) -> Path:
+    """Write `joint_session.json` in the session's folder (the moments once each, referred to by index)."""
+    looks: list[Look] = []
+    index: dict[int, int] = {}
+
+    def look_index(look: Look) -> int:
+        if id(look) not in index:
+            index[id(look)] = len(looks)
+            looks.append(look)
+        return index[id(look)]
+
+    sightings = [
+        {
+            "camera": s.camera,
+            "placement": s.placement,
+            "look": look_index(s.look),
+            "ids": s.detection.ids.tolist(),
+            "pixels": s.detection.pixels.tolist(),
+            "image": s.image,
+        }
+        for s in session.sightings
+    ]
+    clicks = [
+        {
+            "camera": c.camera,
+            "arm": c.arm,
+            "look": look_index(c.look),
+            "pixel": list(map(float, c.pixel)),
+            "image": c.image,
+        }
+        for c in session.clicks
+    ]
+    data = {
+        "version": 1,
+        "arm": session.arm,
+        "board": session.board.to_dict(),
+        "head_signs": session.head_signs,
+        "head_refs": session.head_refs,
+        "intrinsics": session.intrinsics,
+        "arm_calibration": session.arm_calibration,
+        "placements": session.placements,
+        "looks": [
+            {"arms": {a: dict(p) for a, p in lk.arms.items()}, "head_ticks": dict(lk.head_ticks)}
+            for lk in looks
+        ],
+        "sightings": sightings,
+        "clicks": clicks,
+    }
+    session.path.mkdir(parents=True, exist_ok=True)
+    path = session.path / SESSION_FILE
+    path.write_text(json.dumps(data, indent=1))
+    return path
+
+
+def load_session(directory: str | Path) -> JointSession:
+    """Read a session folder's `joint_session.json`."""
+    directory = Path(directory).expanduser()
+    data = json.loads((directory / SESSION_FILE).read_text())
+    looks = [Look(lk["arms"], {k: int(v) for k, v in lk["head_ticks"].items()}) for lk in data["looks"]]
+    sightings = [
+        BoardSighting(
+            s["camera"],
+            s["placement"],
+            looks[s["look"]],
+            Detection(
+                np.asarray(s["ids"], dtype=int), np.asarray(s["pixels"], dtype=np.float64).reshape(-1, 2)
+            ),
+            s.get("image", ""),
+        )
+        for s in data["sightings"]
+    ]
+    clicks = [
+        TipClick(
+            c["camera"],
+            c["arm"],
+            looks[c["look"]],
+            np.asarray(c["pixel"], dtype=np.float64),
+            c.get("image", ""),
+        )
+        for c in data["clicks"]
+    ]
+    return JointSession(
+        directory,
+        data["arm"],
+        board_from_dict(data["board"]),
+        {k: int(v) for k, v in data["head_signs"].items()},
+        {k: int(v) for k, v in data["head_refs"].items()},
+        data["intrinsics"],
+        data.get("arm_calibration"),
+        sightings,
+        clicks,
+        data.get("placements", {}),
+    )
+
+
+# ---- fitting sessions --------------------------------------------------------------------------------------------
+
+
+def click_errors(
+    model: XleRobotModel,
+    cameras: Mapping[str, WristCamera],
+    clicks: Sequence[TipClick],
+    theta: np.ndarray,
+    gcs: Mapping[str, np.ndarray],
+    thickness: float,
+) -> np.ndarray:
+    """Each click's distance (px) from where the model (`theta`, the cameras' poses, the thickness) puts its tip.
+
+    From the joints as read (no fitted errors: these are clicks the fit did not see).
+    """
+    if not clicks:
+        return np.zeros(0)
+    problem = JointProblem(model, _no_board(), cameras, [], clicks, joint_sigma_deg=0.0)
+    out = []
+    for c in clicks:
+        q = problem.q(c, np.zeros(problem.size))
+        uv = problem.project(c.camera, q, problem.tip(c, q, theta, thickness)[None], theta, dict(gcs))
+        out.append(float(np.linalg.norm(uv[0] - c.pixel)) if np.isfinite(uv).all() else np.inf)
+    return np.array(out)
+
+
+def _no_board() -> Board:
+    from lerobot.felix_jr.calibration.boards import Checkerboard
+
+    return Checkerboard(3, 3, 0.01)  # a placeholder: click-only problems have no sightings
+
+
+def split_holdout(clicks: Sequence[TipClick], every: int) -> tuple[list[TipClick], list[TipClick]]:
+    """(fitted, held out): the clicks of every `every`-th moment are held out (none if `every` is 0)."""
+    if every <= 0:
+        return list(clicks), []
+    order: dict[int, int] = {}
+    for c in clicks:
+        order.setdefault(id(c.look), len(order))
+    held = [c for c in clicks if order[id(c.look)] % every == every - 1]
+    kept = [c for c in clicks if order[id(c.look)] % every != every - 1]
+    return kept, held
+
+
+def calibrate(
+    model: XleRobotModel, sessions: Sequence[JointSession], holdout_every: int = 5
+) -> tuple[XleRobotModel, JointFit, dict[str, Any]]:
+    """Fit `sessions` (one board kind) from `model`; the calibrated model, the fit, and a report's numbers.
+
+    Every `holdout_every`-th moment's clicks are left out of the fit and scored after it, as the first check.
+    """
+    boards = {json.dumps(s.board.to_dict(), sort_keys=True) for s in sessions}
+    if len(boards) != 1:
+        raise ValueError("the sessions used different boards: fit them separately")
+    for s in sessions:
+        if s.head_signs != model.head_signs:
+            raise ValueError(f"{s.path}: the head's servo directions differ from the calibration's")
+    arms = sorted({s.arm for s in sessions})
+    cameras = {}
+    for arm in arms:
+        camera = model.wrist_cameras.get(arm)
+        if camera is None or camera.gripper_from_camera is None:
+            raise ValueError(
+                f"the start has no {arm} wrist camera (its lens and a first pose: calibration.wrist_camera)"
+            )
+        cameras[arm] = camera
+    sightings = [x for s in sessions for x in s.sightings]
+    kept, held = split_holdout([c for s in sessions for c in s.clicks], holdout_every)
+    problem = JointProblem(model, sessions[0].board, cameras, sightings, kept)
+    gc0 = {a: np.asarray(cameras[a].gripper_from_camera, dtype=np.float64) for a in arms}
+    before = click_errors(model, cameras, held, model.estimates, gc0, JAW_THICKNESS_M)
+    fit = problem.fit()
+    after = click_errors(model, cameras, held, fit.theta, fit.gripper_from_camera, fit.thickness)
+    calibrated = model
+    for arm in arms:
+        gc = fit.gripper_from_camera[arm]
+        calibrated = calibrated.with_wrist_camera(
+            arm, replace(cameras[arm], gripper_from_camera=tuple(tuple(float(v) for v in row) for row in gc))
+        )
+    calibrated.set_estimates(fit.theta)
+    calibrated.arm_calibration = {
+        **model.arm_calibration,
+        **{s.arm: arm_record(s.arm_calibration) for s in sessions if s.arm_calibration},
+    }
+    numbers: dict[str, Any] = {
+        "sessions": [str(s.path) for s in sessions],
+        "sightings": {k: sum(x.camera == k for x in sightings) for k in [HEAD, *arms]},
+        "clicks": {"fitted": len(kept), "held out": len(held)},
+        "rms_px": fit.rms_px,
+        "held_out_px": {
+            camera: {
+                "before": float(np.sqrt(np.mean(before[mask] ** 2))) if mask.any() else None,
+                "after": float(np.sqrt(np.mean(after[mask] ** 2))) if mask.any() else None,
+            }
+            for camera in [HEAD, *arms]
+            for mask in [np.array([c.camera == camera for c in held], dtype=bool)]
+        },
+        "thickness_mm": 1000 * fit.thickness,
+        "camera_moved": {
+            arm: {
+                "mm": float(1000 * np.linalg.norm(fit.gripper_from_camera[arm][:3, 3] - gc0[arm][:3, 3])),
+                "deg": float(
+                    np.degrees(
+                        np.linalg.norm(
+                            cv2.Rodrigues(fit.gripper_from_camera[arm][:3, :3] @ gc0[arm][:3, :3].T)[0]
+                        )
+                    )
+                ),
+            }
+            for arm in arms
+        },
+        "nfev": fit.nfev,
+        "message": fit.message,
+    }
+    calibrated.fit_info = {**model.fit_info, "joint_fit": numbers}
+    return calibrated, fit, numbers
+
+
+def report(model: XleRobotModel, start: XleRobotModel, numbers: Mapping[str, Any]) -> str:
+    """A markdown report of a `calibrate` run: what was fitted, how well, what moved."""
+    lines = [
+        "# Joint calibration",
+        "",
+        f"Sessions: {', '.join(numbers['sessions'])}",
+        "",
+        "| | count |",
+        "| --- | --- |",
+        *[f"| board sightings, {k} | {v} |" for k, v in numbers["sightings"].items()],
+        f"| clicks fitted / held out | {numbers['clicks']['fitted']} / {numbers['clicks']['held out']} |",
+        "",
+        "## Residuals (RMS, px)",
+        "",
+        *[f"- {k}: {v:.2f}" for k, v in numbers["rms_px"].items()],
+        "",
+        "## Held-out clicks (RMS, px): the first check (near the clicks' noise, 2-3 px)",
+        "",
+        *[
+            f"- {k}: {v['before']:.1f} before -> {v['after']:.1f} after"
+            for k, v in numbers["held_out_px"].items()
+            if v["after"] is not None
+        ],
+        "",
+        f"The fingers' thickness: {numbers['thickness_mm']:.1f} mm (1.0 measured).",
+        "",
+        *[
+            f"The {arm} wrist camera moved {v['mm']:.1f} mm and {v['deg']:.2f} deg on its gripper."
+            for arm, v in numbers["camera_moved"].items()
+        ],
+        "",
+        "## The estimates that moved most (in their prior's sigmas)",
+        "",
+        "| parameter | start | now | change |",
+        "| --- | --- | --- | --- |",
+    ]
+    change = (model.estimates - start.estimates) / np.array([p.sigma for p in model.parameters])
+    for i in np.argsort(-np.abs(change))[:12]:
+        p = model.parameters[i]
+        lines.append(
+            f"| {p.name} | {p.display(start.estimates[i]):+.2f} {p.unit} | {p.display(model.estimates[i]):+.2f} "
+            f"{p.unit} | {change[i]:+.2f} sigma |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def main() -> None:
+    """Command line entry point; see the module docstring."""
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("sessions", nargs="+", type=Path, help="joint_collect session folders")
+    parser.add_argument("--start-from", type=Path, required=True, help="the calibration to start from")
+    parser.add_argument("--out", type=Path, required=True, help="the calibrated URDF to write")
+    parser.add_argument(
+        "--holdout-every", type=int, default=5, help="hold out every n-th moment's clicks (5)"
+    )
+    args = parser.parse_args()
+    start = XleRobotModel.load(args.start_from)
+    sessions = [load_session(path) for path in args.sessions]
+    if sessions[0].intrinsics:
+        start.intrinsics = dict(sessions[0].intrinsics)
+    calibrated, _, numbers = calibrate(start, sessions, args.holdout_every)
+    calibrated.save(args.out)
+    text = report(calibrated, start, numbers)
+    args.out.with_suffix(".md").write_text(text)
+    print(text)
+    print(f"Wrote {args.out} and {args.out.with_suffix('.md')}")
+
+
+if __name__ == "__main__":
+    main()

@@ -70,6 +70,17 @@ def set_floor(model: XleRobotModel, arm: str, floor_z: float | None, note: Calla
         note("no floor height known: keeping the pinch point above the arm base's height (--floor-z)")
 
 
+def move_head_to(client: FelixClient, targets: dict[str, int]) -> float | None:
+    """Move each head servo to raw ticks `targets` (within 2 ticks: left). Returns the finish time of the last move."""
+    head = client.head_state()
+    done = None
+    for name, target in targets.items():
+        delta = head[name]["sign"] * (target - head[name]["ticks"]) / TICKS_PER_DEG
+        if abs(delta) * TICKS_PER_DEG >= 2:
+            done = client.head_move(name, delta_deg=delta)["done_at"]
+    return done
+
+
 class LiveView:
     """One arm seen through the head camera, moved view after view. See the module docstring."""
 
@@ -131,13 +142,7 @@ class LiveView:
 
     def _move_head_to(self, targets: dict[str, int]) -> float | None:
         """Move each head servo to raw ticks `targets`. Returns the finish time of the last move."""
-        head = self.client.head_state()
-        done = None
-        for name, target in targets.items():
-            delta = head[name]["sign"] * (target - head[name]["ticks"]) / TICKS_PER_DEG
-            if abs(delta) * TICKS_PER_DEG >= 2:
-                done = self.client.head_move(name, delta_deg=delta)["done_at"]
-        return done
+        return move_head_to(self.client, targets)
 
     def next_pose(self, gripper_pos: float | None = None) -> bool:
         """Find a view of the next target that shows the pinch point, move the arm and the head there, show it.

@@ -75,3 +75,38 @@ def test_the_sparsity_covers_every_dependence(session):
         step[column] = 1e-6
         changed = np.abs(problem.residuals(x + step) - base) > 1e-9
         assert not (changed & ~sparsity[:, column]).any(), column
+
+
+def test_a_session_is_saved_and_read_back(session, tmp_path):
+    """Sightings and clicks keep their moments shared (one joint error each) through the file."""
+    from lerobot.felix_jr.calibration.joint_fit import JointSession, load_session, save_session
+
+    world, problem = session
+    model = world.model
+    saved = JointSession(
+        tmp_path,
+        ARM,
+        world.board,
+        model.head_signs,
+        model.head_refs,
+        model.intrinsics,
+        None,
+        problem.sightings,
+        problem.clicks,
+    )
+    save_session(saved)
+    back = load_session(tmp_path)
+    assert back.board == world.board and back.arm == ARM
+    assert len(back.sightings) == len(saved.sightings) and len(back.clicks) == len(saved.clicks)
+    again = JointProblem(model, back.board, {ARM: world.camera}, back.sightings, back.clicks)
+    assert len(again.looks) == len(problem.looks)
+    np.testing.assert_allclose(again.residuals(again.start()), problem.residuals(problem.start()))
+
+
+def test_held_out_clicks_are_whole_moments(session):
+    from lerobot.felix_jr.calibration.joint_fit import split_holdout
+
+    _, problem = session
+    kept, held = split_holdout(problem.clicks, 2)
+    assert held and kept and len(kept) + len(held) == len(problem.clicks)
+    assert not {id(c.look) for c in kept} & {id(c.look) for c in held}

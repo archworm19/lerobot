@@ -293,8 +293,25 @@ records the servo signs to match. The URDF's camera is a generic `head_camera_li
 
 ## The rework: one joint calibration of the head, the arms and the wrist cameras (design, 2026-11-09)
 
-Branch `calibration_rework`. **Status: design; built so far: the boards (`calibration/boards.py`), the fit
-(`calibration/joint_fit.py`) and a simulator to size a session (`calibration/joint_sim.py`); below.** It replaces how the model is calibrated, so it is
+Branch `calibration_rework`. **Status: built, not yet run on the robot:** the boards (`calibration/boards.py`), the
+fit (`calibration/joint_fit.py`), a simulator to size a session (`calibration/joint_sim.py`), the views' planning
+(`calibration/joint_views.py`) and the session on the robot (`calibration/joint_collect.py`); below.
+
+**Run it** (one arm per session; the start must have the arm's wrist camera lens, `calibration.wrist_camera`):
+
+```bash
+uv run python -m lerobot.felix_jr.calibration.joint_collect tcp://<pi>:5555 --arm right \
+    --start-from <calibration.urdf> --out-dir <scratch folder> [--board checkerboard:8x6:0.025]
+uv run python -m lerobot.felix_jr.calibration.joint_fit <session> [<session> ...] --start-from <calibration.urdf> \
+    --out <new calibration.urdf>   # a refit, e.g. both arms' sessions together
+```
+
+Per placement (2 by default): the arms rest and the head looks where the board should go (an outline); lay it there,
+`n`: the head finds it and looks at it from 6 directions. Then 10 arm views (`n` each, the arm moves slowly): the head
+looks at the board and the gripper; click the fixed fingertip in both pictures (each with a zoomed inset; the head's
+face in its picture, the other face in the wrist's). Then 10 low poses, clicks only. `q` fits and writes
+`calibration.urdf` and `calibration.md` (held-out clicks first). Tested end to end on the fake robot with a rendered
+board (`smoke_tests/test_joint_collect_smoke.py`: the camera's pose on the fingers from 9 mm off to 0.4 mm). It replaces how the model is calibrated, so it is
 built beside the current pipeline (`collect` + `xle_fit`, then `wrist_camera`'s pose step) and replaces it only once
 it passes the checks at the end of this section.
 
