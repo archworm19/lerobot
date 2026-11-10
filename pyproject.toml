@@ -164,6 +164,7 @@ can-dep = ["python-can>=4.2.0,<5.0.0"]
 peft-dep = ["peft>=0.18.0,<1.0.0"]
 scipy-dep = ["scipy>=1.14.0,<2.0.0"]
 kornia-dep = ["kornia>=0.8.2,<0.10.0"]
+mujoco-dep = ["mujoco>=3.8.1,<5.0.0"]
 # Depth Anything 3 as source only: its declared dependencies (numpy<2, opencv-python, moviepy, open3d, pycolmap, gradio,
 # ...) are replaced by the ones its inference modules import (`[[tool.uv.dependency-metadata]]` below); we never
 # import its `api.py` (exporters, viewers). felix_jr wraps the network (`harness/depth_anything.py`).
@@ -217,6 +218,8 @@ rebot = ["lerobot[motorbridge-dep]", "lerobot[motorbridge-smart-servo-dep]"]
 kinematics = ["lerobot[placo-dep]"]
 # felix_jr camera calibration: pinocchio (via placo) for the kinematics, scipy for the fits, matplotlib for their plots.
 felix_jr = ["lerobot[placo-dep]", "lerobot[scipy-dep]", "lerobot[matplotlib-dep]", "lerobot[kornia-dep]", "lerobot[depth-anything-dep]"]
+# felix_jr's simulation (sim-to-real grasping, `felix_jr/sim`): MuJoCo on top of the rest.
+felix_jr_sim = ["lerobot[felix_jr]", "lerobot[mujoco-dep]"]
 intelrealsense = [
     "pyrealsense2>=2.55.1.6486,<2.57.0 ; sys_platform != 'darwin'",
     "pyrealsense2-macosx>=2.54,<2.57.0 ; sys_platform == 'darwin'",

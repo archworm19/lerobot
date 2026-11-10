@@ -23,6 +23,7 @@ running anything on the robot, and update it when what you do changes what it sa
   - `docs/harness.md`: the VLM harness (research summary, design principles 1.A-1.K, experiment plan).
   - `docs/object_grasping.md`: the object-centric grasping experiment (phases A-C built; next, coarse to fine with the wrist cameras): plan, interfaces, flow, what it replaces and what is deprecated, open questions.
   - `docs/camera_calibration.md`: the click calibration and `XleRobotModel`.
+  - `docs/sim2real_grasp.md`: the research branch for a grasp policy trained in simulation (MuJoCo, `sim/`): the idea, the simulator on this Mac, the robot model, next steps.
   - `docs/server_plan.md`: the Pi / laptop split and the protocol.
   - `docs/head.md`: the head servos.
 - **Experiments** (what was tried, with numbers):
@@ -40,8 +41,8 @@ uv run python -m lerobot.felix_jr.<folder>.<script> ...
 ```
 
 Extras: `--extra feetech` (servos), `--extra pyzmq-dep` (the server), `--extra felix_jr` (pinocchio, placo,
-scipy: calibration and reach). Anything that moves the robot needs a person watching; scripts that move it ask
-first (`api.SAFE`) and go to rest on exit. Rehearse against the fake robot (`server.server --fake`) when you can.
+scipy: calibration and reach), `--extra felix_jr_sim` (MuJoCo, for `sim/`). Anything that moves the robot needs a
+person watching; scripts that move it ask first (`api.SAFE`) and go to rest on exit. Rehearse against the fake robot (`server.server --fake`) when you can.
 
 New scripts go in `setup/` if what they write is a robot setting, and in `calibration/` if it goes into the calibrated
 URDF (`docs/layout.md`, "setup/ and calibration/"). The URDF records the robot settings it was made under, and

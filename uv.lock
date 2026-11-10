@@ -3397,6 +3397,20 @@ felix-jr = [
     { name = "placo" },
     { name = "scipy" },
 ]
+felix-jr-sim = [
+    { name = "addict" },
+    { name = "cmeel-tinyxml2" },
+    { name = "cmeel-urdfdom" },
+    { name = "contourpy" },
+    { name = "depth-anything-3" },
+    { name = "imageio" },
+    { name = "kornia" },
+    { name = "matplotlib" },
+    { name = "mujoco" },
+    { name = "omegaconf" },
+    { name = "placo" },
+    { name = "scipy" },
+]
 flux3 = [
     { name = "transformers" },
 ]
@@ -3530,6 +3544,9 @@ motorbridge-dep = [
 ]
 motorbridge-smart-servo-dep = [
     { name = "motorbridge-smart-servo" },
+]
+mujoco-dep = [
+    { name = "mujoco" },
 ]
 multi-task-dit = [
     { name = "diffusers" },
@@ -3763,6 +3780,7 @@ requires-dist = [
     { name = "lerobot", extras = ["feetech"], marker = "extra == 'all'" },
     { name = "lerobot", extras = ["feetech"], marker = "extra == 'hopejr'" },
     { name = "lerobot", extras = ["feetech"], marker = "extra == 'lekiwi'" },
+    { name = "lerobot", extras = ["felix-jr"], marker = "extra == 'felix-jr-sim'" },
     { name = "lerobot", extras = ["flux3"], marker = "extra == 'all'" },
     { name = "lerobot", extras = ["gamepad"], marker = "extra == 'all'" },
     { name = "lerobot", extras = ["groot"], marker = "extra == 'all'" },
@@ -3790,6 +3808,7 @@ requires-dist = [
     { name = "lerobot", extras = ["molmoact2"], marker = "extra == 'all'" },
     { name = "lerobot", extras = ["motorbridge-dep"], marker = "extra == 'rebot'" },
     { name = "lerobot", extras = ["motorbridge-smart-servo-dep"], marker = "extra == 'rebot'" },
+    { name = "lerobot", extras = ["mujoco-dep"], marker = "extra == 'felix-jr-sim'" },
     { name = "lerobot", extras = ["multi-task-dit"], marker = "extra == 'all'" },
     { name = "lerobot", extras = ["notebook"], marker = "extra == 'dev'" },
     { name = "lerobot", extras = ["openarms"], marker = "extra == 'all'" },
@@ -3873,6 +3892,7 @@ requires-dist = [
     { name = "mock-serial", marker = "sys_platform != 'win32' and extra == 'test'", specifier = ">=0.0.1,<0.1.0" },
     { name = "motorbridge", marker = "extra == 'motorbridge-dep'", specifier = ">=0.5,<0.6" },
     { name = "motorbridge-smart-servo", marker = "extra == 'motorbridge-smart-servo-dep'", specifier = ">=0.0.4,<0.1.0" },
+    { name = "mujoco", marker = "extra == 'mujoco-dep'", specifier = ">=3.8.1,<5.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.0.0,<3.0.0" },
     { name = "num2words", marker = "extra == 'smolvla'", specifier = ">=0.5.14,<0.6.0" },
     { name = "numpy", specifier = ">=2.0.0,<2.3.0" },
