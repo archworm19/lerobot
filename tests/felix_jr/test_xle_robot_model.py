@@ -331,3 +331,27 @@ def test_the_frame_jacobian_matches_finite_differences(model, arm):
             jacobian[3:, i], [spin[2, 1], spin[0, 2], spin[1, 0]], atol=1e-6, err_msg=joint
         )
     np.testing.assert_array_equal(jacobian[:, -1], 0.0)
+
+
+def test_the_applied_estimates_cache_never_serves_others():
+    """Switching `theta` and back, `set_estimates` and a shallow copy each give what a fresh model computes."""
+    import copy
+
+    model = XleRobotModel.from_urdf(head_signs=SIGNS, head_refs=REFS, intrinsics=INTRINSICS)
+    fresh = XleRobotModel.from_urdf(head_signs=SIGNS, head_refs=REFS, intrinsics=INTRINSICS)
+    q = model.joint_vector({"right": {"shoulder_pan.pos": 10.0, "elbow_flex.pos": 20.0}})
+    frame = pinch_frame("right")
+    moved = np.zeros(len(model.parameters))
+    moved[[p.name for p in model.parameters].index("pos:right_elbow_flex:x")] = 0.05
+    for theta in (moved, None, moved, moved, None):
+        np.testing.assert_allclose(model.frame_pose(frame, q, theta), fresh.frame_pose(frame, q, theta))
+    model.set_estimates(moved)  # the current estimates change: `None` means them now
+    np.testing.assert_allclose(model.frame_pose(frame, q), fresh.frame_pose(frame, q, moved))
+    model.set_estimates(np.zeros(len(model.parameters)))
+    # a shallow copy applying other estimates must not leave the original's placements behind its cache
+    model.frame_pose(frame, q, moved)
+    other = copy.copy(model)
+    assert other.pin_model is not model.pin_model
+    other.frame_pose(frame, q, None)
+    np.testing.assert_allclose(model.frame_pose(frame, q, moved), fresh.frame_pose(frame, q, moved))
+    np.testing.assert_allclose(other.frame_pose(frame, q, moved), fresh.frame_pose(frame, q, moved))

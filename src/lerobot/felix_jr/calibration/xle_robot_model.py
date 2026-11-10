@@ -10,7 +10,22 @@ The design is in `docs/camera_calibration.md`. In short:
   radians / meters; the prior says how wrong we think the URDF is.
 - **Every method that depends on the estimates takes them explicitly** (`theta`, a vector in parameter order or a
   `{name: value}` dict; `None` for the current estimates) and applies them, starting from the nominal model,
-  before computing anything. Nothing depends on what an earlier call left in the model.
+  before computing anything.
+- **The applied estimates are cached.** Applying them rebuilds every corrected placement of `pin_model` (`_apply`),
+  about ten times the cost of the kinematics; a fit evaluates many poses at one `theta`. So `_apply` remembers the
+  vector it applied last (`_applied`) and skips the rebuild when the next `theta` equals it. The cache is keyed on
+  that vector alone: it is right only while nothing else the rebuild reads changes behind its back. What makes it
+  stale (the next call at the same `theta` then computes with the wrong placements, silently):
+  - writing into `pin_model` directly (`jointPlacements`, a frame's `placement`): the edit used to be overwritten
+    by the next call, and now survives it;
+  - changing, in place, what the rebuild is made from: the parameter table (`parameters`: a row added, removed,
+    reordered or replaced, so that an equal vector means other corrections), the nominal origins (`nominal_model`,
+    the URDF joints' origins) or the placements' chains (`_placements`);
+  - two models sharing one `pin_model`, each with its own `_applied` (one rebuilds it for its estimates, the other
+    then skips its rebuild). A shallow copy would do that (`copy.copy`: 5 cm off in a test), so `__copy__` gives
+    the copy its own `pin_model`; `copy.deepcopy`, pickling and the `with_*` methods (which construct a new model)
+    are safe.
+  `set_estimates` and passing another `theta` are safe: the vector differs, so the rebuild runs.
 - **Fixed joints.** Pinocchio folds a fixed joint into a frame and pre-multiplies its origin into the placements
   of everything below it, so changing that frame alone would not move its children. The model therefore keeps,
   for every joint placement and frame placement, the chain of URDF origins it is made of, and rebuilds the ones
@@ -329,7 +344,12 @@ class _UrdfJoint:
 
 
 class XleRobotModel:
-    """The robot's kinematics, camera, pinch points and calibration. See the module docstring."""
+    """The robot's kinematics, camera, pinch points and calibration. See the module docstring.
+
+    The applied estimates are cached (`_apply`): do not write into `pin_model` or change `parameters`, the nominal
+    origins or the placements' chains in place, and copy a model with `copy.copy` / `copy.deepcopy` or its `with_*`
+    methods (the module docstring says why).
+    """
 
     def __init__(
         self,
@@ -379,6 +399,19 @@ class XleRobotModel:
         self._estimates = np.zeros(len(self.parameters))
         self._read_tree()
         self._zero = np.zeros(self.pin_model.nq)
+
+    def __copy__(self) -> "XleRobotModel":
+        """A shallow copy with its own pinocchio model and data, its estimates' cache forgotten.
+
+        Sharing `pin_model` with the original would let each rebuild it for its own estimates while the other's cache
+        (`_applied`) says its own are applied (the module docstring).
+        """
+        copied = type(self).__new__(type(self))
+        copied.__dict__.update(self.__dict__)
+        copied.pin_model = self.pin_model.copy()
+        copied._data = copied.pin_model.createData()
+        copied._applied = None
+        return copied
 
     @classmethod
     def from_urdf(cls, path: str | Path = MERGED_URDF, **kwargs: Any) -> "XleRobotModel":
@@ -521,8 +554,19 @@ class XleRobotModel:
         return origins, rotations, zero
 
     def _apply(self, theta: np.ndarray | Mapping[str, float] | None) -> None:
-        """Rebuild the working model's placements from the nominal origins and `theta` (never from earlier ones)."""
-        origins, self._rotation_vectors, self._zero = self._corrected_origins(theta)
+        """Rebuild the working model's placements from the nominal origins and `theta` (never from earlier ones).
+
+        Skipped when `theta` is the one applied last (`_applied`): a fit evaluates many poses at one `theta`, and the
+        rebuild costs ten times the kinematics. The cache is keyed on the vector alone: anything else that changes
+        what the rebuild reads (`pin_model` written directly, `parameters`, the nominal origins or `_placements`
+        changed in place, a `pin_model` shared with another model) makes it stale; the module docstring lists them.
+        """
+        vector = self._vector(theta)
+        applied = getattr(self, "_applied", None)  # (a model unpickled from before the cache has none)
+        if applied is not None and np.array_equal(vector, applied):
+            return
+        origins, self._rotation_vectors, self._zero = self._corrected_origins(vector)
+        self._applied = vector
         self._origins = origins
         for is_frame, index, chain in self._placements:
             placement = pin.SE3.Identity()

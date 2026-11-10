@@ -293,7 +293,8 @@ records the servo signs to match. The URDF's camera is a generic `head_camera_li
 
 ## The rework: one joint calibration of the head, the arms and the wrist cameras (design, 2026-11-09)
 
-Branch `calibration_rework`. **Status: design; built so far: the boards (`calibration/boards.py`, below).** It replaces how the model is calibrated, so it is
+Branch `calibration_rework`. **Status: design; built so far: the boards (`calibration/boards.py`), the fit
+(`calibration/joint_fit.py`) and a simulator to size a session (`calibration/joint_sim.py`); below.** It replaces how the model is calibrated, so it is
 built beside the current pipeline (`collect` + `xle_fit`, then `wrist_camera`'s pose step) and replaces it only once
 it passes the checks at the end of this section.
 
@@ -414,6 +415,47 @@ the bottom face, wrist: the top face, one thickness apart), the sweep's tips (wr
   head poses and board views separate them (the test, from one head pose, could not).
 - The posterior covariance and the learned column (as now) say what was determined; poses the views missed show up
   in the checks, not in the fit's residuals.
+
+**Built** (`calibration/joint_fit.py`, tests `test_joint_fit.py`, `smoke_tests/test_joint_fit_smoke.py`):
+`JointProblem` takes `BoardSighting`s (a camera, a placement, the robot's state, a `Detection`) and `TipClick`s and
+fits all of the above. One more unknown per moment: **the joints' reading errors** (5 per arm pose, 0.2 deg prior). A
+reading off by a fraction of a degree moves every point seen at that moment the same way; without them the fit bent
+the robot's parameters to explain it (in a simulated session its cost came out below the cost at the true robot:
+25 px in the head and 5.4 mm / 3.2 deg on the camera, against 7 px and 2.7 mm / 2.0 deg with them). The Jacobian is
+finite differences grouped by what each unknown touches (~60 evaluations however many moments): a fit of 2
+placements is ~15 s. That needed `XleRobotModel` to cache its applied estimates (90% of the time was rebuilding them
+on every call; the module docstring says what would make the cache stale).
+
+### Sizing a session: the simulator
+
+`calibration/joint_sim.py`: a true robot drawn from the priors (the head's zeros +-20 deg, the mounts +-1.5 cm, ...),
+the wrist camera 1 cm and 4 deg off on the gripper, the thickness off; views planned on the model (the board's center
+up and right in the wrist picture, the fingers being lower left; the head nudged until the board is in its picture,
+as a person would), kept if the true robot sees them (a checkerboard whole; for the head, not behind the arm's links);
+noise on the board's points (0.3 px), the clicks (2 px) and the joints' readings (0.2 deg). Scored on held-out
+grasp-like poses (the pinch point 3-12 cm over the table). 3 seeds each, before -> after the fit:
+
+| per placement | views (wrist / head / clicks) | head px | wrist px | camera mm | camera deg | 5 cm move mm |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 placement, 10 arm + 6 head views | 10 / 8 / 20 | 167 -> 4.1 | 49 -> 0.6 | 17 -> 2.7 | 4.5 -> 1.7 | 6.2 -> 2.1 |
+| 2 placements, 10 + 6 each | 20 / 18 / 40 | 164 -> 1.8 | 49 -> 0.7 | 17 -> 0.9 | 4.5 -> 0.2 | 6.7 -> 2.1 |
+| 3 placements, 10 + 6 each | 30 / 24 / 60 | 163 -> 1.4 | 49 -> 0.2 | 17 -> 1.4 | 4.5 -> 0.9 | 6.1 -> 1.9 |
+| 2 placements, 20 + 6 each | 40 / 23 / 80 | 166 -> 1.9 | 49 -> 0.3 | 17 -> 1.4 | 4.5 -> 0.8 | 6.4 -> 2.0 |
+| 2 placements, 10 + 12 each | 20 / 28 / 40 | 165 -> 2.3 | 49 -> 0.7 | 17 -> 1.5 | 4.5 -> 0.7 | 6.3 -> 1.9 |
+| 2 placements, no clicks | 20 / 18 / 0 | 164 -> 23 | 49 -> 40 | 17 -> 15 | 4.5 -> 0.9 | 6.6 -> 2.7 |
+| 2 placements, no head-only views | 20 / 6 / 40 | 163 -> 2.4 | 49 -> 0.5 | 17 -> 1.3 | 4.5 -> 0.9 | 6.2 -> 2.1 |
+
+- **Two placements, ~10 arm views each, with the clicks,** bring the head to ~2 px (the clicks' noise) and the camera's
+  pose on the fingers to ~1-1.5 mm and under 1 deg. More placements or views add little (with 3 seeds, the rows
+  within ~0.5 mm / 0.5 deg of each other are the same).
+- **The clicks are essential:** without them the board places the camera against the arm's chain but nothing places
+  the fingers (the camera 15 mm off the fingers, the fingertips 40 px off in the wrist picture), as the test on the
+  saved data found.
+- **With a checkerboard the head sees the board whole only with the arm out of the way:** in every arm view the arm
+  hides part of it (the wrist camera looks down at it from the head's side). The head-only views (arms folded) are
+  then most of the head's board views; the clicks carry the head's link to the arm.
+- **A 5 cm move along the approach stays ~2 mm off** whatever the views: the arm views are all high over the board and
+  the held-out poses low near the table. Next: arm views low near the table, and whether a few of them close it.
 
 ### Checks before it replaces the current calibration
 

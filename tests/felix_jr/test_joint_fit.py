@@ -1,0 +1,77 @@
+"""`calibration.joint_fit`: the residuals of a simulated session (`calibration.joint_sim`) through each camera's chain.
+
+With no noise, every residual (the board's points in the head's and the wrist's pictures, the fingertips clicked on
+each camera's face) is zero at the true robot and not at the model it was drawn from. The whole fit, on a simulated
+session: `smoke_tests/test_joint_fit_smoke.py`.
+"""
+
+import numpy as np
+import pytest
+
+pytest.importorskip("pinocchio")
+pytest.importorskip("scipy")
+
+from lerobot.felix_jr.calibration.boards import Checkerboard  # noqa: E402
+from lerobot.felix_jr.calibration.joint_fit import HEAD, JointProblem, _vec  # noqa: E402
+from lerobot.felix_jr.calibration.joint_sim import ARM, Scenario, World, draw_truth  # noqa: E402
+from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel  # noqa: E402
+from lerobot.felix_jr.harness import api  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def session():
+    model = XleRobotModel.load(api.MODEL)
+    rng = np.random.default_rng(1)
+    world = World(model, draw_truth(model, rng), Checkerboard(8, 6, 0.025), rng)
+    world.joint_noise_deg = world.board_noise_px = world.click_noise_px = 0.0
+    sightings, clicks = world.collect(Scenario(1, 4, 3, True))
+    return world, JointProblem(model, world.board, {ARM: world.camera}, sightings, clicks)
+
+
+def test_the_session_has_every_kind_of_observation(session):
+    _, problem = session
+    kinds = {(s.camera, "board") for s in problem.sightings} | {(c.camera, "click") for c in problem.clicks}
+    assert kinds == {(HEAD, "board"), (ARM, "board"), (HEAD, "click"), (ARM, "click")}
+
+
+def test_every_residual_is_zero_at_the_truth(session):
+    world, problem = session
+    truth = world.truth
+    x = problem.start()  # the joints' errors at zero: the readings are exact here
+    x[problem.slices["theta"]] = truth.theta[problem.free]
+    x[problem.slices["gc"]] = _vec(truth.gripper_from_camera)
+    x[problem.slices["boards"]] = np.concatenate([_vec(world.boards[p]) for p in problem.placements])
+    x[problem.slices["thickness"]] = truth.thickness
+    parts = problem.residual_parts(x)
+    assert set(parts) == {"head board", f"{ARM} board", "head click", f"{ARM} click"}
+    for kind, residuals in parts.items():
+        assert np.abs(residuals).max() < 1e-6, kind
+    started = problem.residual_parts(problem.start())  # the model as it is: off
+    assert all(np.sqrt(np.mean(r**2)) > 1.0 for r in started.values()), {
+        k: np.abs(v).max() for k, v in started.items()
+    }
+
+
+def test_the_wrist_click_is_one_thickness_from_the_head_click(session):
+    world, problem = session
+    click = next(c for c in problem.clicks if c.camera == ARM)
+    q = problem._q[id(click)]
+    theta = world.truth.theta
+    head_side = problem.tip(type(click)(HEAD, ARM, click.look, click.pixel), q, theta, 0.01)
+    wrist_side = problem.tip(click, q, theta, 0.012)
+    assert np.linalg.norm(wrist_side - head_side) == pytest.approx(0.012, abs=1e-9)
+
+
+def test_the_sparsity_covers_every_dependence(session):
+    """A finite-difference Jacobian is zero wherever the sparsity says a residual does not depend on an unknown."""
+    _, problem = session
+    x = problem.start()
+    sparsity = problem.sparsity()
+    base = problem.residuals(x)
+    assert sparsity.shape == (len(base), problem.size)
+    rng = np.random.default_rng(0)
+    for column in rng.choice(problem.size, 40, replace=False):
+        step = np.zeros(problem.size)
+        step[column] = 1e-6
+        changed = np.abs(problem.residuals(x + step) - base) > 1e-9
+        assert not (changed & ~sparsity[:, column]).any(), column
