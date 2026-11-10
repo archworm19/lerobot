@@ -454,8 +454,13 @@ grasp-like poses (the pinch point 3-12 cm over the table). 3 seeds each, before 
 - **With a checkerboard the head sees the board whole only with the arm out of the way:** in every arm view the arm
   hides part of it (the wrist camera looks down at it from the head's side). The head-only views (arms folded) are
   then most of the head's board views; the clicks carry the head's link to the arm.
-- **A 5 cm move along the approach stays ~2 mm off** whatever the views: the arm views are all high over the board and
-  the held-out poses low near the table. Next: arm views low near the table, and whether a few of them close it.
+- **A 5 cm move along the approach stays ~2 mm off** whatever the views. Not extrapolation: poses low over the table
+  with only the fingertips clicked (no board) bring the head from 1.7 to 0.8 px with 20 of them, but the move only from
+  2.0 to 1.7 mm (the held-out poses drawn apart from them). The fit leaves the arm's joint origins (the links'
+  millimeters, prior +-2 mm) nearly where it started them: the views do not turn the joints through enough different
+  configurations to tell them apart, and each left ~2 mm off adds to a move. It is far below the robot's ~1 cm short
+  over a few cm (bowl7, bowl8), which the model's parameters at their priors' size cannot produce: that is something
+  the model does not have (sag under load, backlash), for check 3 below.
 
 ### Checks before it replaces the current calibration
 

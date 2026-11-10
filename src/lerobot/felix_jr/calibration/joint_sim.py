@@ -76,6 +76,9 @@ class Scenario:
     head_only_views: int = 3
     clicks: bool = True
     label: str = ""
+    low_views: int = (
+        0  # poses low over the table, as a grasp's (once, not per placement): the fingertips clicked
+    )
 
 
 @dataclass
@@ -333,18 +336,7 @@ class World:
                 if head_uv is not None:
                     sightings.append(BoardSighting(HEAD, name, look, self.detection(head_uv)))
                 if scenario.clicks:
-                    head_tip, wrist_tip = self.tips(q)
-                    for camera, tip, project, size in (
-                        (HEAD, head_tip, self.head_pixels, (640, 480)),
-                        (ARM, wrist_tip, self.wrist_pixels, (self.camera.width, self.camera.height)),
-                    ):
-                        uv = project(q, tip[None])
-                        if self.in_picture(uv, size, margin=5.0):
-                            clicks.append(
-                                TipClick(
-                                    camera, ARM, look, uv[0] + self.rng.normal(0.0, self.click_noise_px, 2)
-                                )
-                            )
+                    clicks += self.click_tips(q, look)
             for j in range(scenario.head_only_views):  # the arms folded, the head aimed around the board
                 angle = 2 * np.pi * j / max(1, scenario.head_only_views)
                 offset = HEAD_ONLY_SPREAD_M * np.array([np.cos(angle), np.sin(angle), 0.0]) * (1 + j % 2) / 2
@@ -356,7 +348,27 @@ class World:
                     sightings.append(
                         BoardSighting(HEAD, name, Look({ARM: self.read(REST)}, ticks), self.detection(uv))
                     )
+        for arm in self.grasp_poses(
+            scenario.low_views
+        ):  # the gripper low over the table: the fingertips only
+            q_plan = self.model.joint_vector({ARM: arm}, self.home_ticks)
+            ticks, _ = aim_head(self.model, self.home_ticks, self.model.pinch_point(ARM, q_plan))
+            ticks = self.nudge_head(arm, ticks, self.tips(self.true_q(arm, ticks))[0][None])
+            clicks += self.click_tips(self.true_q(arm, ticks), Look({ARM: self.read(arm)}, ticks))
         return sightings, clicks
+
+    def click_tips(self, q: np.ndarray, look: Look) -> list[TipClick]:
+        """The fingertips clicked where each camera sees them at `q` (the head: the pinch point; the wrist: its face)."""
+        out = []
+        head_tip, wrist_tip = self.tips(q)
+        for camera, tip, project, size in (
+            (HEAD, head_tip, self.head_pixels, (640, 480)),
+            (ARM, wrist_tip, self.wrist_pixels, (self.camera.width, self.camera.height)),
+        ):
+            uv = project(q, tip[None])
+            if self.in_picture(uv, size, margin=5.0):
+                out.append(TipClick(camera, ARM, look, uv[0] + self.rng.normal(0.0, self.click_noise_px, 2)))
+        return out
 
     # ---- scoring -----------------------------------------------------------------------------------------------
 
@@ -463,6 +475,7 @@ def run(
     problem = JointProblem(model, board, {ARM: world.camera}, sightings, clicks)
     started = time.time()
     fit = problem.fit()
+    world.rng = np.random.default_rng(10_000 + seed)  # held-out poses apart from the session's
     poses = world.grasp_poses(held_out)
     before = world.score(model.estimates, world.gc0, JAW_THICKNESS_M, poses)
     after = world.score(fit.theta, fit.gripper_from_camera[ARM], fit.thickness, poses)
@@ -483,6 +496,9 @@ SCENARIOS = (
     Scenario(2, 10, 12, True, "2 placements, 10 arm + 12 head views each"),
     Scenario(2, 10, 6, False, "2 placements, 10 + 6 views, no clicks"),
     Scenario(2, 10, 0, True, "2 placements, 10 arm views, no head-only"),
+    Scenario(2, 10, 6, True, "2 placements, 10 + 6, + 5 low poses clicked", 5),
+    Scenario(2, 10, 6, True, "2 placements, 10 + 6, + 10 low poses clicked", 10),
+    Scenario(2, 10, 6, True, "2 placements, 10 + 6, + 20 low poses clicked", 20),
 )
 
 
