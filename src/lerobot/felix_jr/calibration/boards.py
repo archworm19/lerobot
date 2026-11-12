@@ -46,6 +46,8 @@ class Board(Protocol):
     """What every board kind provides (the module docstring)."""
 
     kind: ClassVar[str]
+    # the least part of its points a view must show to count (a checkerboard is found whole or not at all)
+    min_view_fraction: ClassVar[float]
 
     def points(self, ids: Sequence[int] | np.ndarray | None = None) -> np.ndarray:
         """The points of `ids` (all, by default) in the board's frame (N, 3), m, z = 0."""
@@ -83,6 +85,7 @@ class Checkerboard:
     rows: int
     square_m: float
     kind: ClassVar[str] = "checkerboard"
+    min_view_fraction: ClassVar[float] = 1.0
 
     @property
     def symmetric(self) -> bool:
@@ -102,10 +105,18 @@ class Checkerboard:
     def corners(self, image: np.ndarray) -> np.ndarray | None:
         """The inner corners in an RGB image (N, 2) in id order, or None if the board is not found whole."""
         gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        found, corners = cv2.findChessboardCornersSB(
-            gray, (self.cols, self.rows), flags=cv2.CALIB_CB_NORMALIZE_IMAGE
-        )
-        if not found:
+        # Plain first: normalizing (histogram equalization) lifts the table's wood grain and lost the board in 4 of
+        # 6 head views on the robot (2026-11-11). The wrist cameras' glare needs it, and 2 of their 6 views with
+        # the board whole needed the exhaustive search too (the same corners where both find them, ~50 ms).
+        for flags in (
+            0,
+            cv2.CALIB_CB_NORMALIZE_IMAGE,
+            cv2.CALIB_CB_NORMALIZE_IMAGE | cv2.CALIB_CB_EXHAUSTIVE,
+        ):
+            found, corners = cv2.findChessboardCornersSB(gray, (self.cols, self.rows), flags=flags)
+            if found:
+                break
+        else:
             return None
         corners = corners.reshape(-1, 2).astype(np.float64)
         if self.symmetric:  # both ends alike: left as found (`readings` gives the other end)
@@ -180,6 +191,7 @@ class CharucoBoard:
     marker_m: float
     dictionary: str = "DICT_5X5_100"
     kind: ClassVar[str] = "charuco"
+    min_view_fraction: ClassVar[float] = 0.5  # the markers name any corners found: part of the board will do
 
     def __post_init__(self) -> None:
         """Check the dictionary and that its markers are enough for the board's white squares."""

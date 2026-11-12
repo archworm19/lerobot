@@ -126,6 +126,14 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup):
             if jv.in_picture(uv_wrist[None], (640, 480)):
                 session.click("wrist", *uv_wrist)
 
+        # the live view while placing the board; the arrows if it is cut off, as a person would
+        for _ in range(8):
+            session.live_at = 0.0
+            session.refresh()
+            if session.live is not None:
+                break
+            session.nudge("down")
+        assert session.live is not None and not session.session.sightings, session.message
         session.next()  # the board found by the head, then seen from around it
         assert session.phase == "arm", session.message
         head_sightings = sum(s.camera == HEAD for s in session.session.sightings)

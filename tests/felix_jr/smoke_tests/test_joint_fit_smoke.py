@@ -12,7 +12,7 @@ pytest.importorskip("pinocchio")
 pytest.importorskip("scipy")
 
 from lerobot.felix_jr.calibration.boards import Checkerboard  # noqa: E402
-from lerobot.felix_jr.calibration.joint_fit import JointProblem  # noqa: E402
+from lerobot.felix_jr.calibration.joint_fit import JointProblem, fit_staged  # noqa: E402
 from lerobot.felix_jr.calibration.joint_sim import ARM, Scenario, World, draw_truth  # noqa: E402
 from lerobot.felix_jr.calibration.xle_robot_model import JAW_THICKNESS_M, XleRobotModel  # noqa: E402
 from lerobot.felix_jr.harness import api  # noqa: E402
@@ -23,7 +23,7 @@ def test_a_simulated_session_is_fitted():
     rng = np.random.default_rng(3)
     world = World(model, draw_truth(model, rng, scale=0.3), Checkerboard(8, 6, 0.025), rng)
     sightings, clicks = world.collect(Scenario(2, 8, 4, True))
-    fit = JointProblem(model, world.board, {ARM: world.camera}, sightings, clicks).fit()
+    fit = fit_staged(JointProblem(model, world.board, {ARM: world.camera}, sightings, clicks))
     assert fit.rms_px[f"{ARM} board"] < 1.0 and fit.rms_px["head board"] < 1.0, fit.rms_px
     poses = world.grasp_poses(8)
     before = world.score(model.estimates, world.gc0, JAW_THICKNESS_M, poses)

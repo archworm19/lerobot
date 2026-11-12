@@ -24,7 +24,7 @@ def session():
     rng = np.random.default_rng(1)
     world = World(model, draw_truth(model, rng), Checkerboard(8, 6, 0.025), rng)
     world.joint_noise_deg = world.board_noise_px = world.click_noise_px = 0.0
-    sightings, clicks = world.collect(Scenario(1, 4, 3, True))
+    sightings, clicks = world.collect(Scenario(1, 4, 3, True, "", 3))  # low poses: the head's clicks
     return world, JointProblem(model, world.board, {ARM: world.camera}, sightings, clicks)
 
 
@@ -103,10 +103,35 @@ def test_a_session_is_saved_and_read_back(session, tmp_path):
     np.testing.assert_allclose(again.residuals(again.start()), problem.residuals(problem.start()))
 
 
-def test_held_out_clicks_are_whole_moments(session):
+def test_held_out_sightings_are_whole_moments_both_cameras_saw(session):
     from lerobot.felix_jr.calibration.joint_fit import split_holdout
 
     _, problem = session
-    kept, held = split_holdout(problem.clicks, 2)
-    assert held and kept and len(kept) + len(held) == len(problem.clicks)
-    assert not {id(c.look) for c in kept} & {id(c.look) for c in held}
+    kept, held = split_holdout(problem.sightings, 1)  # the fixture has one such moment
+    assert held and kept and len(kept) + len(held) == len(problem.sightings)
+    assert not {id(s.look) for s in kept} & {id(s.look) for s in held}
+    cameras: dict[int, set[str]] = {}
+    for s in held:
+        cameras.setdefault(id(s.look), set()).add(s.camera)
+    assert all(HEAD in seen and len(seen) == 2 for seen in cameras.values())
+
+
+def test_the_two_chains_agree_on_the_board_at_the_truth_only(session):
+    from lerobot.felix_jr.calibration.joint_fit import agreement
+
+    world, problem = session  # no noise: at the truth the head and the arm put the board in the same place
+    cameras = {ARM: world.camera}
+    true = agreement(
+        problem.model,
+        world.board,
+        cameras,
+        problem.sightings,
+        world.truth.theta,
+        {ARM: world.truth.gripper_from_camera},
+    )
+    start = agreement(
+        problem.model, world.board, cameras, problem.sightings, problem.model.estimates, {ARM: world.gc0}
+    )
+    assert len(true) == len(start) > 0
+    assert true.max(axis=0)[0] < 0.1 and true.max(axis=0)[1] < 0.05, true
+    assert np.median(start[:, 0]) > 2.0, start

@@ -6,25 +6,29 @@
 
 `docs/camera_calibration.md`, "The rework". Start the server on the Pi with the arm and the head. `--start-from` must
 have the arm's wrist camera (its lens, from `calibration.wrist_camera`, and a first pose on the gripper). The window
-shows the head's picture (left) and the wrist camera's (right), each with a magnified inset around the fingertip the
-model predicts. Per board placement:
+shows the head's picture (left) and the wrist camera's (right), each with the fingertip the model predicts circled.
+Per board placement:
 
 1. **Place the board.** The arms go to rest and the head looks where the board should go: lay it flat on the table
-   on the drawn outline (roughly: anywhere the head sees it whole works). `n`: the head finds it, then looks at it from
-   `--head-views` directions around it (the arms stay folded).
-2. **Arm views.** Each `n` moves the arm (slowly: watch it) to the next planned view of the board, and the head to look
-   at the board and the gripper. Click the fixed fingertip in each picture where you see it: in the head's, the face
-   the head sees; in the wrist camera's, the other face (the one toward it). Click in the inset for precision.
+   on the drawn outline (roughly: anywhere the head sees it works). The head's picture is live, the board's corners
+   dotted green where it finds them. `n`: the head finds it, then looks at it from `--head-views` directions around
+   it (the arms stay folded).
+2. **Arm views.** Each `n` moves the arm (slowly: watch it) to the next planned view of the board, the head looking at
+   the board: a moment both cameras see it at ties the head to the arm. Click the fixed fingertip in the wrist
+   camera's picture (the face toward it), and in the head's if it shows (the face the head sees).
 
-Then **low poses**: each `n` moves the gripper low over the table, as for a grasp; click the fingertips again.
+Then **low poses**: each `n` moves the gripper low over the table, as for a grasp, and the head looks at the fingertip:
+click it in both pictures. The head's clicks matter: a wrist click fixes only the direction from its camera to the
+fingertip, the head's the distance along it. Leave the board where it is: a picture that shows it is one more sighting.
 
-Keys: `n` next, arrows turn the head (if the board or the gripper is cut off), `u` undo the last click, `q` stop and
+Keys: `n` next, arrows turn the head (if the board is cut off), `u` undo the last click, `q` stop and
 fit. Everything is saved as you go (`joint_session.json`, `images/`), `--resume` continues. At the end the session
 is fitted (`joint_fit.calibrate`) and `calibration.urdf` and `calibration.md` written to `--out-dir`. The script runs
 in a client session: Ctrl+C or a crash sends the robot to rest.
 """
 
 import argparse
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,8 +58,8 @@ from lerobot.felix_jr.server.client import Capture, FelixClient, WristCapture
 from lerobot.felix_jr.server.protocol import DEFAULT_PORT
 
 PANE = (640, 480)  # each picture is shown at this size
-INSET_CROP_PX, INSET_ZOOM = 60, 4  # the inset: this many pixels around the predicted tip, magnified
 STATUS_HEIGHT = 70
+LIVE_PERIOD_S = 0.2  # the head picture's refresh while placing the board
 CALIBRATION_FILE = "calibration.urdf"
 KEYS = {ord("n"): "next", ord("u"): "undo", ord("q"): "quit", 27: "quit"}
 
@@ -97,10 +101,11 @@ def compose(
     clicks: dict[str, list[tuple[float, float]]],
     outlines: dict[str, np.ndarray],
     lines: list[str],
+    found: dict[str, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, list[Region]]:
-    """The window: the head's picture and the wrist's side by side, each with an inset around its predicted tip.
+    """The window: the head's picture and the wrist's side by side, each with its predicted tip circled.
 
-    Insets are listed before their panes in the regions, so a click in an inset maps through it.
+    `found`: board corners detected in a pane, drawn as green dots.
     """
     window = np.zeros((PANE[1] + STATUS_HEIGHT, 2 * PANE[0], 3), np.uint8)
     regions: list[Region] = []
@@ -110,13 +115,8 @@ def compose(
         shown = cv2.resize(picture, (int(picture.shape[1] * scale), int(picture.shape[0] * scale)))
         x0 = i * PANE[0]
 
-        def at(
-            uv: np.ndarray, s: float = scale, o: tuple[float, float] = (0.0, 0.0), dx: int = 0, dy: int = 0
-        ) -> tuple[int, int]:
-            return (
-                int(round(dx + (uv[0] - o[0] + 0.5) * s - 0.5)),
-                int(round(dy + (uv[1] - o[1] + 0.5) * s - 0.5)),
-            )
+        def at(uv: np.ndarray, s: float = scale) -> tuple[int, int]:
+            return int(round((uv[0] + 0.5) * s - 0.5)), int(round((uv[1] + 0.5) * s - 0.5))
 
         if pane in outlines and np.isfinite(outlines[pane]).all():
             cv2.polylines(
@@ -127,42 +127,14 @@ def compose(
                 2,
                 cv2.LINE_AA,
             )
-        tip = predicted.get(pane)
+        for p in (found or {}).get(pane, []):
+            cv2.circle(shown, at(p), 3, (0, 255, 0), -1, cv2.LINE_AA)
         for p in clicks.get(pane, []):
             cv2.drawMarker(shown, at(np.array(p)), (0, 255, 0), cv2.MARKER_CROSS, 14, 2, cv2.LINE_AA)
+        tip = predicted.get(pane)
         if tip is not None and np.isfinite(tip).all():
             cv2.circle(shown, at(tip), 12, (0, 255, 255), 1, cv2.LINE_AA)
         window[: shown.shape[0], x0 : x0 + shown.shape[1]] = shown
-        if tip is not None and np.isfinite(tip).all():
-            crop = INSET_CROP_PX
-            origin = (
-                float(np.clip(tip[0] - crop / 2, 0, picture.shape[1] - crop)),
-                float(np.clip(tip[1] - crop / 2, 0, picture.shape[0] - crop)),
-            )
-            u0, v0 = int(origin[0]), int(origin[1])
-            inset = cv2.resize(
-                picture[v0 : v0 + crop, u0 : u0 + crop],
-                (crop * INSET_ZOOM, crop * INSET_ZOOM),
-                interpolation=cv2.INTER_NEAREST,
-            )
-            for p in clicks.get(pane, []):
-                cv2.drawMarker(
-                    inset,
-                    at(np.array(p), INSET_ZOOM, (u0, v0)),
-                    (0, 255, 0),
-                    cv2.MARKER_CROSS,
-                    20,
-                    1,
-                    cv2.LINE_AA,
-                )
-            cv2.circle(inset, at(tip, INSET_ZOOM, (u0, v0)), 6 * INSET_ZOOM, (0, 255, 255), 1, cv2.LINE_AA)
-            size = crop * INSET_ZOOM
-            # the inset in the corner away from the tip
-            ix = x0 if tip[0] * scale > PANE[0] / 2 else x0 + PANE[0] - size
-            iy = 0 if tip[1] * scale > PANE[1] / 2 else PANE[1] - size
-            window[iy : iy + size, ix : ix + size] = inset
-            cv2.rectangle(window, (ix, iy), (ix + size - 1, iy + size - 1), (255, 255, 255), 1)
-            regions.append(Region(pane, ix, iy, size, size, float(INSET_ZOOM), (float(u0), float(v0))))
         regions.append(Region(pane, x0, 0, shown.shape[1], shown.shape[0], scale, (0.0, 0.0)))
     _draw_text(window, lines, (8, PANE[1] + 18))
     return window, regions
@@ -236,9 +208,13 @@ class JointCollect:
         self.head: Capture | None = None
         self.wrist: WristCapture | None = None
         self.look: Look | None = None
-        self.saved: dict[int, str] = {}  # capture id -> its image file
+        # the current pictures' files (held, not keyed by id(): a freed capture's id is reused by the next)
+        self.saved: list[tuple[Capture | WristCapture, str]] = []
+        self.n_images = len(list((out_dir / "images").glob("*.png")))  # --resume numbers on from there
         self.frame_clicks: dict[str, list[tuple[float, float]]] = {"head": [], "wrist": []}
         self.regions: list[Region] = []
+        self.live: Detection | None = None  # the board in the live head picture while placing it
+        self.live_at = 0.0
         self.message = ""
         if self.phase == "place":
             self._start_placement()
@@ -272,14 +248,18 @@ class JointCollect:
         ticks = {n: int(self.head.state["head"][n]["ticks"]) for n in HEAD_JOINTS}
         self.look = Look({self.arm: arm}, ticks)
         self.frame_clicks = {"head": [], "wrist": []}
+        self.saved = []
 
     def _image(self, capture: Capture | WristCapture, name: str) -> str:
         """The capture's picture saved once in `images/` (its file name)."""
-        if id(capture) not in self.saved:
-            path = f"images/{len(self.saved):04d}_{name}.png"
-            cv2.imwrite(str(self.out_dir / path), cv2.cvtColor(capture.color, cv2.COLOR_RGB2BGR))
-            self.saved[id(capture)] = path
-        return self.saved[id(capture)]
+        for saved, path in self.saved:
+            if saved is capture:
+                return path
+        path = f"images/{self.n_images:04d}_{name}.png"
+        self.n_images += 1
+        cv2.imwrite(str(self.out_dir / path), cv2.cvtColor(capture.color, cv2.COLOR_RGB2BGR))
+        self.saved.append((capture, path))
+        return path
 
     def _sight(self, camera: str) -> Detection | None:
         """Find the board in `camera`'s current picture ("head" or the arm) and save the sighting.
@@ -295,7 +275,9 @@ class JointCollect:
         readings = self.board.readings(found)
         if len(readings) > 1 and self.board_known and self.root_board is not None:
             found = min(readings, key=lambda r: self._turn_from_placement(camera, r))
-        name = f"p{self.placement}"
+        name = (
+            f"p{self.placement - (self.phase == 'low')}"  # low poses: the board still at the last placement
+        )
         image = self._image(capture, "head" if camera == HEAD else "wrist")
         self.session.sightings.append(BoardSighting(camera, name, self.look, found, image))
         save_session(self.session)
@@ -334,7 +316,23 @@ class JointCollect:
         )
         self.render()
 
+    def refresh(self) -> None:
+        """While placing the board: a new head picture every `LIVE_PERIOD_S`, with the board found in it marked."""
+        if self.phase != "place" or self.look is None or time.monotonic() - self.live_at < LIVE_PERIOD_S:
+            return
+        self.head = self.client.capture(color_format="jpeg")
+        ticks = {n: int(self.head.state["head"][n]["ticks"]) for n in HEAD_JOINTS}
+        self.look = Look(self.look.arms, ticks)
+        self.live = self.board.detect(self.head.color)
+        self.live_at = time.monotonic()
+        self.message = f"placement {self.placement + 1}/{self.n_placements}: " + (
+            "the head sees the board whole: n" if self.live else "lay the board flat on the outline"
+        )
+        self.render()
+
     def _confirm_placement(self) -> None:
+        self._capture()  # full quality, not the live view's
+        self.live = None
         found = self._sight(HEAD)
         if found is None:
             self.message = (
@@ -351,7 +349,17 @@ class JointCollect:
         for target in jv.head_aims(points.mean(axis=0), self.n_head_views):
             self._capture(self._aim(target))
             seen += self._sight(HEAD) is not None
-        self.views = jv.arm_views(self.model, self.arm, self.rest, points, self.n_arm_views, self.rng)
+        region = jv.low_poses(self.model, self.arm, self.rest, 40, self.table_z, self.rng)
+        self.views = jv.arm_views(
+            self.model,
+            self.arm,
+            self.rest,
+            points,
+            self.n_arm_views,
+            self.rng,
+            min_fraction=self.board.min_view_fraction,
+            region=region,
+        )
         self.view_index = 0
         self.phase = "arm"
         save_session(self.session)
@@ -374,14 +382,12 @@ class JointCollect:
             self.render()
             return
         assert self.root_board is not None
-        q = self.model.joint_vector({self.arm: pose}, self._ticks())
-        center = jv.board_points(self.board, self.root_board).mean(axis=0)
-        self._capture(self._aim(0.5 * (center + self.model.pinch_point(self.arm, q))))
+        self._capture(self._aim(jv.board_points(self.board, self.root_board).mean(axis=0)))
         wrist = self._sight(self.arm) is not None
         head = self._sight(HEAD) is not None
         self.message = (
             f"view {self.view_index}/{len(self.views)}: the board {'seen' if wrist else 'NOT seen'} by the wrist, "
-            f"{'whole' if head else 'not whole'} in the head; click the fingertip in each picture, then n"
+            f"{'seen' if head else 'NOT seen'} by the head; click the fingertip in each picture it shows in, then n"
         )
         self.render()
 
@@ -406,9 +412,13 @@ class JointCollect:
             self.render()
             return
         q = self.model.joint_vector({self.arm: pose}, self._ticks())
-        self._capture(self._aim(self.model.pinch_point(self.arm, q)))
+        self._capture(self._aim(self.model.pinch_point(self.arm, q)))  # the head on the fingertip: its click
+        seen = ""
+        if self.board_known:  # the board still lies where the arm views saw it: sightings, if it shows
+            wrist, head = self._sight(self.arm) is not None, self._sight(HEAD) is not None
+            seen = f" (the board seen: wrist {'yes' if wrist else 'no'}, head {'yes' if head else 'no'})"
         self.message = (
-            f"low pose {self.view_index}/{len(self.views)}: click the fingertip in each picture, then n"
+            f"low pose {self.view_index}/{len(self.views)}{seen}: click the fingertip in each picture, then n"
         )
         self.render()
 
@@ -497,17 +507,15 @@ class JointCollect:
         }
         outlines = {}
         if self.phase == "place" and self.root_board is not None:
-            corners = (
-                self.board.points()[[0, self.board.cols - 1, -1, -self.board.cols]]
-                if hasattr(self.board, "cols")
-                else self.board.points()[:4]
-            )
+            points = self.board.points()  # any board: the rectangle its points span
+            (x0, y0), (x1, y1) = points[:, :2].min(axis=0), points[:, :2].max(axis=0)
+            corners = np.array([[x0, y0, 0.0], [x1, y0, 0.0], [x1, y1, 0.0], [x0, y1, 0.0]])
             root = corners @ self.root_board[:3, :3].T + self.root_board[:3, 3]
             outlines["head"] = self.model.project(root, q)[0]
         lines = [
             f"{self.arm} arm | {self.phase} | placement {min(self.placement + 1, self.n_placements)}/{self.n_placements} | "
             f"{len(self.session.sightings)} board sightings, {len(self.session.clicks)} clicks",
-            "n next | click the fingertip (inset: zoomed) | arrows head | u undo | q fit and quit",
+            "n next | click the fingertip in each picture | arrows head | u undo | q fit and quit",
             self.message,
         ]
         window, self.regions = compose(
@@ -516,6 +524,7 @@ class JointCollect:
             self.frame_clicks,
             outlines,
             lines,
+            {"head": self.live.pixels} if self.phase == "place" and self.live is not None else None,
         )
         self.show(window)
 
@@ -545,7 +554,7 @@ def main() -> None:
     parser.add_argument("--placements", type=int, default=2)
     parser.add_argument("--arm-views", type=int, default=10, help="arm views per placement")
     parser.add_argument("--head-views", type=int, default=6, help="head views per placement, the arms folded")
-    parser.add_argument("--low-views", type=int, default=10, help="poses low over the table, fingertips only")
+    parser.add_argument("--low-views", type=int, default=10, help="poses low over the table")
     parser.add_argument("--max-vel", type=float, default=20.0, help="arm speed limit, deg/s (20)")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
@@ -582,6 +591,7 @@ def main() -> None:
                 key = cv2.waitKeyEx(30)
                 while pending:
                     session.click_at(*pending.pop(0))
+                session.refresh()
                 action = decode_key(key, KEYS)
                 if action is not None and not session.handle(action):
                     break

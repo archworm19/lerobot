@@ -23,8 +23,15 @@ import cv2
 import numpy as np
 
 from lerobot.felix_jr.calibration import joint_views as jv
-from lerobot.felix_jr.calibration.boards import Board, Checkerboard, Detection
-from lerobot.felix_jr.calibration.joint_fit import HEAD, BoardSighting, JointProblem, Look, TipClick
+from lerobot.felix_jr.calibration.boards import Board, CharucoBoard, Detection
+from lerobot.felix_jr.calibration.joint_fit import (
+    HEAD,
+    BoardSighting,
+    JointProblem,
+    Look,
+    TipClick,
+    fit_staged,
+)
 from lerobot.felix_jr.calibration.merge_urdf import SO101_JOINTS
 from lerobot.felix_jr.calibration.xle_robot_model import (
     JAW_THICKNESS_M,
@@ -46,6 +53,7 @@ REST = {
     "wrist_roll.pos": 0.0,
 }
 TABLE_BELOW_BASE_M = 0.06
+SAG_REACH_M = 0.25  # `World.sag_deg` is the droop with the gripper this far out
 ARM_RADIUS_M = 0.035  # the arm's links as capsules this thick, for what hides the board from the head
 JOINT_NOISE_DEG = 0.2
 BOARD_NOISE_PX = 0.3
@@ -61,7 +69,8 @@ class Scenario:
     """What a session collects, per board placement.
 
     Wrist views (each with a head view of the board if it can, and clicks), and head views of the board with the arms
-    folded.
+    folded. As `joint_collect`: in the arm views the head looks at the board; in the low poses at the fingertip. The
+    wrist's fingertip is clicked, and with `head_clicks` the head's where it shows.
     """
 
     placements: int = 2
@@ -70,8 +79,9 @@ class Scenario:
     clicks: bool = True
     label: str = ""
     low_views: int = (
-        0  # poses low over the table, as a grasp's (once, not per placement): the fingertips clicked
+        0  # poses low over the table, as a grasp's (once, not per placement): clicks, and the board if seen
     )
+    head_clicks: bool = True
 
 
 @dataclass
@@ -118,6 +128,8 @@ class World:
         self.table_z = self.base[2] - TABLE_BELOW_BASE_M
         self.home_ticks = model.head_ticks(dict.fromkeys(("head_pan_joint", "head_tilt_joint"), 0.0))
         self.boards: dict[str, np.ndarray] = {}  # root_from_board of each placement `collect` made
+        # the arm's droop (deg, shoulder lift and elbow) at full reach, what the model cannot say (`true_q`)
+        self.sag_deg = (0.0, 0.0)
 
     # ---- the cameras, true or modeled ------------------------------------------------------------------------
 
@@ -143,8 +155,8 @@ class World:
             return jv.fingertips(self.model, ARM, q, self.truth.theta, self.truth.thickness)
         return jv.fingertips(self.model, ARM, q)
 
-    def arm_hides(self, q: np.ndarray, points: np.ndarray) -> bool:
-        """Whether the true arm's links (capsules) cut any line of sight from the head camera to `points`."""
+    def arm_hides(self, q: np.ndarray, points: np.ndarray) -> np.ndarray:
+        """Per point: whether the true arm's links (capsules) cut the line of sight from the head camera to it."""
         eye = self.model.camera_pose(q, self.truth.theta)[:3, 3]
         links = (
             "shoulder_link",
@@ -155,11 +167,15 @@ class World:
             "gripper_frame_link",
         )
         joints = [self.model.frame_pose(f"{ARM}_{link}", q, self.truth.theta)[:3, 3] for link in links]
-        for a, b in zip(joints[:-1], joints[1:], strict=True):
-            for p in points:
-                if _segments_distance(eye, p, a, b) < ARM_RADIUS_M:
-                    return True
-        return False
+        return np.array(
+            [
+                any(
+                    _segments_distance(eye, p, a, b) < ARM_RADIUS_M
+                    for a, b in zip(joints[:-1], joints[1:], strict=True)
+                )
+                for p in points
+            ]
+        )
 
     # ---- planning views ------------------------------------------------------------------------------------
 
@@ -169,8 +185,13 @@ class World:
         return jv.suggest_placements(self.model, ARM, self.board, n, self.table_z, [yaw] * n)[k]
 
     def wrist_sees(self, q: np.ndarray, points: np.ndarray) -> np.ndarray | None:
-        """The true pixels of `points` if the wrist camera sees all of them clear of the fingers, else None."""
-        return jv.wrist_sees(self.model, ARM, q, points, *self.truth_or_model(True))
+        """The true pixels of the `points` the wrist camera sees clear of the fingers, NaN the others.
+
+        None if too few for the board to be found (`Board.min_view_fraction`).
+        """
+        return jv.wrist_sees(
+            self.model, ARM, q, points, *self.truth_or_model(True), min_fraction=self.board.min_view_fraction
+        )
 
     def nudge_head(self, arm: dict[str, float], ticks: dict[str, int], points: np.ndarray) -> dict[str, int]:
         """`ticks` nudged (as a person would, by the arrow keys) until the true picture shows all of `points`.
@@ -193,12 +214,16 @@ class World:
         return best
 
     def head_sees(self, q: np.ndarray, points: np.ndarray) -> np.ndarray | None:
-        """The true pixels of `points` if the head sees all of them, not behind the arm, else None."""
+        """The true pixels of the `points` the head sees, not behind the arm, NaN the others.
+
+        None if too few for the board to be found (`Board.min_view_fraction`).
+        """
         uv = self.head_pixels(q, points)
         size = (int(self.model.intrinsics["width"]), int(self.model.intrinsics["height"]))
-        if not jv.in_picture(uv, size) or self.arm_hides(q, points):
+        seen = np.array([jv.in_picture(p[None], size) for p in uv]) & ~self.arm_hides(q, points)
+        if not seen.any() or seen.mean() < self.board.min_view_fraction:
             return None
-        return uv
+        return np.where(seen[:, None], uv, np.nan)
 
     def arm_views(self, root_board: np.ndarray, n: int) -> list[dict[str, float]]:
         """`n` arm poses planned on the model (`joint_views.arm_views`), kept if the true wrist camera sees the board."""
@@ -211,11 +236,28 @@ class World:
             n,
             self.rng,
             accept=lambda pose: self.wrist_sees(self.true_q(pose, self.home_ticks), points) is not None,
+            min_fraction=self.board.min_view_fraction,
+            region=jv.low_poses(self.model, ARM, REST, 40, self.table_z, self.rng),
         )
 
     def true_q(self, arm: dict[str, float], head_ticks: dict[str, int]) -> np.ndarray:
-        """Pinocchio's q of the arm's true joints and the head's ticks."""
-        return self.model.joint_vector({ARM: arm}, head_ticks)
+        """Pinocchio's q of the arm's true joints and the head's ticks.
+
+        With `sag_deg`, the joints the servos hold (`arm`) are not where the arm is: the shoulder lift and the elbow
+        droop by `sag_deg` times how far out from each the gripper reaches (over `SAG_REACH_M`), a pose-dependent error
+        no parameter of the model can take up.
+        """
+        q = self.model.joint_vector({ARM: arm}, head_ticks)
+        if not any(self.sag_deg):
+            return q
+        grip = self.model.frame_pose(f"{ARM}_gripper_frame_link", q)[:3, 3]
+        droop = {}
+        for (joint, link), sag in zip(
+            (("shoulder_lift", "upper_arm_link"), ("elbow_flex", "lower_arm_link")), self.sag_deg, strict=True
+        ):
+            reach = np.linalg.norm((grip - self.model.frame_pose(f"{ARM}_{link}", q)[:3, 3])[:2])
+            droop[f"{joint}.pos"] = arm[f"{joint}.pos"] + sag * reach / SAG_REACH_M
+        return self.model.joint_vector({ARM: {**arm, **droop}}, head_ticks)
 
     # ---- observing ---------------------------------------------------------------------------------------------
 
@@ -224,8 +266,9 @@ class World:
         return {k: v + self.rng.normal(0.0, self.joint_noise_deg) for k, v in arm.items()}
 
     def detection(self, uv: np.ndarray) -> Detection:
-        """A whole board found at `uv`, with the detector's noise."""
-        return Detection(np.arange(len(uv)), uv + self.rng.normal(0.0, self.board_noise_px, uv.shape))
+        """The board's points found at `uv` (NaN: not found), with the detector's noise."""
+        ids = np.flatnonzero(np.isfinite(uv).all(axis=1))
+        return Detection(ids, uv[ids] + self.rng.normal(0.0, self.board_noise_px, (len(ids), 2)))
 
     def collect(self, scenario: Scenario) -> tuple[list[BoardSighting], list[TipClick]]:
         """A simulated session: its board sightings and fingertip clicks."""
@@ -239,22 +282,18 @@ class World:
             center = points.mean(axis=0)
             for arm in self.arm_views(root_board, scenario.arm_views):
                 reading = self.read(arm)
-                # the head aimed between the board and the gripper (planned on the model)
-                q_plan = self.model.joint_vector({ARM: arm}, self.home_ticks)
-                ticks, _ = aim_head(
-                    self.model, self.home_ticks, 0.5 * (center + self.model.pinch_point(ARM, q_plan))
-                )
-                ticks = self.nudge_head(
-                    arm, ticks, np.vstack([points, self.tips(self.true_q(arm, ticks))[0][None]])
-                )
+                ticks, _ = aim_head(self.model, self.home_ticks, center)  # the head on the board
+                ticks = self.nudge_head(arm, ticks, points)
                 q = self.true_q(arm, ticks)
                 look = Look({ARM: reading}, ticks)
-                sightings.append(BoardSighting(ARM, name, look, self.detection(self.wrist_pixels(q, points))))
+                wrist_uv = self.wrist_sees(q, points)
+                if wrist_uv is not None:
+                    sightings.append(BoardSighting(ARM, name, look, self.detection(wrist_uv)))
                 head_uv = self.head_sees(q, points)
                 if head_uv is not None:
                     sightings.append(BoardSighting(HEAD, name, look, self.detection(head_uv)))
                 if scenario.clicks:
-                    clicks += self.click_tips(q, look)
+                    clicks += self.click_tips(q, look, scenario.head_clicks)
             for aim in jv.head_aims(center, scenario.head_only_views):  # the arms folded
                 ticks, _ = aim_head(self.model, self.home_ticks, aim)
                 ticks = self.nudge_head(REST, ticks, points)
@@ -264,23 +303,30 @@ class World:
                     sightings.append(
                         BoardSighting(HEAD, name, Look({ARM: self.read(REST)}, ticks), self.detection(uv))
                     )
+        last = f"p{scenario.placements - 1}"  # the board left where the last placement put it
+        points = jv.board_points(self.board, self.boards[last]) if scenario.placements else None
         for arm in self.grasp_poses(
             scenario.low_views
-        ):  # the gripper low over the table: the fingertips only
+        ):  # the gripper low over the table, the head on the fingertip
             q_plan = self.model.joint_vector({ARM: arm}, self.home_ticks)
             ticks, _ = aim_head(self.model, self.home_ticks, self.model.pinch_point(ARM, q_plan))
             ticks = self.nudge_head(arm, ticks, self.tips(self.true_q(arm, ticks))[0][None])
-            clicks += self.click_tips(self.true_q(arm, ticks), Look({ARM: self.read(arm)}, ticks))
+            q, look = self.true_q(arm, ticks), Look({ARM: self.read(arm)}, ticks)
+            if points is not None:
+                for camera, uv in ((ARM, self.wrist_sees(q, points)), (HEAD, self.head_sees(q, points))):
+                    if uv is not None:
+                        sightings.append(BoardSighting(camera, last, look, self.detection(uv)))
+            clicks += self.click_tips(q, look, scenario.head_clicks)
         return sightings, clicks
 
-    def click_tips(self, q: np.ndarray, look: Look) -> list[TipClick]:
-        """The fingertips clicked where each camera sees them at `q` (the head: the pinch point; the wrist: its face)."""
+    def click_tips(self, q: np.ndarray, look: Look, head: bool = False) -> list[TipClick]:
+        """The fingertips clicked where the cameras see them at `q`: the wrist's face, and with `head` the pinch point."""
         out = []
         head_tip, wrist_tip = self.tips(q)
-        for camera, tip, project, size in (
-            (HEAD, head_tip, self.head_pixels, (640, 480)),
-            (ARM, wrist_tip, self.wrist_pixels, (self.camera.width, self.camera.height)),
-        ):
+        cameras = [(ARM, wrist_tip, self.wrist_pixels, (self.camera.width, self.camera.height))]
+        if head and jv.head_face_angle(self.model, ARM, q) < 90.0:  # else the jaw hides its tip from the head
+            cameras.append((HEAD, head_tip, self.head_pixels, (640, 480)))
+        for camera, tip, project, size in cameras:
             uv = project(q, tip[None])
             if jv.in_picture(uv, size, margin=5.0):
                 out.append(TipClick(camera, ARM, look, uv[0] + self.rng.normal(0.0, self.click_noise_px, 2)))
@@ -301,28 +347,29 @@ class World:
         for arm in poses:
             q_plan = self.model.joint_vector({ARM: arm}, self.home_ticks)
             ticks, _ = aim_head(self.model, self.home_ticks, self.model.pinch_point(ARM, q_plan))
-            q = self.true_q(arm, ticks)
-            true_tips, fit_tips = self.tips(q), fitted.tips(q)
+            q = self.true_q(arm, ticks)  # where the arm is
+            q_held = self.model.joint_vector({ARM: arm}, ticks)  # what the fit knows: the joints as held
+            true_tips, fit_tips = self.tips(q), fitted.tips(q_held)
             head.append(
                 np.linalg.norm(
-                    self.head_pixels(q, true_tips[0][None]) - fitted.head_pixels(q, fit_tips[0][None])
+                    self.head_pixels(q, true_tips[0][None]) - fitted.head_pixels(q_held, fit_tips[0][None])
                 )
             )
             wrist.append(
                 np.linalg.norm(
-                    self.wrist_pixels(q, true_tips[1][None]) - fitted.wrist_pixels(q, fit_tips[1][None])
+                    self.wrist_pixels(q, true_tips[1][None]) - fitted.wrist_pixels(q_held, fit_tips[1][None])
                 )
             )
             rel_true = np.linalg.inv(
                 self.model.frame_pose(pinch_frame(ARM), q, self.truth.theta)
             ) @ self.wrist_pose(q, True)
-            rel_fit = np.linalg.inv(self.model.frame_pose(pinch_frame(ARM), q, theta)) @ fitted.wrist_pose(
-                q, True
-            )
+            rel_fit = np.linalg.inv(
+                self.model.frame_pose(pinch_frame(ARM), q_held, theta)
+            ) @ fitted.wrist_pose(q_held, True)
             cam_mm.append(1000 * np.linalg.norm(rel_true[:3, 3] - rel_fit[:3, 3]))
             cam_deg.append(np.degrees(np.linalg.norm(cv2.Rodrigues(rel_true[:3, :3] @ rel_fit[:3, :3].T)[0])))
             # a 5 cm move along the approach: the joints the fitted model solves for it, run on the truth
-            pinch_fit = self.model.frame_pose(pinch_frame(ARM), q, theta)
+            pinch_fit = self.model.frame_pose(pinch_frame(ARM), q_held, theta)
             goal = pinch_fit[:3, 3] + 0.05 * pinch_fit[:3, 2]
             moved = self._move(arm, goal, pinch_fit[:3, :3], theta)
             q2 = self.true_q(moved, ticks)
@@ -380,7 +427,7 @@ def run(
     sightings, clicks = world.collect(scenario)
     problem = JointProblem(model, board, {ARM: world.camera}, sightings, clicks)
     started = time.time()
-    fit = problem.fit()
+    fit = fit_staged(problem)
     world.rng = np.random.default_rng(10_000 + seed)  # held-out poses apart from the session's
     poses = world.grasp_poses(held_out)
     before = world.score(model.estimates, world.gc0, JAW_THICKNESS_M, poses)
@@ -420,7 +467,7 @@ def main() -> None:
     from lerobot.felix_jr.harness import api
 
     model = XleRobotModel.load(args.model or api.MODEL)
-    board = Checkerboard(8, 6, 0.025)
+    board = CharucoBoard(9, 7, 0.025, 0.018, "DICT_4X4_50")  # the one printed (2026-11-11)
     scenarios = SCENARIOS[:2] if args.quick else SCENARIOS
     seeds = 1 if args.quick else args.seeds
     keys = ("head px", "wrist px", "camera mm", "camera deg", "move mm")

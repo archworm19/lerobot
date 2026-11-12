@@ -293,25 +293,29 @@ records the servo signs to match. The URDF's camera is a generic `head_camera_li
 
 ## The rework: one joint calibration of the head, the arms and the wrist cameras (design, 2026-11-09)
 
-Branch `calibration_rework`. **Status: built, not yet run on the robot:** the boards (`calibration/boards.py`), the
-fit (`calibration/joint_fit.py`), a simulator to size a session (`calibration/joint_sim.py`), the views' planning
-(`calibration/joint_views.py`) and the session on the robot (`calibration/joint_collect.py`); below.
+Branch `calibration_rework`. **Status: built; two short trials on the robot's left arm (2026-11-11, "First trials on
+the robot" below), no full session yet:** the boards (`calibration/boards.py`), the fit (`calibration/joint_fit.py`),
+a simulator to size a session (`calibration/joint_sim.py`), the views' planning (`calibration/joint_views.py`) and the
+session on the robot (`calibration/joint_collect.py`); below.
 
 **Run it** (one arm per session; the start must have the arm's wrist camera lens, `calibration.wrist_camera`):
 
 ```bash
 uv run python -m lerobot.felix_jr.calibration.joint_collect tcp://<pi>:5555 --arm right \
-    --start-from <calibration.urdf> --out-dir <scratch folder> [--board checkerboard:8x6:0.025]
+    --start-from <calibration.urdf> --out-dir <scratch folder> --board charuco:9x7:0.025:0.018:DICT_4X4_50
 uv run python -m lerobot.felix_jr.calibration.joint_fit <session> [<session> ...] --start-from <calibration.urdf> \
     --out <new calibration.urdf>   # a refit, e.g. both arms' sessions together
 ```
 
-Per placement (2 by default): the arms rest and the head looks where the board should go (an outline); lay it there,
-`n`: the head finds it and looks at it from 6 directions. Then 10 arm views (`n` each, the arm moves slowly): the head
-looks at the board and the gripper; click the fixed fingertip in both pictures (each with a zoomed inset; the head's
-face in its picture, the other face in the wrist's). Then 10 low poses, clicks only. `q` fits and writes
-`calibration.urdf` and `calibration.md` (held-out clicks first). Tested end to end on the fake robot with a rendered
-board (`smoke_tests/test_joint_collect_smoke.py`: the camera's pose on the fingers from 9 mm off to 0.4 mm). It replaces how the model is calibrated, so it is
+The board is the printed ChArUco (9 x 7 squares of 25 mm, 18 mm markers, `DICT_4X4_50`; the PDF came from
+`CharucoBoard.image`, so its layout is the detector's by construction): partial views count. Per placement (2 by
+default; the board 26 cm ahead of the arm's base, where grasps are): the arms rest and the head looks where the board
+should go (an outline), its picture live with the found corners dotted green; lay the board there, `n`: the head
+looks at it from 6 directions. Then 10 arm views (`n` each, the arm moves slowly), the head looking at the board:
+click the fixed fingertip in the wrist's picture (the face toward it) and in the head's where it shows. Then 10 low
+poses, the wrist rolled to show the head the fingertip's face it clicks and the head looking at it: click it in both
+(a picture showing the board is one more sighting). `q` fits and writes `calibration.urdf` and `calibration.md`.
+Tested end to end on the fake robot with a rendered board (`smoke_tests/test_joint_collect_smoke.py`). It replaces how the model is calibrated, so it is
 built beside the current pipeline (`collect` + `xle_fit`, then `wrist_camera`'s pose step) and replaces it only once
 it passes the checks at the end of this section.
 
@@ -420,6 +424,12 @@ the test found disagreement. What changes:
 
 ### 2d. The fit
 
+**The order:** one joint fit of everything, always; what varies is where it starts (`fit_staged`). Three starts are
+tried for 150 steps each and the lowest cost run to convergence: as given (the previous calibration); the head first
+(the head's sightings alone, the arms left out, give the head's parameters and the boards' poses); and that plus each
+wrist camera's pose re-estimated from its sightings against those boards. No one start always worked in the
+simulator; the cost always told which did (a wrong solution sat at 100x+ the right one's).
+
 The unknowns: the model's estimates (`default_parameters`: the head, the camera mount, each arm's mount, joint zeros
 and origins and tip offset), each wrist camera's pose on its gripper (6), each board placement's pose (6) and the fingers' thickness, with
 the current priors (`SIGMAS`); the lenses fixed. The residuals: board points (head, wrist), fingertip clicks (head:
@@ -440,7 +450,14 @@ reading off by a fraction of a degree moves every point seen at that moment the 
 the robot's parameters to explain it (in a simulated session its cost came out below the cost at the true robot:
 25 px in the head and 5.4 mm / 3.2 deg on the camera, against 7 px and 2.7 mm / 2.0 deg with them). The Jacobian is
 finite differences grouped by what each unknown touches (~60 evaluations however many moments): a fit of 2
-placements is ~15 s. That needed `XleRobotModel` to cache its applied estimates (90% of the time was rebuilding them
+placements is ~15 s when started near the answer, 1-2 min with `fit_staged`'s three starts. The fit stops at 1500
+steps (`MAX_NFEV`) and the report says so: from a far start, or with an error the model cannot say, it otherwise
+creeps on for an hour.
+
+**The check** (`calibrate`'s report): every 5th moment at which the head and the wrist camera both saw the board is
+left out of the fit, and scored by how far apart the head's chain and the arm's put the board there (`agreement`, mm
+and deg). It replaced held-out clicks: a wrist click always lands on the same pixel (the camera rides on the gripper),
+so holding one out checked nothing. That needed `XleRobotModel` to cache its applied estimates (90% of the time was rebuilding them
 on every call; the module docstring says what would make the cache stale).
 
 ### Sizing a session: the simulator
@@ -450,7 +467,8 @@ the wrist camera 1 cm and 4 deg off on the gripper, the thickness off; views pla
 up and right in the wrist picture, the fingers being lower left; the head nudged until the board is in its picture,
 as a person would), kept if the true robot sees them (a checkerboard whole; for the head, not behind the arm's links);
 noise on the board's points (0.3 px), the clicks (2 px) and the joints' readings (0.2 deg). Scored on held-out
-grasp-like poses (the pinch point 3-12 cm over the table). 3 seeds each, before -> after the fit:
+grasp-like poses (the pinch point 3-12 cm over the table). 3 seeds each, before -> after the fit (with the first
+planner and the checkerboard, 2026-11-09; what changed since: "First trials on the robot" below):
 
 | per placement | views (wrist / head / clicks) | head px | wrist px | camera mm | camera deg | 5 cm move mm |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -479,6 +497,51 @@ grasp-like poses (the pinch point 3-12 cm over the table). 3 seeds each, before 
   over a few cm (bowl7, bowl8), which the model's parameters at their priors' size cannot produce: that is something
   the model does not have (sag under load, backlash), for check 3 below.
 
+### First trials on the robot, and what they changed (2026-11-11)
+
+Left arm, one placement each, from `xle_calib_1008_wrist2.urdf` with the gripper step redone:
+
+- **The checkerboard (trial 1, 4 arm views):** the wrist found it in 2 of 4: the views, planned on a model ~1 cm off,
+  put it off the picture or behind the fingers, and the 8 x 6 board barely fits the wrist's picture. The simulator
+  showed the same (~50%). Hence **ChArUco** (partial views count, `Board.min_view_fraction` 0.5). Also found: the
+  detector's histogram normalization lost the board in the head's views under a lamp (plain first now, then
+  normalized, then exhaustive); `--resume` overwrote images and the saved images were mislabeled (keyed by `id()`).
+- **ChArUco (trial 2, 6 arm views):** the wrist read the board in every view (13-35 corners), the head in all 11.
+  The head and the arm put the board **12.9 mm and 4.6 deg apart with the old calibration, 1.5 mm and 0.7 deg after**,
+  and 1.6 mm / 0.3 deg on the first trial's data, which the fit never saw. But the four arm views were near copies
+  (elbow +27 to +44 deg): held out, the one view in another pose (elbow -56) was 13.8 mm off. Hence the planner below.
+- **Head clicks:** 1 in 11 views. In the arm views the fingertips were off the head's picture or behind the wrist
+  camera's mount; in the low poses the jaw hid its tip. They are needed (a wrist click fixes only the direction from
+  its camera to the tip; the head's fixes the distance: without them the camera's pose came out ~9 mm off in the
+  simulator), so the low poses now roll the wrist to show the head that face (`head_face_angle` < 75 deg; tilted
+  45-80 deg from straight down, where a roll can).
+
+**The arm views** (`arm_views`): 400 looks drawn at random (the camera's height, tilt, direction; where the board
+lands in the picture; the solver started from different arm configurations), every link 5 cm over the table, the
+board 30 px inside the picture on the model. Of those: 70% planned from and kept within 40 deg of the working region
+(poses like `low_poses`'), 30% anywhere; each set picked farthest apart in the joints. In the simulator (held-out
+grasp poses, medians of 6 seeds; 2 seeds left out where the head never saw the board):
+
+| arm views per placement | planner | sag | head px | camera mm | camera deg | 5 cm move mm |
+| --- | --- | --- | --- | --- | --- | --- |
+| 6 | working region only | none | 0.65 | 1.79 | 0.86 | 1.76 |
+| 6 | mix (70 / 30) | none | 0.72 | 0.98 | 0.20 | 1.84 |
+| 10 | mix | none | 0.61 | 0.73 | 0.38 | 1.77 |
+| 6 | working region only | 1.5 / 1.0 deg | 1.69 | 1.28 | 1.05 | 2.15 |
+| 10 | mix | 1.5 / 1.0 deg | 1.86 | 0.77 | 0.37 | 2.03 |
+
+- The head's error is flat from 4 to 10 views; the wrist camera's pose is what the far views and the 10 views buy.
+- The views clustered as before (5 looks, jittered) and max spread (anywhere) each did worse on one of the two.
+- Seeds scatter by 1-2 mm: the medians give the direction, not the size.
+
+**Sag** (`World.sag_deg`: the shoulder and elbow drooping 1.5 / 1.0 deg with the gripper 25 cm out, where the
+encoders cannot see it) sets a floor on the head's error (~1.6-1.9 px against ~0.6). It first looked much worse: most
+of that was the fit stuck from far starts, which `fit_staged` fixed. The servos' own droop under P-only control (the
+elbow ~3 deg short, `tuning_notes.md` 3.1) is read by the output-shaft encoders, so it is in the calibration's data;
+it matters for motion (a move lands short), not for the fit. A compliance term (q + C tau_g(q), C per pitch joint, the
+gravity torque from the URDF's masses) is designed, not built: first measure commanded against read across poses, and
+the session's residuals against the gravity torque.
+
 ### Checks before it replaces the current calibration
 
 1. **Held-out views:** the fingertips predicted in both cameras at poses left out, near the click noise (2-3 px in
@@ -498,8 +561,8 @@ grasp-like poses (the pinch point 3-12 cm over the table). 3 seeds each, before 
 
 ### Open questions
 
-- The clicking window: the head's picture and the arm's wrist camera's, side by side (one arm at a time).
-- How many views and placements: simulate first, as was done for the clicks (`Trusting a result`, item 5).
+- The weighting: each corner counts the same, so a view showing more of the board counts more. In the simulator
+  weighting per view instead changed the scores by ~0.1 (less than the seeds' scatter): left as is.
 - Whether the head's lens needs fitting too (the RealSense's factory intrinsics, unverified at the picture's edges).
 - Gravity sag: the board views have the arm still and unloaded; a pick's arm is loaded. Separate (`open_issues.md`
   item 16).

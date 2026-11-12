@@ -20,7 +20,8 @@ what each unknown touches: a moment's joint errors only what was seen at it).
 
 **Sessions** (`JointSession`, `joint_collect` writes them): a folder with `joint_session.json` (the board, the head's
 servo map and lens, the arm's LeRobot calibration, the moments, the sightings and clicks) and their pictures.
-`calibrate` fits sessions, holding out some moments' clicks to check the result on, and writes the calibration.
+`calibrate` fits sessions, holding out some moments both cameras saw the board at to check the result on
+(`agreement`), and writes the calibration.
 
 Usage: uv run python -m lerobot.felix_jr.calibration.joint_fit SESSION [SESSION ...] --start-from calibration.urdf
        --out calibration.urdf [--holdout-every 5]
@@ -58,6 +59,9 @@ SIGMA_CLICK_PX = 2.5  # a person's click on a fingertip
 THICKNESS_SIGMA_M = 0.001  # the fingers' thickness, measured (1.0 cm)
 JOINT_SIGMA_DEG = 0.2  # a joint's reading against where it is (a servo tick is 0.09 deg; play)
 HUBER = 2.0  # in sigmas: beyond, a residual is down-weighted
+# the fit's steps at most, a safety net (`fit_staged` starts it near the answer): from a far start it can creep on for
+# an hour (joint_sim, 2026-11-11), and 400 cut off one that needed 461
+MAX_NFEV = 1500
 BEHIND_CAMERA_PX = 1000.0  # the residual of a point that projects behind the camera
 FD_STEP = 1e-7  # the Jacobian's relative step
 
@@ -106,6 +110,7 @@ class JointFit:
     rms_px: dict[str, float] = field(default_factory=dict)
     nfev: int = 0
     message: str = ""
+    cost: float = 0.0  # the solver's (Huber) cost at the end: comparable between fits of one problem
 
 
 def _pose(x: np.ndarray) -> np.ndarray:
@@ -168,14 +173,30 @@ class JointProblem:
 
     # ---- the unknowns as one vector -----------------------------------------------------------------------------
 
-    def start(self, theta0: np.ndarray | None = None) -> np.ndarray:
+    def start(
+        self,
+        theta0: np.ndarray | None = None,
+        gcs0: Mapping[str, np.ndarray] | None = None,
+        boards0: Mapping[str, np.ndarray] | None = None,
+    ) -> np.ndarray:
         """The unknowns at the start: the model's estimates, the cameras' poses, the joints as read.
 
-        Each board starts where its first sighting puts it.
+        Each board starts where its first sighting puts it, or at `boards0`'s pose for it; each camera at `gcs0`'s.
         """
         theta = self.model.estimates if theta0 is None else np.asarray(theta0, dtype=np.float64)
-        boards = [_vec(self._first_board_pose(p, theta)) for p in self.placements]
-        gcs = [_vec(np.asarray(self.cameras[a].gripper_from_camera, dtype=np.float64)) for a in self.arms]
+        given_boards, given_gcs = boards0 or {}, gcs0 or {}
+        boards = [
+            _vec(given_boards[p] if p in given_boards else self._first_board_pose(p, theta))
+            for p in self.placements
+        ]
+        gcs = [
+            _vec(
+                given_gcs[a]
+                if a in given_gcs
+                else np.asarray(self.cameras[a].gripper_from_camera, dtype=np.float64)
+            )
+            for a in self.arms
+        ]
         joints = np.zeros(self.slices["joints"].stop - self.slices["joints"].start)
         return np.concatenate([theta[self.free], *gcs, *boards, [JAW_THICKNESS_M], joints])
 
@@ -334,10 +355,20 @@ class JointProblem:
                 out[rows, column] = change[rows] / steps[column]
         return out
 
-    def fit(self, theta0: np.ndarray | None = None, max_nfev: int | None = None) -> JointFit:
-        """Solve from the model's estimates (or `theta0`) and the cameras' current poses."""
+    def fit(
+        self,
+        theta0: np.ndarray | None = None,
+        max_nfev: int = MAX_NFEV,
+        gcs0: Mapping[str, np.ndarray] | None = None,
+        boards0: Mapping[str, np.ndarray] | None = None,
+    ) -> JointFit:
+        """Solve in `max_nfev` steps at most, from the model's estimates (or `theta0`).
+
+        The cameras start at their current poses (or `gcs0`'s), the boards at their first sightings' (or `boards0`'s).
+        `fit_staged` finds a start near the answer first.
+        """
         require_package("scipy", extra="felix_jr")
-        x0 = self.start(theta0)
+        x0 = self.start(theta0, gcs0, boards0)
         scale = np.ones(self.size) * 0.01
         scale[self.slices["theta"]] = self.sigma[self.free]
         scale[self.slices["thickness"]] = THICKNESS_SIGMA_M
@@ -357,7 +388,73 @@ class JointProblem:
             k: float(np.sqrt(np.mean(np.minimum(np.abs(v), BEHIND_CAMERA_PX) ** 2))) * sigmas[k.split()[-1]]
             for k, v in self.residual_parts(result.x, theta0).items()
         }
-        return JointFit(theta, gcs, boards, thickness, rms, int(result.nfev), str(result.message))
+        return JointFit(
+            theta, gcs, boards, thickness, rms, int(result.nfev), str(result.message), float(result.cost)
+        )
+
+
+def _mean_pose(poses: Sequence[np.ndarray]) -> np.ndarray:
+    """The mean of rigid poses: their translations averaged, their rotations' mean projected back onto a rotation."""
+    rotation = np.mean([p[:3, :3] for p in poses], axis=0)
+    u, _, vt = np.linalg.svd(rotation)
+    out = np.eye(4)
+    out[:3, :3] = u @ np.diag([1.0, 1.0, np.linalg.det(u @ vt)]) @ vt
+    out[:3, 3] = np.mean([p[:3, 3] for p in poses], axis=0)
+    return out
+
+
+STAGED_TRIAL_NFEV = 150  # each start's trial: the wrong solutions show by then (costs 100x+ the right one's)
+
+
+def fit_staged(problem: "JointProblem", max_nfev: int = MAX_NFEV) -> JointFit:
+    """`problem.fit` from the best of three starts: each tried briefly, the lowest cost run to the end.
+
+    A start far from the answer (the head's zeros off by degrees, the mounts by centimeters) can leave the joint fit
+    stuck in a wrong solution or crawling (joint_sim, 2026-11-11: 1500 steps to a cost 1800 times the truth's, where a
+    start at the truth converged in 132). No one start always works there, but the cost tells which did. The starts:
+
+    - **as given:** the model's estimates, the cameras' current poses, each board where its first sighting puts it;
+    - **the head first:** the head's sightings alone, the arms left out, give the head's parameters and the boards'
+      poses (stage 1); the cameras as given;
+    - **then the wrist cameras:** stage 1, and each camera's pose on its gripper from its sightings against stage 1's
+      boards, through the arm as modeled, averaged (`_mean_pose`). Good when the camera's pose is what is far off;
+      the arm's own errors go into it when they are.
+    """
+    starts: list[
+        tuple[np.ndarray | None, Mapping[str, np.ndarray] | None, Mapping[str, np.ndarray] | None]
+    ] = [(None, None, None)]
+    head_sightings = [s for s in problem.sightings if s.camera == HEAD]
+    if head_sightings:
+        head = JointProblem(problem.model, problem.board, {}, head_sightings, joint_sigma_deg=0.0).fit(
+            max_nfev=max_nfev
+        )
+        starts.append((head.theta, None, head.boards))
+        gcs0 = {}
+        for arm in problem.arms:
+            camera = problem.cameras[arm]
+            estimates = []
+            for s in problem.sightings:
+                if s.camera != arm or s.placement not in head.boards:
+                    continue
+                camera_board = board_pose(
+                    problem.board, s.detection, camera.matrix(), camera.coeffs, camera.model == "fisheye"
+                )
+                root_link = problem.model.frame_pose(wrist_camera_link(arm), problem._q[id(s)], head.theta)
+                estimates.append(
+                    np.linalg.inv(root_link) @ head.boards[s.placement] @ np.linalg.inv(camera_board)
+                )
+            if estimates:
+                gcs0[arm] = _mean_pose(estimates)
+        if gcs0:
+            starts.append((head.theta, gcs0, head.boards))
+    trials = [
+        problem.fit(theta0, min(STAGED_TRIAL_NFEV, max_nfev), gcs0, boards0)
+        for theta0, gcs0, boards0 in starts
+    ]
+    best = min(trials, key=lambda t: t.cost)
+    if best.nfev < min(STAGED_TRIAL_NFEV, max_nfev):  # converged within its trial
+        return best
+    return problem.fit(best.theta, max_nfev, best.gripper_from_camera, best.boards)
 
 
 # ---- sessions ---------------------------------------------------------------------------------------------------
@@ -479,45 +576,61 @@ def load_session(directory: str | Path) -> JointSession:
 # ---- fitting sessions --------------------------------------------------------------------------------------------
 
 
-def click_errors(
+def split_holdout(
+    sightings: Sequence[BoardSighting], every: int
+) -> tuple[list[BoardSighting], list[BoardSighting]]:
+    """(fitted, held out): sightings, whole moments held out (none if `every` is 0).
+
+    Of the moments at which the head and a wrist camera both saw a board, every `every`-th one's.
+    """
+    if every <= 0:
+        return list(sightings), []
+    cameras: dict[int, set[str]] = {}
+    for s in sightings:
+        cameras.setdefault(id(s.look), set()).add(s.camera)
+    both = [look for look, seen in cameras.items() if HEAD in seen and len(seen) > 1]
+    held_looks = {look for i, look in enumerate(both) if i % every == every - 1}
+    return (
+        [s for s in sightings if id(s.look) not in held_looks],
+        [s for s in sightings if id(s.look) in held_looks],
+    )
+
+
+def agreement(
     model: XleRobotModel,
+    board: Board,
     cameras: Mapping[str, WristCamera],
-    clicks: Sequence[TipClick],
+    sightings: Sequence[BoardSighting],
     theta: np.ndarray,
     gcs: Mapping[str, np.ndarray],
-    thickness: float,
 ) -> np.ndarray:
-    """Each click's distance (px) from where the model (`theta`, the cameras' poses, the thickness) puts its tip.
+    """How far apart the two chains put the board, per moment the head and a wrist camera both saw it (N, 2).
 
-    From the joints as read (no fitted errors: these are clicks the fit did not see).
+    Through the head (its joints, the camera mount, its lens) and through the arm (its mount and joints, the wrist
+    camera's pose on the gripper, its lens), from the joints as read: the board's center apart (mm) and its turn
+    between the two (deg). What a grasp planned in the head's picture and done by the arm needs to be small.
     """
-    if not clicks:
-        return np.zeros(0)
-    problem = JointProblem(model, _no_board(), cameras, [], clicks, joint_sigma_deg=0.0)
+    intr = model.intrinsics
+    matrix = np.array([[intr["fx"], 0, intr["ppx"]], [0, intr["fy"], intr["ppy"]], [0, 0, 1.0]])
+    center = board.points().mean(axis=0)
+    by_look: dict[int, dict[str, BoardSighting]] = {}
+    for s in sightings:
+        by_look.setdefault(id(s.look), {})[s.camera] = s
     out = []
-    for c in clicks:
-        q = problem.q(c, np.zeros(problem.size))
-        uv = problem.project(c.camera, q, problem.tip(c, q, theta, thickness)[None], theta, dict(gcs))
-        out.append(float(np.linalg.norm(uv[0] - c.pixel)) if np.isfinite(uv).all() else np.inf)
-    return np.array(out)
-
-
-def _no_board() -> Board:
-    from lerobot.felix_jr.calibration.boards import Checkerboard
-
-    return Checkerboard(3, 3, 0.01)  # a placeholder: click-only problems have no sightings
-
-
-def split_holdout(clicks: Sequence[TipClick], every: int) -> tuple[list[TipClick], list[TipClick]]:
-    """(fitted, held out): the clicks of every `every`-th moment are held out (none if `every` is 0)."""
-    if every <= 0:
-        return list(clicks), []
-    order: dict[int, int] = {}
-    for c in clicks:
-        order.setdefault(id(c.look), len(order))
-    held = [c for c in clicks if order[id(c.look)] % every == every - 1]
-    kept = [c for c in clicks if order[id(c.look)] % every != every - 1]
-    return kept, held
+    for seen in by_look.values():
+        head = seen.get(HEAD)
+        for camera, s in seen.items():
+            if head is None or camera not in cameras:
+                continue
+            q = model.joint_vector(s.look.arms, s.look.head_ticks)
+            via_head = model.camera_pose(q, theta) @ board_pose(board, head.detection, matrix)
+            lens = cameras[camera]
+            camera_board = board_pose(board, s.detection, lens.matrix(), lens.coeffs, lens.model == "fisheye")
+            via_arm = model.frame_pose(wrist_camera_link(camera), q, theta) @ gcs[camera] @ camera_board
+            apart = (via_head[:3, :3] - via_arm[:3, :3]) @ center + via_head[:3, 3] - via_arm[:3, 3]
+            turn = cv2.Rodrigues(via_head[:3, :3].T @ via_arm[:3, :3])[0]
+            out.append((1000 * float(np.linalg.norm(apart)), float(np.degrees(np.linalg.norm(turn)))))
+    return np.array(out, dtype=np.float64).reshape(-1, 2)
 
 
 def calibrate(
@@ -525,7 +638,8 @@ def calibrate(
 ) -> tuple[XleRobotModel, JointFit, dict[str, Any]]:
     """Fit `sessions` (one board kind) from `model`; the calibrated model, the fit, and a report's numbers.
 
-    Every `holdout_every`-th moment's clicks are left out of the fit and scored after it, as the first check.
+    Every `holdout_every`-th moment at which the head and a wrist camera both saw the board is left out of the fit,
+    and scored by how far apart the two cameras' chains put the board there (`agreement`), before and after.
     """
     boards = {json.dumps(s.board.to_dict(), sort_keys=True) for s in sessions}
     if len(boards) != 1:
@@ -542,13 +656,14 @@ def calibrate(
                 f"the start has no {arm} wrist camera (its lens and a first pose: calibration.wrist_camera)"
             )
         cameras[arm] = camera
-    sightings = [x for s in sessions for x in s.sightings]
-    kept, held = split_holdout([c for s in sessions for c in s.clicks], holdout_every)
-    problem = JointProblem(model, sessions[0].board, cameras, sightings, kept)
+    board = sessions[0].board
+    sightings, held = split_holdout([x for s in sessions for x in s.sightings], holdout_every)
+    clicks = [c for s in sessions for c in s.clicks]
+    problem = JointProblem(model, board, cameras, sightings, clicks)
     gc0 = {a: np.asarray(cameras[a].gripper_from_camera, dtype=np.float64) for a in arms}
-    before = click_errors(model, cameras, held, model.estimates, gc0, JAW_THICKNESS_M)
-    fit = problem.fit()
-    after = click_errors(model, cameras, held, fit.theta, fit.gripper_from_camera, fit.thickness)
+    before = agreement(model, board, cameras, held, model.estimates, gc0)
+    fit = fit_staged(problem)
+    after = agreement(model, board, cameras, held, fit.theta, fit.gripper_from_camera)
     calibrated = model
     for arm in arms:
         gc = fit.gripper_from_camera[arm]
@@ -563,15 +678,18 @@ def calibrate(
     numbers: dict[str, Any] = {
         "sessions": [str(s.path) for s in sessions],
         "sightings": {k: sum(x.camera == k for x in sightings) for k in [HEAD, *arms]},
-        "clicks": {"fitted": len(kept), "held out": len(held)},
+        "clicks": {k: sum(c.camera == k for c in clicks) for k in [HEAD, *arms]},
         "rms_px": fit.rms_px,
-        "held_out_px": {
-            camera: {
-                "before": float(np.sqrt(np.mean(before[mask] ** 2))) if mask.any() else None,
-                "after": float(np.sqrt(np.mean(after[mask] ** 2))) if mask.any() else None,
-            }
-            for camera in [HEAD, *arms]
-            for mask in [np.array([c.camera == camera for c in held], dtype=bool)]
+        "held_out": {
+            "moments": len(after),
+            **{
+                name: {
+                    "mm": float(np.sqrt(np.mean(a[:, 0] ** 2))),
+                    "deg": float(np.sqrt(np.mean(a[:, 1] ** 2))),
+                }
+                for name, a in (("before", before), ("after", after))
+                if len(a)
+            },
         },
         "thickness_mm": 1000 * fit.thickness,
         "camera_moved": {
@@ -594,6 +712,16 @@ def calibrate(
     return calibrated, fit, numbers
 
 
+def _held_out_lines(held: Mapping[str, Any]) -> list[str]:
+    if not held["moments"]:
+        return ["- none held out (too few moments, or `--holdout-every 0`)"]
+    b, a = held["before"], held["after"]
+    return [
+        f"- {held['moments']} moments: {b['mm']:.1f} mm, {b['deg']:.2f} deg before -> "
+        f"{a['mm']:.1f} mm, {a['deg']:.2f} deg after"
+    ]
+
+
 def report(model: XleRobotModel, start: XleRobotModel, numbers: Mapping[str, Any]) -> str:
     """A markdown report of a `calibrate` run: what was fitted, how well, what moved."""
     lines = [
@@ -603,22 +731,31 @@ def report(model: XleRobotModel, start: XleRobotModel, numbers: Mapping[str, Any
         "",
         "| | count |",
         "| --- | --- |",
-        *[f"| board sightings, {k} | {v} |" for k, v in numbers["sightings"].items()],
-        f"| clicks fitted / held out | {numbers['clicks']['fitted']} / {numbers['clicks']['held out']} |",
+        *[f"| board sightings, {k} (fitted) | {v} |" for k, v in numbers["sightings"].items()],
+        *[f"| fingertip clicks, {k} | {v} |" for k, v in numbers["clicks"].items() if v],
         "",
         "## Residuals (RMS, px)",
         "",
         *[f"- {k}: {v:.2f}" for k, v in numbers["rms_px"].items()],
         "",
-        "## Held-out clicks (RMS, px): the first check (near the clicks' noise, 2-3 px)",
+        "## Held-out moments: the head and the arm on where the board is (RMS)",
         "",
-        *[
-            f"- {k}: {v['before']:.1f} before -> {v['after']:.1f} after"
-            for k, v in numbers["held_out_px"].items()
-            if v["after"] is not None
-        ],
+        "The moments the fit did not see at which both cameras saw the board: how far apart the head's chain and the "
+        "arm's put it.",
         "",
-        f"The fingers' thickness: {numbers['thickness_mm']:.1f} mm (1.0 measured).",
+        *_held_out_lines(numbers["held_out"]),
+        "",
+        *(
+            [
+                f"**The fit stopped at its step limit ({numbers['nfev']} steps), not converged:** the robot has an error "
+                "the model cannot say (a sag, play), or the start was far off. Look at the residuals and the held-out "
+                "moments before using it.",
+                "",
+            ]
+            if numbers["nfev"] >= MAX_NFEV
+            else []
+        ),
+        f"The fingers' thickness: {numbers['thickness_mm']:.1f} mm ({1000 * JAW_THICKNESS_M:.1f} measured).",
         "",
         *[
             f"The {arm} wrist camera moved {v['mm']:.1f} mm and {v['deg']:.2f} deg on its gripper."
@@ -647,7 +784,10 @@ def main() -> None:
     parser.add_argument("--start-from", type=Path, required=True, help="the calibration to start from")
     parser.add_argument("--out", type=Path, required=True, help="the calibrated URDF to write")
     parser.add_argument(
-        "--holdout-every", type=int, default=5, help="hold out every n-th moment's clicks (5)"
+        "--holdout-every",
+        type=int,
+        default=5,
+        help="hold out every n-th moment both cameras saw the board at (5; 0 = none)",
     )
     args = parser.parse_args()
     start = XleRobotModel.load(args.start_from)
