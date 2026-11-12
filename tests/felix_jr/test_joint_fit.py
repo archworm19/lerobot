@@ -62,6 +62,23 @@ def test_the_wrist_click_is_one_thickness_from_the_head_click(session):
     assert np.linalg.norm(wrist_side - head_side) == pytest.approx(0.012, abs=1e-9)
 
 
+def test_a_head_click_can_be_on_either_face(session):
+    """The face a click is on decides its tip, whichever camera clicked it; without one, the camera's default."""
+    world, problem = session
+    click = next(c for c in problem.clicks if c.camera == ARM)
+    q, theta = problem._q[id(click)], world.truth.theta
+    make = type(click)
+    pinch = problem.tip(make(HEAD, ARM, click.look, click.pixel), q, theta, 0.01)
+    wrist = problem.tip(click, q, theta, 0.01)
+    assert make(HEAD, ARM, click.look, click.pixel).on_face == "pinch" and click.on_face == "wrist"
+    np.testing.assert_allclose(
+        problem.tip(make(HEAD, ARM, click.look, click.pixel, face="wrist"), q, theta, 0.01), wrist
+    )
+    np.testing.assert_allclose(
+        problem.tip(make(ARM, ARM, click.look, click.pixel, face="pinch"), q, theta, 0.01), pinch
+    )
+
+
 def test_the_sparsity_covers_every_dependence(session):
     """A finite-difference Jacobian is zero wherever the sparsity says a residual does not depend on an unknown."""
     _, problem = session
@@ -97,6 +114,7 @@ def test_a_session_is_saved_and_read_back(session, tmp_path):
     save_session(saved)
     back = load_session(tmp_path)
     assert back.board == world.board and back.arm == ARM
+    assert [c.on_face for c in back.clicks] == [c.on_face for c in problem.clicks]
     assert len(back.sightings) == len(saved.sightings) and len(back.clicks) == len(saved.clicks)
     again = JointProblem(model, back.board, {ARM: world.camera}, back.sightings, back.clicks)
     assert len(again.looks) == len(problem.looks)

@@ -315,7 +315,14 @@ looks at it from 6 directions. Then 10 arm views (`n` each, the arm moves slowly
 click the fixed fingertip in the wrist's picture (the face toward it) and in the head's where it shows. Then 10 low
 poses, the wrist rolled to show the head the fingertip's face it clicks and the head looking at it: click it in both
 (a picture showing the board is one more sighting). `q` fits and writes `calibration.urdf` and `calibration.md`.
-Tested end to end on the fake robot with a rendered board (`smoke_tests/test_joint_collect_smoke.py`). It replaces how the model is calibrated, so it is
+Each head click is on one of the fingertip's two faces (`TipClick.face`): the head's picture circles both, P (the
+pinch point) and W (the wrist camera's side, a finger's thickness away), the bold one the face the model expects the
+head to see; `f` switches it when the picture shows the other (the 1 cm between them is ~10 px at 60 cm, about the
+model's error before a fit: the eye tells them apart, the model cannot). `--head-axes` (session and refit) also fits
+the head's pan and tilt axes' tilts (`XleRobotModel(head_axes=True)`, `with_head_axes`; 4 parameters, off by default):
+in the simulator, tilts of 0.5-3 deg left the head's error at the noise without them, only the tilt axis about x and
+partly the pan axis about x were recovered, and the other two traded off with the head's other parameters; turn it on
+if the held-out agreement shows an error that depends on the head's pose. Tested end to end on the fake robot with a rendered board (`smoke_tests/test_joint_collect_smoke.py`). It replaces how the model is calibrated, so it is
 built beside the current pipeline (`collect` + `xle_fit`, then `wrist_camera`'s pose step) and replaces it only once
 it passes the checks at the end of this section.
 

@@ -24,7 +24,7 @@ servo map and lens, the arm's LeRobot calibration, the moments, the sightings an
 (`agreement`), and writes the calibration.
 
 Usage: uv run python -m lerobot.felix_jr.calibration.joint_fit SESSION [SESSION ...] --start-from calibration.urdf
-       --out calibration.urdf [--holdout-every 5]
+       --out calibration.urdf [--holdout-every 5] [--head-axes]
 """
 
 import argparse
@@ -87,9 +87,11 @@ class BoardSighting:
 
 @dataclass(frozen=True)
 class TipClick:
-    """`arm`'s fixed fingertip clicked at `pixel` in `camera`'s picture.
+    """`arm`'s fixed fingertip clicked at `pixel` in `camera`'s picture, on one of its two faces.
 
-    "head": the face the head sees (the pinch point); the arm's own wrist camera: the other face.
+    `face`: "pinch" (the pinch point, the face away from the wrist camera) or "wrist" (the face toward it, one thickness
+    along the hinge). Empty (sessions before 2026-11-11): by the camera, the head's clicks on "pinch", the wrist
+    camera's on "wrist" (it cannot see the other).
     """
 
     camera: str
@@ -97,6 +99,12 @@ class TipClick:
     look: Look
     pixel: np.ndarray
     image: str = ""  # the picture, in its session's folder
+    face: str = ""
+
+    @property
+    def on_face(self) -> str:
+        """The face clicked: `face`, or the camera's default."""
+        return self.face or ("pinch" if self.camera == HEAD else "wrist")
 
 
 @dataclass
@@ -252,9 +260,9 @@ class JointProblem:
         return self.cameras[camera].project(in_camera)
 
     def tip(self, click: TipClick, q: np.ndarray, theta: np.ndarray, thickness: float) -> np.ndarray:
-        """The clicked fingertip in the root frame: the pinch point, or the other face's for the wrist camera."""
+        """The clicked fingertip in the root frame: the pinch point, or the other face's (`TipClick.on_face`)."""
         pinch = self.model.frame_pose(pinch_frame(click.arm), q, theta)
-        if click.camera == HEAD:
+        if click.on_face == "pinch":
             return pinch[:3, 3]
         face = self.model.wrist_face(click.arm) * (thickness / JAW_THICKNESS_M)
         return pinch[:3, :3] @ face + pinch[:3, 3]
@@ -507,6 +515,7 @@ def save_session(session: JointSession) -> Path:
             "look": look_index(c.look),
             "pixel": list(map(float, c.pixel)),
             "image": c.image,
+            "face": c.on_face,
         }
         for c in session.clicks
     ]
@@ -556,6 +565,7 @@ def load_session(directory: str | Path) -> JointSession:
             looks[c["look"]],
             np.asarray(c["pixel"], dtype=np.float64),
             c.get("image", ""),
+            c.get("face", ""),
         )
         for c in data["clicks"]
     ]
@@ -784,6 +794,11 @@ def main() -> None:
     parser.add_argument("--start-from", type=Path, required=True, help="the calibration to start from")
     parser.add_argument("--out", type=Path, required=True, help="the calibrated URDF to write")
     parser.add_argument(
+        "--head-axes",
+        action="store_true",
+        help="fit the head's pan and tilt axes' tilts too (4 more parameters)",
+    )
+    parser.add_argument(
         "--holdout-every",
         type=int,
         default=5,
@@ -791,6 +806,8 @@ def main() -> None:
     )
     args = parser.parse_args()
     start = XleRobotModel.load(args.start_from)
+    if args.head_axes:
+        start = start.with_head_axes()
     sessions = [load_session(path) for path in args.sessions]
     if sessions[0].intrinsics:
         start.intrinsics = dict(sessions[0].intrinsics)

@@ -21,7 +21,11 @@ Then **low poses**: each `n` moves the gripper low over the table, as for a gras
 click it in both pictures. The head's clicks matter: a wrist click fixes only the direction from its camera to the
 fingertip, the head's the distance along it. Leave the board where it is: a picture that shows it is one more sighting.
 
-Keys: `n` next, arrows turn the head (if the board is cut off), `u` undo the last click, `q` stop and
+In the head's picture both faces' tips are circled, P (the pinch point) and W (the wrist camera's side, one finger's
+thickness away); the bold one is the face the next head click is on, the one the model expects the head to see. If
+the picture shows the other face, `f` switches.
+
+Keys: `n` next, `f` the head click's face, arrows turn the head (if the board is cut off), `u` undo the last click, `q` stop and
 fit. Everything is saved as you go (`joint_session.json`, `images/`), `--resume` continues. At the end the session
 is fitted (`joint_fit.calibrate`) and `calibration.urdf` and `calibration.md` written to `--out-dir`. The script runs
 in a client session: Ctrl+C or a crash sends the robot to rest.
@@ -61,7 +65,8 @@ PANE = (640, 480)  # each picture is shown at this size
 STATUS_HEIGHT = 70
 LIVE_PERIOD_S = 0.2  # the head picture's refresh while placing the board
 CALIBRATION_FILE = "calibration.urdf"
-KEYS = {ord("n"): "next", ord("u"): "undo", ord("q"): "quit", 27: "quit"}
+KEYS = {ord("n"): "next", ord("u"): "undo", ord("f"): "face", ord("q"): "quit", 27: "quit"}
+EDGE_ON_DEG = (75.0, 105.0)  # the fingers this near edge-on to the head: which face shows is unclear
 
 
 @dataclass
@@ -102,10 +107,12 @@ def compose(
     outlines: dict[str, np.ndarray],
     lines: list[str],
     found: dict[str, np.ndarray] | None = None,
+    labeled: dict[str, list[tuple[np.ndarray, str, bool]]] | None = None,
 ) -> tuple[np.ndarray, list[Region]]:
     """The window: the head's picture and the wrist's side by side, each with its predicted tip circled.
 
-    `found`: board corners detected in a pane, drawn as green dots.
+    `found`: board corners detected in a pane, drawn as green dots. `labeled`: predicted tips with a label each (the
+    fingertip's two faces), the ones flagged True drawn bold (the face the next click is on).
     """
     window = np.zeros((PANE[1] + STATUS_HEIGHT, 2 * PANE[0], 3), np.uint8)
     regions: list[Region] = []
@@ -134,6 +141,11 @@ def compose(
         tip = predicted.get(pane)
         if tip is not None and np.isfinite(tip).all():
             cv2.circle(shown, at(tip), 12, (0, 255, 255), 1, cv2.LINE_AA)
+        for uv, label, bold in (labeled or {}).get(pane, []):
+            if np.isfinite(uv).all():
+                x, y = at(uv)
+                cv2.circle(shown, (x, y), 12, (0, 255, 255), 2 if bold else 1, cv2.LINE_AA)
+                _draw_text(shown, [label], (x + 14, y - 8))
         window[: shown.shape[0], x0 : x0 + shown.shape[1]] = shown
         regions.append(Region(pane, x0, 0, shown.shape[1], shown.shape[0], scale, (0.0, 0.0)))
     _draw_text(window, lines, (8, PANE[1] + 18))
@@ -213,6 +225,7 @@ class JointCollect:
         self.n_images = len(list((out_dir / "images").glob("*.png")))  # --resume numbers on from there
         self.frame_clicks: dict[str, list[tuple[float, float]]] = {"head": [], "wrist": []}
         self.regions: list[Region] = []
+        self.head_face, self.face_angle = "pinch", 0.0  # set by each capture (`_capture`)
         self.live: Detection | None = None  # the board in the live head picture while placing it
         self.live_at = 0.0
         self.message = ""
@@ -249,6 +262,11 @@ class JointCollect:
         self.look = Look({self.arm: arm}, ticks)
         self.frame_clicks = {"head": [], "wrist": []}
         self.saved = []
+        # the face of the fingertip the head shows, as the model has it: the next head click's (`f` flips it)
+        self.face_angle = jv.head_face_angle(
+            self.model, self.arm, self.model.joint_vector(self.look.arms, ticks)
+        )
+        self.head_face = "pinch" if self.face_angle < 90.0 else "wrist"
 
     def _image(self, capture: Capture | WristCapture, name: str) -> str:
         """The capture's picture saved once in `images/` (its file name)."""
@@ -448,7 +466,8 @@ class JointCollect:
         capture = self.head if pane == "head" else self.wrist
         assert capture is not None and self.look is not None
         camera = HEAD if pane == "head" else self.arm
-        click = TipClick(camera, self.arm, self.look, np.array([u, v]), self._image(capture, pane))
+        face = self.head_face if pane == "head" else "wrist"  # the wrist camera sees only its own side
+        click = TipClick(camera, self.arm, self.look, np.array([u, v]), self._image(capture, pane), face)
         self.session.clicks.append(click)
         self.frame_clicks[pane].append((u, v))
         save_session(self.session)
@@ -481,12 +500,15 @@ class JointCollect:
             self._sight(HEAD)
         self.render()
 
-    def finish(self, holdout_every: int = 5) -> Path | None:
-        """Fit the session and write `calibration.urdf` and `calibration.md` (None if there is too little)."""
+    def finish(self, holdout_every: int = 5, head_axes: bool = False) -> Path | None:
+        """Fit the session and write `calibration.urdf` and `calibration.md` (None if there is too little).
+
+        `head_axes`: fit the head joints' axes' tilts too (`XleRobotModel.with_head_axes`).
+        """
         save_session(self.session)
         if not self.session.sightings or not self.session.clicks:
             return None
-        start = self.model
+        start = self.model.with_head_axes() if head_axes else self.model
         calibrated, _, numbers = calibrate(start, [self.session], holdout_every)
         path = self.out_dir / CALIBRATION_FILE
         calibrated.save(path)
@@ -501,9 +523,15 @@ class JointCollect:
             return
         q = self.model.joint_vector(self.look.arms, self.look.head_ticks)
         head_tip, wrist_tip = jv.fingertips(self.model, self.arm, q)
-        predicted = {
-            "head": self.model.project(head_tip[None], q)[0][0],
-            "wrist": jv.wrist_pixels(self.model, self.arm, q, wrist_tip[None])[0],
+        predicted = {"wrist": jv.wrist_pixels(self.model, self.arm, q, wrist_tip[None])[0]}
+        in_head = self.model.project(np.array([head_tip, wrist_tip]), q)[
+            0
+        ]  # both faces, in the head's picture
+        labeled = {
+            "head": [
+                (in_head[0], "P", self.head_face == "pinch"),
+                (in_head[1], "W", self.head_face == "wrist"),
+            ]
         }
         outlines = {}
         if self.phase == "place" and self.root_board is not None:
@@ -515,8 +543,14 @@ class JointCollect:
         lines = [
             f"{self.arm} arm | {self.phase} | placement {min(self.placement + 1, self.n_placements)}/{self.n_placements} | "
             f"{len(self.session.sightings)} board sightings, {len(self.session.clicks)} clicks",
-            "n next | click the fingertip in each picture | arrows head | u undo | q fit and quit",
-            self.message,
+            "n next | click the fingertip in each picture | f the head's face | arrows head | u undo | q fit and quit",
+            f"head clicks on the {'P (pinch)' if self.head_face == 'pinch' else 'W (wrist-camera)'} face"
+            + (
+                " | nearly edge-on: click only if you can tell the face"
+                if EDGE_ON_DEG[0] <= self.face_angle <= EDGE_ON_DEG[1]
+                else ""
+            )
+            + (f" | {self.message}" if self.message else ""),
         ]
         window, self.regions = compose(
             {"head": self.head.color, "wrist": self.wrist.color},
@@ -525,6 +559,7 @@ class JointCollect:
             outlines,
             lines,
             {"head": self.live.pixels} if self.phase == "place" and self.live is not None else None,
+            labeled,
         )
         self.show(window)
 
@@ -536,6 +571,9 @@ class JointCollect:
             self.next()
         elif action == "undo":
             self.undo()
+        elif action == "face":
+            self.head_face = "wrist" if self.head_face == "pinch" else "pinch"
+            self.render()
         elif action in ("up", "down", "left", "right"):
             self.nudge(action)
         return True
@@ -557,6 +595,11 @@ def main() -> None:
     parser.add_argument("--low-views", type=int, default=10, help="poses low over the table")
     parser.add_argument("--max-vel", type=float, default=20.0, help="arm speed limit, deg/s (20)")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--head-axes",
+        action="store_true",
+        help="fit the head's pan and tilt axes' tilts too (4 more parameters)",
+    )
     args = parser.parse_args()
 
     window = "joint calibration (n next; click the fingertips; q fit and quit)"
@@ -599,7 +642,7 @@ def main() -> None:
             cv2.destroyAllWindows()
         client.home(max_vel=args.max_vel)
     print(f"saved to {args.out_dir / SESSION_FILE}")
-    path = session.finish()
+    path = session.finish(head_axes=args.head_axes)
     if path is not None:
         print(path.with_suffix(".md").read_text())
         print(f"Wrote {path} and {path.with_suffix('.md')}")

@@ -103,7 +103,11 @@ SIGMAS = {
     "arm zero": np.radians(2.0),
     "arm origin": 0.002,
     "tip": 0.008,  # where "the tip of the closed gripper" is, relative to the SO-101's tool center point
+    "head axis": np.radians(2.0),  # the printed head: its pan and tilt axes a degree or two out of line
 }
+# the head joints' axes may tilt (`default_parameters(head_axes=True)`): the turns about the two axes square to each
+# joint's own (the pan turns about z, the tilt about y); a turn about its own axis is its zero
+HEAD_AXIS_TILTS = {"head_pan_joint": ("x", "y"), "head_tilt_joint": ("x", "z")}
 
 
 POINTS = ("pinch", "moving_tip")  # the gripper points the model predicts (module docstring)
@@ -170,7 +174,9 @@ class Param:
 
 
 def default_parameters(
-    arms: Sequence[str] = ARMS, overrides: Mapping[str, tuple[float, float]] | None = None
+    arms: Sequence[str] = ARMS,
+    overrides: Mapping[str, tuple[float, float]] | None = None,
+    head_axes: bool = False,
 ) -> list[Param]:
     """The parameters we calibrate, with their priors (`SIGMAS`): the head and camera, then each arm's.
 
@@ -178,13 +184,16 @@ def default_parameters(
     origins and most of the rest stay at their priors in practice (the fit's report says which were learned), but
     keeping them in costs little and lets the uncertainty show. The head tower is not included: moving it and moving
     the arm mount shift every pixel identically, so only one of them can be found, and the mount is it.
-    `overrides` replaces some priors, `{name: (mean, sigma)}`.
+    `overrides` replaces some priors, `{name: (mean, sigma)}`. `head_axes` adds the head joints' axes' tilts
+    (`head_axis_parameters`: 4 more, off by default).
     """
     params = [Param(f"zero:{j}", SIGMAS["head zero"], "head") for j in HEAD_JOINTS.values()]
     for joint in HEAD_JOINTS.values():
         params += [Param(f"pos:{joint}:{a}", SIGMAS["head origin"], "head") for a in AXES]
     params += [Param(f"pos:{CAMERA_MOUNT}:{a}", SIGMAS[f"camera {a}"], "head") for a in AXES]
     params += [Param(f"rot:{CAMERA_MOUNT}:{a}", SIGMAS["camera rot"], "head") for a in AXES]
+    if head_axes:
+        params += head_axis_parameters()
     for arm in arms:
         mount = ARM_MOUNTS[arm]
         params += [Param(f"pos:{mount}:{a}", SIGMAS["mount pos"], "mount", arm=arm) for a in AXES]
@@ -202,6 +211,19 @@ def default_parameters(
             for p in params
         ]
     return params
+
+
+def head_axis_parameters() -> list[Param]:
+    """The head joints' axes' tilts (`HEAD_AXIS_TILTS`), 4 parameters.
+
+    A printed column or bracket can hold the pan or the tilt axis out of line, which the camera's mount takes up at one
+    head pose but not across them.
+    """
+    return [
+        Param(f"rot:{joint}:{a}", SIGMAS["head axis"], "head")
+        for joint, axes in HEAD_AXIS_TILTS.items()
+        for a in axes
+    ]
 
 
 @dataclass
@@ -363,12 +385,14 @@ class XleRobotModel:
         gripper_maps: Mapping[str, GripperMap] | None = None,
         arm_calibration: Mapping[str, Mapping[str, Mapping[str, int]]] | None = None,
         wrist_cameras: Mapping[str, WristCamera] | None = None,
+        head_axes: bool = False,
     ):
         """Build the model from URDF text (`from_urdf` reads a file).
 
         `head_signs` / `head_refs`: per head servo, the direction and the tick count at its recorded home (from
         `setup.head`); the URDF angle is `sign * (ticks - ref) * 2 pi / 4096`. `intrinsics`: the color camera's
-        `fx, fy, ppx, ppy, width, height`. `parameters`: the rows to calibrate (default `default_parameters()`).
+        `fx, fy, ppx, ppy, width, height`. `parameters`: the rows to calibrate (default `default_parameters()`);
+        `head_axes` adds the head joints' axes' tilts to them (`head_axis_parameters`), if missing.
         `floor_z`: the table's height in the root frame, if known. `visible_side`: per arm, the side of the
         gripper the camera must see ("positive" by default: the wrist camera is on the negative side).
         `gripper_maps`: per arm, how `gripper.pos` opens the jaws, where measured. `arm_calibration`: per arm, the
@@ -384,6 +408,9 @@ class XleRobotModel:
         self.head_refs = {k: int(v) for k, v in head_refs.items()}
         self.intrinsics = dict(intrinsics or DEFAULT_INTRINSICS)
         self.parameters = list(parameters if parameters is not None else default_parameters())
+        if head_axes:
+            have = {p.name for p in self.parameters}
+            self.parameters += [p for p in head_axis_parameters() if p.name not in have]
         self.floor_z = floor_z
         self.visible_side = dict.fromkeys(ARMS, "positive") | dict(visible_side or {})
         self.gripper_maps = dict(gripper_maps or {})
@@ -1135,6 +1162,27 @@ class XleRobotModel:
         )
         model.set_estimates(self._estimates.copy())
         model.covariance = self.covariance
+        model.fit_info = dict(self.fit_info)
+        return model
+
+    def with_head_axes(self) -> "XleRobotModel":
+        """A copy with the head joints' axes' tilts among its parameters (at 0 where new; `head_axis_parameters`)."""
+        if {p.name for p in head_axis_parameters()} <= {p.name for p in self.parameters}:
+            return self
+        model = type(self)(
+            self.urdf,
+            self.head_signs,
+            self.head_refs,
+            self.intrinsics,
+            self.parameters,
+            self.floor_z,
+            self.visible_side,
+            self.gripper_maps,
+            self.arm_calibration,
+            self.wrist_cameras,
+            head_axes=True,
+        )
+        model.set_estimates(self.estimate_dict())
         model.fit_info = dict(self.fit_info)
         return model
 

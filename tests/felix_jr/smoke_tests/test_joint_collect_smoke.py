@@ -113,11 +113,13 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup):
         assert session.phase == "place" and shown, session.message
 
         def click_truth():
-            """Click the fingertips where the true robot shows them (each camera its own face)."""
+            """Click the fingertips where the true robot shows them: the wrist its own face, the head the face the
+            session says it is on (a person clicks the face the picture shows, `f` if the session guessed wrong)."""
             state = client.get_state()
             q = true_q(state)
             head_tip, wrist_tip = jv.fingertips(start, ARM, q, truth.theta, truth.thickness)
-            uv_head = start.project(head_tip[None], q, truth.theta)[0][0]
+            seen = head_tip if session.head_face == "pinch" else wrist_tip
+            uv_head = start.project(seen[None], q, truth.theta)[0][0]
             uv_wrist = jv.wrist_pixels(
                 start, ARM, q, wrist_tip[None], truth.theta, truth.gripper_from_camera
             )[0]
