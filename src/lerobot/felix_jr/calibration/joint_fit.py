@@ -59,6 +59,8 @@ SIGMA_CLICK_PX = 2.5  # a person's click on a fingertip
 THICKNESS_SIGMA_M = 0.001  # the fingers' thickness, measured (1.0 cm)
 JOINT_SIGMA_DEG = 0.2  # a joint's reading against where it is (a servo tick is 0.09 deg; play)
 HUBER = 2.0  # in sigmas: beyond, a residual is down-weighted
+# a board's start (`JointProblem._first_board_pose`): its sightings' poses this near the most central one are averaged
+BOARD_START_AGREE_M, BOARD_START_AGREE_DEG = 0.03, 5.0
 # the fit's steps at most, a safety net (`fit_staged` starts it near the answer): from a far start it can creep on for
 # an hour (joint_sim, 2026-11-11), and 400 cut off one that needed 461
 MAX_NFEV = 1500
@@ -143,18 +145,22 @@ class JointProblem:
         sightings: Sequence[BoardSighting],
         clicks: Sequence[TipClick] = (),
         joint_sigma_deg: float = JOINT_SIGMA_DEG,
+        arms_free: bool = True,
     ):
         """`cameras`: each fitted arm's wrist camera (its lens; its `gripper_from_camera` is the starting point).
 
         `joint_sigma_deg`: how far a joint's reading may be from where it really is (0: the readings are taken as
         exact). Each moment's fitted-arm joints get an error of their own, with this prior: the same for every point
-        seen at that moment, it would otherwise bend the robot's parameters.
+        seen at that moment, it would otherwise bend the robot's parameters. `arms_free` False holds the arms'
+        parameters where they start (the head's, the cameras' poses, the boards still fitted: `fit_staged`).
         """
         self.model, self.board, self.cameras = model, board, dict(cameras)
         self.sightings, self.clicks = list(sightings), list(clicks)
         self.arms = sorted(self.cameras)
         self.placements = sorted({s.placement for s in self.sightings})
-        self.free = np.array([p.arm is None or p.arm in self.arms for p in model.parameters])
+        self.free = np.array(
+            [p.arm is None or (arms_free and p.arm in self.arms) for p in model.parameters], dtype=bool
+        )
         self.mean = np.array([p.mean for p in model.parameters])
         self.sigma = np.array([p.sigma for p in model.parameters])
         self.joint_sigma = np.radians(joint_sigma_deg)
@@ -231,21 +237,46 @@ class JointProblem:
         q[self.joint_index] += errors
         return q
 
-    def _first_board_pose(self, placement: str, theta: np.ndarray) -> np.ndarray:
-        """The board's pose from one sighting through the starting model (PnP): the fit's start for it."""
-        sighting = next(s for s in self.sightings if s.placement == placement)
+    def _sighting_board_pose(self, sighting: BoardSighting, theta: np.ndarray) -> np.ndarray:
+        """root_from_board from one sighting (its PnP) through the model at `theta` and the joints as read."""
         q = self._q[id(sighting)]
         if sighting.camera == HEAD:
             intr = self.model.intrinsics
             matrix = np.array([[intr["fx"], 0, intr["ppx"]], [0, intr["fy"], intr["ppy"]], [0, 0, 1.0]])
-            camera_board = board_pose(self.board, sighting.detection, matrix)
-            return self.model.camera_pose(q, theta) @ camera_board
+            return self.model.camera_pose(q, theta) @ board_pose(self.board, sighting.detection, matrix)
         camera = self.cameras[sighting.camera]
         camera_board = board_pose(
             self.board, sighting.detection, camera.matrix(), camera.coeffs, camera.model == "fisheye"
         )
         root_link = self.model.frame_pose(wrist_camera_link(sighting.camera), q, theta)
         return root_link @ np.asarray(camera.gripper_from_camera, dtype=np.float64) @ camera_board
+
+    def _first_board_pose(self, placement: str, theta: np.ndarray) -> np.ndarray:
+        """The board's start: from every head sighting of it (or every sighting, if the head has none), robustly.
+
+        Each sighting's PnP pose, through the model at `theta`; the one nearest the others in turn (the medoid) the
+        reference; those within `BOARD_START_AGREE_M` and `BOARD_START_AGREE_DEG` of it averaged (`_mean_pose`). A flat
+        board's PnP can flip to its mirror solution (joint_left_full3: one head picture of 17 put it 1 m and 180 deg
+        off); a single first sighting is also only as good as its one view.
+        """
+        mine = [s for s in self.sightings if s.placement == placement]
+        mine = [s for s in mine if s.camera == HEAD] or mine
+        poses = [self._sighting_board_pose(s, theta) for s in mine]
+        center = self.board.points().mean(axis=0)
+        centers = np.array([p[:3, :3] @ center + p[:3, 3] for p in poses])
+        turns = np.array(
+            [[np.linalg.norm(cv2.Rodrigues(a[:3, :3].T @ b[:3, :3])[0]) for b in poses] for a in poses]
+        )
+        apart = np.linalg.norm(centers[:, None] - centers[None], axis=2)
+        spread = apart / BOARD_START_AGREE_M + turns / np.radians(BOARD_START_AGREE_DEG)
+        reference = int(np.argmin(spread.sum(axis=1)))  # the medoid
+        near = [
+            p
+            for i, p in enumerate(poses)
+            if apart[reference, i] <= BOARD_START_AGREE_M
+            and turns[reference, i] <= np.radians(BOARD_START_AGREE_DEG)
+        ]
+        return _mean_pose(near)
 
     # ---- predictions and residuals ------------------------------------------------------------------------------
 
@@ -415,46 +446,27 @@ STAGED_TRIAL_NFEV = 150  # each start's trial: the wrong solutions show by then 
 
 
 def fit_staged(problem: "JointProblem", max_nfev: int = MAX_NFEV) -> JointFit:
-    """`problem.fit` from the best of three starts: each tried briefly, the lowest cost run to the end.
+    """`problem.fit` from the better of two starts: each tried briefly, the lower cost run to the end.
 
     A start far from the answer (the head's zeros off by degrees, the mounts by centimeters) can leave the joint fit
     stuck in a wrong solution or crawling (joint_sim, 2026-11-11: 1500 steps to a cost 1800 times the truth's, where a
     start at the truth converged in 132). No one start always works there, but the cost tells which did. The starts:
 
-    - **as given:** the model's estimates, the cameras' current poses, each board where its first sighting puts it;
-    - **the head first:** the head's sightings alone, the arms left out, give the head's parameters and the boards'
-      poses (stage 1); the cameras as given;
-    - **then the wrist cameras:** stage 1, and each camera's pose on its gripper from its sightings against stage 1's
-      boards, through the arm as modeled, averaged (`_mean_pose`). Good when the camera's pose is what is far off;
-      the arm's own errors go into it when they are.
+    - **as given:** the model's estimates, the cameras' current poses, each board from its head sightings
+      (`JointProblem._first_board_pose`);
+    - **the arm held:** every sighting and click, the arms' parameters held where they start, the rest fitted (the
+      head's, the cameras' poses on their grippers, the boards): the arm anchors the root frame, so the head and the
+      boards cannot swing together, as they did fitted alone (2026-11-13: the boards 3 cm and 7 deg sideways of the
+      final fit's on both robot sessions, against 1.5-2.5 cm for the plain start). Then everything, from there.
     """
     starts: list[
         tuple[np.ndarray | None, Mapping[str, np.ndarray] | None, Mapping[str, np.ndarray] | None]
     ] = [(None, None, None)]
-    head_sightings = [s for s in problem.sightings if s.camera == HEAD]
-    if head_sightings:
-        head = JointProblem(problem.model, problem.board, {}, head_sightings, joint_sigma_deg=0.0).fit(
-            max_nfev=max_nfev
-        )
-        starts.append((head.theta, None, head.boards))
-        gcs0 = {}
-        for arm in problem.arms:
-            camera = problem.cameras[arm]
-            estimates = []
-            for s in problem.sightings:
-                if s.camera != arm or s.placement not in head.boards:
-                    continue
-                camera_board = board_pose(
-                    problem.board, s.detection, camera.matrix(), camera.coeffs, camera.model == "fisheye"
-                )
-                root_link = problem.model.frame_pose(wrist_camera_link(arm), problem._q[id(s)], head.theta)
-                estimates.append(
-                    np.linalg.inv(root_link) @ head.boards[s.placement] @ np.linalg.inv(camera_board)
-                )
-            if estimates:
-                gcs0[arm] = _mean_pose(estimates)
-        if gcs0:
-            starts.append((head.theta, gcs0, head.boards))
+    if problem.arms:
+        held = JointProblem(
+            problem.model, problem.board, problem.cameras, problem.sightings, problem.clicks, arms_free=False
+        ).fit(max_nfev=max_nfev)
+        starts.append((held.theta, held.gripper_from_camera, held.boards))
     trials = [
         problem.fit(theta0, min(STAGED_TRIAL_NFEV, max_nfev), gcs0, boards0)
         for theta0, gcs0, boards0 in starts

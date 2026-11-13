@@ -16,7 +16,7 @@ pytest.importorskip("pinocchio")
 pytest.importorskip("scipy")
 
 from lerobot.felix_jr.calibration import joint_views as jv  # noqa: E402
-from lerobot.felix_jr.calibration.boards import Checkerboard  # noqa: E402
+from lerobot.felix_jr.calibration.boards import CharucoBoard  # noqa: E402
 from lerobot.felix_jr.calibration.joint_collect import JointCollect  # noqa: E402
 from lerobot.felix_jr.calibration.joint_fit import HEAD, load_session  # noqa: E402
 from lerobot.felix_jr.calibration.joint_sim import draw_truth  # noqa: E402
@@ -27,15 +27,16 @@ from lerobot.felix_jr.server.hardware import FakeHardware  # noqa: E402
 from lerobot.felix_jr.server.server import RobotServer  # noqa: E402
 
 ARM = "right"
-BOARD = Checkerboard(8, 6, 0.025)
+BOARD = CharucoBoard(9, 7, 0.025, 0.018, "DICT_4X4_50")  # the one printed
 PX_PER_M = 8000.0  # the printout's resolution (blurred before the warp: no aliasing)
+MARGIN_PX = int(PX_PER_M * 0.01)  # the printout's white margin, 1 cm
 HEAD_SIZE, HEAD_F = (640, 480), 610.0
 
 
 def render_board(color_size, matrix, camera_from_board):
     """The board on gray, seen through a pinhole (`matrix`) at `camera_from_board`."""
-    printed = cv2.GaussianBlur(BOARD.image(PX_PER_M), (0, 0), PX_PER_M / 4000.0).astype(np.float32)
-    offset = PX_PER_M * BOARD.square_m  # the printout's pixel of the board frame's origin (id 0)
+    printed = cv2.GaussianBlur(BOARD.image(PX_PER_M, MARGIN_PX), (0, 0), PX_PER_M / 4000.0).astype(np.float32)
+    offset = MARGIN_PX  # the printout's pixel of the board frame's origin (its outer top-left corner)
     printout_from_board = np.array([[PX_PER_M, 0, offset], [0, PX_PER_M, offset], [0, 0, 1.0]])
     pose = camera_from_board
     if pose[2, 3] <= 0:
@@ -62,6 +63,12 @@ def setup(tmp_path):
     base = start.frame_pose(f"{ARM}_base_link", start.joint_vector())[:3, 3]
     table_z = base[2] - 0.06
     root_board = jv.suggest_placements(start, ARM, BOARD, 1, table_z)[0]
+    # laid face up: a board's frame (OpenCV's) has z into the board, the plan's z up, which a camera above sees from
+    # behind (mirrored: ArUco markers do not read). Turned half a turn about its x through its center, same footprint
+    center = BOARD.points().mean(axis=0)
+    face_up = np.diag([1.0, -1.0, -1.0, 1.0])
+    face_up[:3, 3] = center - face_up[:3, :3] @ center
+    root_board = root_board @ face_up
     root_board[:3, 3] += [0.02, -0.015, 0.0]  # placed roughly on the outline
     head_matrix = np.array([[HEAD_F, 0, 320.0], [0, HEAD_F, 240.0], [0, 0, 1.0]])
 
@@ -114,7 +121,7 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup):
 
         def click_truth():
             """Click the fingertips where the true robot shows them: the wrist its own face, the head the face the
-            session says it is on (a person clicks the face the picture shows, `f` if the session guessed wrong)."""
+            session expects (a person clicks the face the picture shows, in that face's pane)."""
             state = client.get_state()
             q = true_q(state)
             head_tip, wrist_tip = jv.fingertips(start, ARM, q, truth.theta, truth.thickness)
@@ -124,7 +131,7 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup):
                 start, ARM, q, wrist_tip[None], truth.theta, truth.gripper_from_camera
             )[0]
             if jv.in_picture(uv_head[None], HEAD_SIZE):
-                session.click("head", *uv_head)
+                session.click(f"head:{session.head_face}", *uv_head)  # the pane of the face it shows
             if jv.in_picture(uv_wrist[None], (640, 480)):
                 session.click("wrist", *uv_wrist)
 
@@ -145,6 +152,7 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup):
             if session.phase == "arm":
                 click_truth()
         assert sum(s.camera == ARM for s in session.session.sightings) >= 3, session.message
+        assert not session.board_warning  # the board stayed where it was placed
         while session.phase == "low":
             session.next()
             if session.phase == "low":

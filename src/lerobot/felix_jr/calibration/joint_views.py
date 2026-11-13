@@ -44,8 +44,29 @@ HEAD_ONLY_SPREAD_M = (
 )
 # the wrist camera's looks at the board drawn from: height (m), tilt from straight down (deg), toward yaw (deg; 0 =
 # from the robot's side), and where the board's center is in the picture (AIM_PX +- this, px)
-VIEW_HEIGHT_M, VIEW_TILT_DEG, VIEW_YAW_DEG = (0.25, 0.45), (0.0, 70.0), (-90.0, 90.0)
-REGION_VIEW_HEIGHT_M = (0.12, 0.35)  # ... nearer the board when the views keep to the working region
+VIEW_HEIGHT_M, VIEW_TILT_DEG, VIEW_YAW_DEG = (0.15, 0.25), (0.0, 70.0), (-90.0, 90.0)
+REGION_VIEW_HEIGHT_M = (0.12, 0.25)  # ... nearer the board when the views keep to the working region
+# the arm views' joints kept from the extremes (LeRobot deg; None: the joint's own limit). Picked farthest apart, the
+# views went to the limits: the gripper bent fully back (the wrist camera's mount hit the arm), the elbow folded the
+# other way, the roll near its stops, the camera 30+ cm back (2026-11-12, joint_left_full1)
+VIEW_JOINT_LIMITS_DEG = {"elbow_flex": (0.0, None), "wrist_flex": (None, 70.0), "wrist_roll": (-120.0, 120.0)}
+# ... and a view whose solve ended on a bound is dropped (the farthest-apart pick otherwise lands on the bounds), as is
+# one with the camera farther than this from the board's center
+BOUND_MARGIN_DEG = 3.0
+VIEW_MAX_DISTANCE_M = 0.25
+# ... and none grazing or close: the camera at most this far off looking straight down, no board point nearer than
+# this (joint_left_full3: views 6-9 cm from the board, looking across it from below its edge, fitted 10-17 mm off)
+VIEW_MAX_OBLIQUE_DEG = 50.0
+VIEW_MIN_DISTANCE_M = 0.12
+# the wrist camera kept off the arm's body (to the upper arm's axis, shoulder to elbow, and to the arm's base): folded
+# poses put its mount within 5-8 cm of the upper arm's axis and 12 cm of the base, against the arm (joint_left_full3)
+CAMERA_ARM_CLEARANCE_M = 0.12
+CAMERA_BASE_CLEARANCE_M = 0.20
+LOW_TRIES_PER_POSE = 30  # `low_poses` draws up to this many per pose it returns
+LOW_JOINT_LIMITS_DEG = {
+    "elbow_flex": (0.0, None),
+    "wrist_flex": (None, 70.0),
+}  # the low poses' (their roll free)
 REGION_DEG = 40.0  # a view within the working region: this near one of its poses (the first four joints, deg)
 FAR_FRACTION = 0.3  # of the arm views with a working region, this part planned anywhere (`arm_views`)
 REGION_START_DEG = 15.0  # the solver started this far (1 sigma) around a working-region pose
@@ -166,12 +187,20 @@ def _arm_solve(
     rest: Mapping[str, float],
     residual: Callable[[np.ndarray], np.ndarray],
     start_deg: Sequence[float] = (0.0, 0.0, 30.0, 60.0, 0.0),
+    limits_deg: Mapping[str, tuple[float | None, float | None]] | None = None,
 ) -> dict[str, float]:
-    """The arm's joints (LeRobot degrees) minimizing `residual(q)`, within 95% of the joints' limits."""
+    """The arm's joints (LeRobot degrees) minimizing `residual(q)`, within 95% of the joints' limits.
+
+    `limits_deg`: tighter bounds for some joints (`{joint: (low, high)}`, None for the joint's own).
+    """
     require_package("scipy", extra="felix_jr")
     index = [model.q_index(f"{arm}_{j}") for j in SO101_JOINTS]
     lower = np.array([model.limits(f"{arm}_{j}")[0] for j in SO101_JOINTS]) * 0.95
     upper = np.array([model.limits(f"{arm}_{j}")[1] for j in SO101_JOINTS]) * 0.95
+    for i, joint in enumerate(SO101_JOINTS):
+        low, high = (limits_deg or {}).get(joint, (None, None))
+        lower[i] = lower[i] if low is None else max(lower[i], np.radians(low))
+        upper[i] = upper[i] if high is None else min(upper[i], np.radians(high))
     q0 = model.joint_vector({arm: dict(rest)})
 
     def wrapped(x: np.ndarray) -> np.ndarray:
@@ -196,6 +225,7 @@ def look_at(
     theta: np.ndarray | None = None,
     gc: np.ndarray | None = None,
     start_deg: Sequence[float] = (0.0, 0.0, 30.0, 60.0, 0.0),
+    limits_deg: Mapping[str, tuple[float | None, float | None]] | None = None,
 ) -> dict[str, float]:
     """The arm's joints putting the wrist camera `height` from `target`, with `target` at `pixel`.
 
@@ -211,7 +241,7 @@ def look_at(
         uv = camera.project(((target - pose[:3, 3]) @ pose[:3, :3])[None])[0]
         return np.r_[(pose[:3, 3] - eye) / 0.01, np.nan_to_num((uv - np.asarray(pixel)) / 20.0, nan=50.0)]
 
-    return _arm_solve(model, arm, rest, residual, start_deg)
+    return _arm_solve(model, arm, rest, residual, start_deg, limits_deg)
 
 
 def head_face_angle(model: XleRobotModel, arm: str, q: np.ndarray) -> float:
@@ -227,10 +257,49 @@ def head_face_angle(model: XleRobotModel, arm: str, q: np.ndarray) -> float:
     return float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))
 
 
+def camera_clear_of_arm(model: XleRobotModel, arm: str, pose: Mapping[str, float]) -> bool:
+    """Whether the wrist camera is clear of the arm's body.
+
+    `CAMERA_ARM_CLEARANCE_M` from the upper arm's axis and `CAMERA_BASE_CLEARANCE_M` from the arm's base (link origins:
+    the links' bodies are a few cm thick about them).
+    """
+    q = model.joint_vector({arm: dict(pose)})
+    camera = wrist_pose(model, arm, q)[:3, 3]
+    shoulder, elbow = (
+        model.frame_pose(f"{arm}_{link}", q)[:3, 3] for link in ("upper_arm_link", "lower_arm_link")
+    )
+    base = model.frame_pose(f"{arm}_base_link", q)[:3, 3]
+    along = np.clip(
+        np.dot(camera - shoulder, elbow - shoulder) / np.dot(elbow - shoulder, elbow - shoulder), 0.0, 1.0
+    )
+    to_upper_arm = np.linalg.norm(camera - (shoulder + along * (elbow - shoulder)))
+    return bool(
+        to_upper_arm >= CAMERA_ARM_CLEARANCE_M and np.linalg.norm(camera - base) >= CAMERA_BASE_CLEARANCE_M
+    )
+
+
 def clear_of_table(model: XleRobotModel, arm: str, pose: Mapping[str, float], table_z: float) -> bool:
     """Whether every link of the arm (`ARM_LINKS`, their origins) is `LINK_CLEARANCE_M` above the table."""
     q = model.joint_vector({arm: dict(pose)})
     return all(model.frame_pose(f"{arm}_{link}", q)[2, 3] > table_z + LINK_CLEARANCE_M for link in ARM_LINKS)
+
+
+def on_a_bound(
+    model: XleRobotModel,
+    arm: str,
+    pose: Mapping[str, float],
+    limits_deg: Mapping[str, tuple[float | None, float | None]] | None = None,
+    margin_deg: float = BOUND_MARGIN_DEG,
+) -> bool:
+    """Whether a joint of `pose` is within `margin_deg` of its bound: `limits_deg`'s, else 95% of its own (`_arm_solve`)."""
+    for joint in SO101_JOINTS:
+        low, high = (np.degrees(v) * 0.95 for v in model.limits(f"{arm}_{joint}"))
+        own_low, own_high = (limits_deg or {}).get(joint, (None, None))
+        low = low if own_low is None else max(low, own_low)
+        high = high if own_high is None else min(high, own_high)
+        if not low + margin_deg < pose[f"{joint}.pos"] < high - margin_deg:
+            return True
+    return False
 
 
 def within_limits(model: XleRobotModel, arm: str, pose: Mapping[str, float]) -> bool:
@@ -249,7 +318,7 @@ def arm_views(
     n: int,
     rng: np.random.Generator,
     accept: Callable[[dict[str, float]], bool] | None = None,
-    tries: int = 400,
+    tries: int = 800,
     margin: float = PLAN_MARGIN_PX,
     min_fraction: float = 1.0,
     region: Sequence[Mapping[str, float]] | None = None,
@@ -312,9 +381,23 @@ def arm_views(
             np.asarray(AIM_PX) + rng.uniform(-1.0, 1.0, 2) * np.asarray(VIEW_PIXEL_SPREAD_PX),
             start_deg=start
             + rng.normal(0.0, VIEW_START_SPREAD_DEG if working is None else REGION_START_DEG, 5),
+            limits_deg=VIEW_JOINT_LIMITS_DEG,
         )
         joints = np.array([pose[f"{j}.pos"] for j in SO101_JOINTS])
         if working is not None and np.linalg.norm(working[:, :4] - joints[:4], axis=1).min() > REGION_DEG:
+            continue
+        if on_a_bound(model, arm, pose, VIEW_JOINT_LIMITS_DEG):  # the look was not reached freely: an extreme
+            continue
+        camera = wrist_pose(model, arm, model.joint_vector({arm: pose}))
+        if np.linalg.norm(camera[:3, 3] - points.mean(axis=0)) > VIEW_MAX_DISTANCE_M:
+            continue
+        if np.linalg.norm(points - camera[:3, 3], axis=1).min() < VIEW_MIN_DISTANCE_M:
+            continue
+        if (
+            np.degrees(np.arccos(np.clip(-camera[2, 2], -1.0, 1.0))) > VIEW_MAX_OBLIQUE_DEG
+        ):  # optical axis vs down
+            continue
+        if not camera_clear_of_arm(model, arm, pose):
             continue
         if within_limits(model, arm, pose) and clear_of_table(model, arm, pose, table_z) and accept(pose):
             candidates.append(pose)
@@ -381,11 +464,14 @@ def low_poses(
 
     The wrist rolled to show the head the fingertip's face it clicks best (`head_face_angle`, within
     `HEAD_FACE_MAX_DEG`; the roll in 15 deg steps): tilted down, that face looks sideways unless the wrist turns it
-    up. A pose no roll shows it from is dropped.
+    up. A pose no roll shows it from, or that puts the wrist camera against the arm (`camera_clear_of_arm`) or a joint on
+    a bound (`LOW_JOINT_LIMITS_DEG`), is dropped and another drawn, `LOW_TRIES_PER_POSE` per pose at most.
     """
     base = model.frame_pose(f"{arm}_base_link", model.joint_vector())[:3, 3]
-    out = []
-    for _ in range(n):
+    out: list[dict[str, float]] = []
+    for _ in range(LOW_TRIES_PER_POSE * n):
+        if len(out) >= n:
+            break
         target = np.array(
             [
                 base[0] - rng.uniform(*LOW_AHEAD_M),
@@ -393,7 +479,16 @@ def low_poses(
                 table_z + rng.uniform(*LOW_UP_M),
             ]
         )
-        planned = look_at(model, arm, rest, target, 0.15, rng.uniform(*LOW_TILT_DEG), rng.uniform(-40, 40))
+        planned = look_at(
+            model,
+            arm,
+            rest,
+            target,
+            0.15,
+            rng.uniform(*LOW_TILT_DEG),
+            rng.uniform(-40, 40),
+            limits_deg=LOW_JOINT_LIMITS_DEG,
+        )
         best: tuple[float, dict[str, float]] | None = None
         for turn in np.arange(-180.0, 181.0, 15.0):
             pose = {**planned, "wrist_roll.pos": planned["wrist_roll.pos"] + turn}
@@ -401,6 +496,10 @@ def low_poses(
             pinch = model.frame_pose(pinch_frame(arm), q)[:3, 3]
             if pinch[2] <= table_z + 0.02 or not within_limits(model, arm, pose):  # >= 2 cm over the table
                 continue
+            if not camera_clear_of_arm(model, arm, pose) or on_a_bound(
+                model, arm, pose, LOW_JOINT_LIMITS_DEG
+            ):
+                continue  # (a bound: the arm folded up against its stops, the camera by its base)
             angle = head_face_angle(model, arm, q)
             if angle < HEAD_FACE_MAX_DEG and (best is None or angle < best[0]):
                 best = (angle, pose)

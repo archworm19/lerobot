@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("pinocchio")
 pytest.importorskip("scipy")
 
-from lerobot.felix_jr.calibration.boards import Checkerboard  # noqa: E402
+from lerobot.felix_jr.calibration.boards import CharucoBoard  # noqa: E402
 from lerobot.felix_jr.calibration.joint_fit import HEAD, JointProblem, _vec  # noqa: E402
 from lerobot.felix_jr.calibration.joint_sim import ARM, Scenario, World, draw_truth  # noqa: E402
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel  # noqa: E402
@@ -22,7 +22,7 @@ from lerobot.felix_jr.harness import api  # noqa: E402
 def session():
     model = XleRobotModel.load(api.MODEL)
     rng = np.random.default_rng(1)
-    world = World(model, draw_truth(model, rng), Checkerboard(8, 6, 0.025), rng)
+    world = World(model, draw_truth(model, rng), CharucoBoard(9, 7, 0.025, 0.018, "DICT_4X4_50"), rng)
     world.joint_noise_deg = world.board_noise_px = world.click_noise_px = 0.0
     sightings, clicks = world.collect(Scenario(1, 4, 3, True, "", 3))  # low poses: the head's clicks
     return world, JointProblem(model, world.board, {ARM: world.camera}, sightings, clicks)
