@@ -281,6 +281,20 @@ def test_the_head_axes_are_optional_and_kept(model, tmp_path):
     assert back.estimate_dict() == pytest.approx(tilted)
 
 
+def test_a_new_fit_takes_todays_priors_and_keeps_the_estimates(model):
+    """A saved calibration's stored priors give way to the table's (`with_current_priors`); its estimates stay."""
+    from dataclasses import replace
+
+    old = XleRobotModel(
+        model.urdf, SIGNS, REFS, INTRINSICS, [replace(p, sigma=p.sigma / 5) for p in default_parameters()]
+    )
+    old.set_estimates(old.estimate_dict() | {"pos:fixed_head_camera_link:z": 0.004})
+    fresh = old.with_current_priors()
+    table = {p.name: p.sigma for p in default_parameters()}
+    assert all(p.sigma == table[p.name] for p in fresh.parameters)
+    assert fresh.estimate_dict() == old.estimate_dict()
+
+
 def test_the_head_axes_pixel_jacobian_matches_finite_differences(model):
     axes = model.with_head_axes()
     rng = np.random.default_rng(7)

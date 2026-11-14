@@ -663,6 +663,7 @@ def calibrate(
     Every `holdout_every`-th moment at which the head and a wrist camera both saw the board is left out of the fit,
     and scored by how far apart the two cameras' chains put the board there (`agreement`), before and after.
     """
+    model = model.with_current_priors()  # its estimates the start, today's table the priors
     boards = {json.dumps(s.board.to_dict(), sort_keys=True) for s in sessions}
     if len(boards) != 1:
         raise ValueError("the sessions used different boards: fit them separately")

@@ -553,6 +553,15 @@ it matters for motion (a move lands short), not for the fit. A compliance term (
 gravity torque from the URDF's masses) is designed, not built: first measure commanded against read across poses, and
 the session's residuals against the gravity torque.
 
+**joint_left_full4 (2026-11-14, safe poses, 2 placements):** the head and the arm agree on the board to 0.7-3.6 mm
+at the first placement (held out: 2.1 and 1.6 mm, under 0.4 deg), 13.5 mm and 5.7 deg before. The second placement,
+with the arm swung further out (shoulder pan 10-39 deg), stays 3-7 mm off even for fitted views: not the board moving
+(fitted as two placements split mid-way, its two poses 1.3 mm apart and no better), not the head (wider head priors
+and the head axes' tilts change nothing): an error on the arm's side the model cannot say. Next to try: the arm joints'
+axes' tilts. Both sessions moved the head camera's z and the tilt joint's x by 14-20 mm and 8-15 mm (6 sigma): their
+priors are now 10 mm (and the camera's turn 5 deg), and a fit takes its priors from the table, not from the
+calibration it starts from (`XleRobotModel.with_current_priors`).
+
 ### Checks before it replaces the current calibration
 
 1. **Held-out views:** the fingertips predicted in both cameras at poses left out, near the click noise (2-3 px in

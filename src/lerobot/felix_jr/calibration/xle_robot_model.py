@@ -57,7 +57,7 @@ import json
 import logging
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -93,11 +93,13 @@ DEFAULT_INTRINSICS = {"fx": 610.97, "fy": 610.01, "ppx": 315.95, "ppy": 247.03, 
 # 1-sigma prior on each kind of parameter: how far the URDF value might be from the real robot. Radians / meters.
 SIGMAS = {
     "head zero": np.radians(20.0),  # the head's home is not level
-    "head origin": 0.002,
-    "camera x": 0.003,
+    # the head's joints' origins and the camera's mount: 2-3 mm / 2 deg before 2026-11-14, when two sessions on the robot
+    # moved the camera's z and the tilt joint's x 14-20 mm and 8-13 mm the same way (6 sigma): the hand-measured mount
+    "head origin": 0.010,
+    "camera x": 0.010,
     "camera y": 0.015,  # the RGB sensor's lateral offset in the camera link is the least certain
-    "camera z": 0.003,
-    "camera rot": np.radians(2.0),
+    "camera z": 0.010,
+    "camera rot": np.radians(5.0),
     "mount pos": 0.015,  # the SO-101 placed on the XLeRobot's arm base (merge_urdf.py)
     "mount rot": np.radians(5.0),
     "arm zero": np.radians(2.0),
@@ -1162,6 +1164,33 @@ class XleRobotModel:
         )
         model.set_estimates(self._estimates.copy())
         model.covariance = self.covariance
+        model.fit_info = dict(self.fit_info)
+        return model
+
+    def with_current_priors(self) -> "XleRobotModel":
+        """A copy whose parameters' priors are today's (`default_parameters`, by name), the estimates kept.
+
+        A saved calibration stores the priors it was fitted with; a new fit starts from its estimates but takes its
+        priors from the table (an earlier calibration is a starting point, never a prior).
+        """
+        table = {p.name: p for p in default_parameters(head_axes=True)}
+        parameters = [
+            replace(p, sigma=table[p.name].sigma, mean=table[p.name].mean) if p.name in table else p
+            for p in self.parameters
+        ]
+        model = type(self)(
+            self.urdf,
+            self.head_signs,
+            self.head_refs,
+            self.intrinsics,
+            parameters,
+            self.floor_z,
+            self.visible_side,
+            self.gripper_maps,
+            self.arm_calibration,
+            self.wrist_cameras,
+        )
+        model.set_estimates(self.estimate_dict())
         model.fit_info = dict(self.fit_info)
         return model
 
