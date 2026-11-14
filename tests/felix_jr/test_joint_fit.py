@@ -153,3 +153,28 @@ def test_the_two_chains_agree_on_the_board_at_the_truth_only(session):
     assert len(true) == len(start) > 0
     assert true.max(axis=0)[0] < 0.1 and true.max(axis=0)[1] < 0.05, true
     assert np.median(start[:, 0]) > 2.0, start
+
+
+def test_two_sessions_placements_are_two_boards(session, tmp_path):
+    """Each session names its placements p0, p1, ...: combined, the same name in two sessions is two places."""
+    from lerobot.felix_jr.calibration.joint_fit import JointSession, calibrate
+
+    world, problem = session
+    model = world.model
+    sessions = [
+        JointSession(
+            tmp_path / name,
+            ARM,
+            world.board,
+            model.head_signs,
+            model.head_refs,
+            model.intrinsics,
+            None,
+            problem.sightings,
+            problem.clicks,
+        )
+        for name in ("a", "b")
+    ]
+    _, fit, _ = calibrate(model, sessions, holdout_every=0)
+    names = {s.placement for s in problem.sightings}
+    assert set(fit.boards) == {f"{i}:{p}" for i in (0, 1) for p in names}

@@ -680,7 +680,14 @@ def calibrate(
             )
         cameras[arm] = camera
     board = sessions[0].board
-    sightings, held = split_holdout([x for s in sessions for x in s.sightings], holdout_every)
+    # a placement belongs to its session: two sessions' "p0" are two places, and one board pose for both tore the fit
+    # apart (2026-11-14, the left and right arms' sessions: parameters 300 sigma off)
+    every = [
+        x if len(sessions) == 1 else replace(x, placement=f"{i}:{x.placement}")
+        for i, s in enumerate(sessions)
+        for x in s.sightings
+    ]
+    sightings, held = split_holdout(every, holdout_every)
     clicks = [c for s in sessions for c in s.clicks]
     problem = JointProblem(model, board, cameras, sightings, clicks)
     gc0 = {a: np.asarray(cameras[a].gripper_from_camera, dtype=np.float64) for a in arms}

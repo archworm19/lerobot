@@ -75,6 +75,7 @@ STATUS_HEIGHT = 90
 LIVE_PERIOD_S = 0.2  # the head picture's refresh while placing the board
 CALIBRATION_FILE = "calibration.urdf"
 KEYS = {ord("n"): "next", ord("u"): "undo", ord("q"): "quit", 27: "quit"}
+STILL_DEG, STILL_WINDOW_S, STILL_POLL_S, STILL_TIMEOUT_S = 0.15, 0.4, 0.1, 3.0  # `_wait_still`
 BOARD_MOVED_M = (
     0.02  # a head sighting this far from the placement's board: it was moved (or the head's model is off)
 )
@@ -282,7 +283,32 @@ class JointCollect:
         if status["state"] != "done":
             self.message = f"the arm stopped ({status['state']}: {status['reason']}); n tries the next view"
             return False
+        self._wait_still()
         return True
+
+    def _wait_still(self) -> bool:
+        """Wait for the arm to be still, not just settled within the move's tolerance (False: it never was).
+
+        A move is done once every joint is within 1.5 deg of its goal for 0.2 s, while the arm can still vibrate below
+        that (on the robot, visibly, right after a move): a picture then is blurred and its joints read a moment
+        apart from it. Still: no joint moving more than `STILL_DEG` over `STILL_WINDOW_S`, read every `STILL_POLL_S`,
+        for `STILL_TIMEOUT_S` at most.
+        """
+        history: list[tuple[float, np.ndarray]] = []
+        deadline = time.monotonic() + STILL_TIMEOUT_S
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            arm = self.client.get_state()[self.arm_id]
+            history.append(
+                (now, np.array([arm[k] for k in sorted(arm) if k != "gripper.pos"], dtype=np.float64))
+            )
+            history = [(t, j) for t, j in history if now - t <= STILL_WINDOW_S]
+            if now - history[0][0] >= 0.9 * STILL_WINDOW_S:
+                spread = np.ptp(np.array([j for _, j in history]), axis=0)
+                if spread.max() <= STILL_DEG:
+                    return True
+            time.sleep(STILL_POLL_S)
+        return False
 
     def _capture(self, after: float | None = None) -> None:
         """Take both pictures and the moment they show (the arm's joints from the wrist's, the head's ticks)."""
