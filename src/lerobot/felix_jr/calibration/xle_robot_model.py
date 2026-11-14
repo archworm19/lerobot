@@ -10,7 +10,22 @@ The design is in `docs/camera_calibration.md`. In short:
   radians / meters; the prior says how wrong we think the URDF is.
 - **Every method that depends on the estimates takes them explicitly** (`theta`, a vector in parameter order or a
   `{name: value}` dict; `None` for the current estimates) and applies them, starting from the nominal model,
-  before computing anything. Nothing depends on what an earlier call left in the model.
+  before computing anything.
+- **The applied estimates are cached.** Applying them rebuilds every corrected placement of `pin_model` (`_apply`),
+  about ten times the cost of the kinematics; a fit evaluates many poses at one `theta`. So `_apply` remembers the
+  vector it applied last (`_applied`) and skips the rebuild when the next `theta` equals it. The cache is keyed on
+  that vector alone: it is right only while nothing else the rebuild reads changes behind its back. What makes it
+  stale (the next call at the same `theta` then computes with the wrong placements, silently):
+  - writing into `pin_model` directly (`jointPlacements`, a frame's `placement`): the edit used to be overwritten
+    by the next call, and now survives it;
+  - changing, in place, what the rebuild is made from: the parameter table (`parameters`: a row added, removed,
+    reordered or replaced, so that an equal vector means other corrections), the nominal origins (`nominal_model`,
+    the URDF joints' origins) or the placements' chains (`_placements`);
+  - two models sharing one `pin_model`, each with its own `_applied` (one rebuilds it for its estimates, the other
+    then skips its rebuild). A shallow copy would do that (`copy.copy`: 5 cm off in a test), so `__copy__` gives
+    the copy its own `pin_model`; `copy.deepcopy`, pickling and the `with_*` methods (which construct a new model)
+    are safe.
+  `set_estimates` and passing another `theta` are safe: the vector differs, so the rebuild runs.
 - **Fixed joints.** Pinocchio folds a fixed joint into a frame and pre-multiplies its origin into the placements
   of everything below it, so changing that frame alone would not move its children. The model therefore keeps,
   for every joint placement and frame placement, the chain of URDF origins it is made of, and rebuilds the ones
@@ -42,7 +57,7 @@ import json
 import logging
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -78,17 +93,23 @@ DEFAULT_INTRINSICS = {"fx": 610.97, "fy": 610.01, "ppx": 315.95, "ppy": 247.03, 
 # 1-sigma prior on each kind of parameter: how far the URDF value might be from the real robot. Radians / meters.
 SIGMAS = {
     "head zero": np.radians(20.0),  # the head's home is not level
-    "head origin": 0.002,
-    "camera x": 0.003,
+    # the head's joints' origins and the camera's mount: 2-3 mm / 2 deg before 2026-11-14, when two sessions on the robot
+    # moved the camera's z and the tilt joint's x 14-20 mm and 8-13 mm the same way (6 sigma): the hand-measured mount
+    "head origin": 0.010,
+    "camera x": 0.010,
     "camera y": 0.015,  # the RGB sensor's lateral offset in the camera link is the least certain
-    "camera z": 0.003,
-    "camera rot": np.radians(2.0),
+    "camera z": 0.010,
+    "camera rot": np.radians(5.0),
     "mount pos": 0.015,  # the SO-101 placed on the XLeRobot's arm base (merge_urdf.py)
     "mount rot": np.radians(5.0),
     "arm zero": np.radians(2.0),
     "arm origin": 0.002,
     "tip": 0.008,  # where "the tip of the closed gripper" is, relative to the SO-101's tool center point
+    "head axis": np.radians(2.0),  # the printed head: its pan and tilt axes a degree or two out of line
 }
+# the head joints' axes may tilt (`default_parameters(head_axes=True)`): the turns about the two axes square to each
+# joint's own (the pan turns about z, the tilt about y); a turn about its own axis is its zero
+HEAD_AXIS_TILTS = {"head_pan_joint": ("x", "y"), "head_tilt_joint": ("x", "z")}
 
 
 POINTS = ("pinch", "moving_tip")  # the gripper points the model predicts (module docstring)
@@ -155,7 +176,9 @@ class Param:
 
 
 def default_parameters(
-    arms: Sequence[str] = ARMS, overrides: Mapping[str, tuple[float, float]] | None = None
+    arms: Sequence[str] = ARMS,
+    overrides: Mapping[str, tuple[float, float]] | None = None,
+    head_axes: bool = False,
 ) -> list[Param]:
     """The parameters we calibrate, with their priors (`SIGMAS`): the head and camera, then each arm's.
 
@@ -163,13 +186,16 @@ def default_parameters(
     origins and most of the rest stay at their priors in practice (the fit's report says which were learned), but
     keeping them in costs little and lets the uncertainty show. The head tower is not included: moving it and moving
     the arm mount shift every pixel identically, so only one of them can be found, and the mount is it.
-    `overrides` replaces some priors, `{name: (mean, sigma)}`.
+    `overrides` replaces some priors, `{name: (mean, sigma)}`. `head_axes` adds the head joints' axes' tilts
+    (`head_axis_parameters`: 4 more, off by default).
     """
     params = [Param(f"zero:{j}", SIGMAS["head zero"], "head") for j in HEAD_JOINTS.values()]
     for joint in HEAD_JOINTS.values():
         params += [Param(f"pos:{joint}:{a}", SIGMAS["head origin"], "head") for a in AXES]
     params += [Param(f"pos:{CAMERA_MOUNT}:{a}", SIGMAS[f"camera {a}"], "head") for a in AXES]
     params += [Param(f"rot:{CAMERA_MOUNT}:{a}", SIGMAS["camera rot"], "head") for a in AXES]
+    if head_axes:
+        params += head_axis_parameters()
     for arm in arms:
         mount = ARM_MOUNTS[arm]
         params += [Param(f"pos:{mount}:{a}", SIGMAS["mount pos"], "mount", arm=arm) for a in AXES]
@@ -187,6 +213,19 @@ def default_parameters(
             for p in params
         ]
     return params
+
+
+def head_axis_parameters() -> list[Param]:
+    """The head joints' axes' tilts (`HEAD_AXIS_TILTS`), 4 parameters.
+
+    A printed column or bracket can hold the pan or the tilt axis out of line, which the camera's mount takes up at one
+    head pose but not across them.
+    """
+    return [
+        Param(f"rot:{joint}:{a}", SIGMAS["head axis"], "head")
+        for joint, axes in HEAD_AXIS_TILTS.items()
+        for a in axes
+    ]
 
 
 @dataclass
@@ -329,7 +368,12 @@ class _UrdfJoint:
 
 
 class XleRobotModel:
-    """The robot's kinematics, camera, pinch points and calibration. See the module docstring."""
+    """The robot's kinematics, camera, pinch points and calibration. See the module docstring.
+
+    The applied estimates are cached (`_apply`): do not write into `pin_model` or change `parameters`, the nominal
+    origins or the placements' chains in place, and copy a model with `copy.copy` / `copy.deepcopy` or its `with_*`
+    methods (the module docstring says why).
+    """
 
     def __init__(
         self,
@@ -343,12 +387,14 @@ class XleRobotModel:
         gripper_maps: Mapping[str, GripperMap] | None = None,
         arm_calibration: Mapping[str, Mapping[str, Mapping[str, int]]] | None = None,
         wrist_cameras: Mapping[str, WristCamera] | None = None,
+        head_axes: bool = False,
     ):
         """Build the model from URDF text (`from_urdf` reads a file).
 
         `head_signs` / `head_refs`: per head servo, the direction and the tick count at its recorded home (from
         `setup.head`); the URDF angle is `sign * (ticks - ref) * 2 pi / 4096`. `intrinsics`: the color camera's
-        `fx, fy, ppx, ppy, width, height`. `parameters`: the rows to calibrate (default `default_parameters()`).
+        `fx, fy, ppx, ppy, width, height`. `parameters`: the rows to calibrate (default `default_parameters()`);
+        `head_axes` adds the head joints' axes' tilts to them (`head_axis_parameters`), if missing.
         `floor_z`: the table's height in the root frame, if known. `visible_side`: per arm, the side of the
         gripper the camera must see ("positive" by default: the wrist camera is on the negative side).
         `gripper_maps`: per arm, how `gripper.pos` opens the jaws, where measured. `arm_calibration`: per arm, the
@@ -364,6 +410,9 @@ class XleRobotModel:
         self.head_refs = {k: int(v) for k, v in head_refs.items()}
         self.intrinsics = dict(intrinsics or DEFAULT_INTRINSICS)
         self.parameters = list(parameters if parameters is not None else default_parameters())
+        if head_axes:
+            have = {p.name for p in self.parameters}
+            self.parameters += [p for p in head_axis_parameters() if p.name not in have]
         self.floor_z = floor_z
         self.visible_side = dict.fromkeys(ARMS, "positive") | dict(visible_side or {})
         self.gripper_maps = dict(gripper_maps or {})
@@ -379,6 +428,19 @@ class XleRobotModel:
         self._estimates = np.zeros(len(self.parameters))
         self._read_tree()
         self._zero = np.zeros(self.pin_model.nq)
+
+    def __copy__(self) -> "XleRobotModel":
+        """A shallow copy with its own pinocchio model and data, its estimates' cache forgotten.
+
+        Sharing `pin_model` with the original would let each rebuild it for its own estimates while the other's cache
+        (`_applied`) says its own are applied (the module docstring).
+        """
+        copied = type(self).__new__(type(self))
+        copied.__dict__.update(self.__dict__)
+        copied.pin_model = self.pin_model.copy()
+        copied._data = copied.pin_model.createData()
+        copied._applied = None
+        return copied
 
     @classmethod
     def from_urdf(cls, path: str | Path = MERGED_URDF, **kwargs: Any) -> "XleRobotModel":
@@ -521,8 +583,19 @@ class XleRobotModel:
         return origins, rotations, zero
 
     def _apply(self, theta: np.ndarray | Mapping[str, float] | None) -> None:
-        """Rebuild the working model's placements from the nominal origins and `theta` (never from earlier ones)."""
-        origins, self._rotation_vectors, self._zero = self._corrected_origins(theta)
+        """Rebuild the working model's placements from the nominal origins and `theta` (never from earlier ones).
+
+        Skipped when `theta` is the one applied last (`_applied`): a fit evaluates many poses at one `theta`, and the
+        rebuild costs ten times the kinematics. The cache is keyed on the vector alone: anything else that changes
+        what the rebuild reads (`pin_model` written directly, `parameters`, the nominal origins or `_placements`
+        changed in place, a `pin_model` shared with another model) makes it stale; the module docstring lists them.
+        """
+        vector = self._vector(theta)
+        applied = getattr(self, "_applied", None)  # (a model unpickled from before the cache has none)
+        if applied is not None and np.array_equal(vector, applied):
+            return
+        origins, self._rotation_vectors, self._zero = self._corrected_origins(vector)
+        self._applied = vector
         self._origins = origins
         for is_frame, index, chain in self._placements:
             placement = pin.SE3.Identity()
@@ -1091,6 +1164,54 @@ class XleRobotModel:
         )
         model.set_estimates(self._estimates.copy())
         model.covariance = self.covariance
+        model.fit_info = dict(self.fit_info)
+        return model
+
+    def with_current_priors(self) -> "XleRobotModel":
+        """A copy whose parameters' priors are today's (`default_parameters`, by name), the estimates kept.
+
+        A saved calibration stores the priors it was fitted with; a new fit starts from its estimates but takes its
+        priors from the table (an earlier calibration is a starting point, never a prior).
+        """
+        table = {p.name: p for p in default_parameters(head_axes=True)}
+        parameters = [
+            replace(p, sigma=table[p.name].sigma, mean=table[p.name].mean) if p.name in table else p
+            for p in self.parameters
+        ]
+        model = type(self)(
+            self.urdf,
+            self.head_signs,
+            self.head_refs,
+            self.intrinsics,
+            parameters,
+            self.floor_z,
+            self.visible_side,
+            self.gripper_maps,
+            self.arm_calibration,
+            self.wrist_cameras,
+        )
+        model.set_estimates(self.estimate_dict())
+        model.fit_info = dict(self.fit_info)
+        return model
+
+    def with_head_axes(self) -> "XleRobotModel":
+        """A copy with the head joints' axes' tilts among its parameters (at 0 where new; `head_axis_parameters`)."""
+        if {p.name for p in head_axis_parameters()} <= {p.name for p in self.parameters}:
+            return self
+        model = type(self)(
+            self.urdf,
+            self.head_signs,
+            self.head_refs,
+            self.intrinsics,
+            self.parameters,
+            self.floor_z,
+            self.visible_side,
+            self.gripper_maps,
+            self.arm_calibration,
+            self.wrist_cameras,
+            head_axes=True,
+        )
+        model.set_estimates(self.estimate_dict())
         model.fit_info = dict(self.fit_info)
         return model
 

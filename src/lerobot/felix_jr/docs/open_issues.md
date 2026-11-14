@@ -101,7 +101,8 @@ the IK smoke test is built on pen1).
       the arm model's errors (hil3, `object_grasping.md` 6.3).
     - Signals besides the camera: the gripper's load or current after closing; the object's size in the wrist picture
       after a small lift (a held object keeps it).
-    - **`wrist_contacts` has no end-to-end test, and a synthetic scene did not make one (2026-11-09).** Only
+    - **PRIORITY, next session on the robot: `wrist_contacts` has no end-to-end test, and a synthetic scene did not
+      make one (2026-11-09).** Only
       the contact geometry is tested (`test_contacts.py`, on synthetic points). A ray-cast scene (a striped
       cylinder on a textured table, a flat fixed finger, the arm's poses at a hold 4 cm over the table, the test
       camera tilted 10-20 deg to see the finger) gave: four frames with the table's scale, the object ~6 cm ahead
@@ -112,7 +113,13 @@ the IK smoke test is built on pen1).
       off ~10%). DA3's own lens guess was 55% off on these frames, yet on bowl8's real single frame it gave the
       contacts the person saw and ours did not: the synthetic frames mislead DA3, so they cannot be the reference.
       An end-to-end test needs real frames (not in git: a few reduced depth and pose arrays in `reference/`, as for
-      the DA3 parity test).
+      the DA3 parity test). Next session: at a hold, save `wrist_hold_views` and a close single `wrist_look`, with
+      the person's judgment of where the object really is (or the head's depth), and freeze DA3's depth, the poses
+      and the expected contacts from them.
+    - **DA3 fails on plain white objects, from one wrist view or two (ruler2, 2026-11-14).** The bottle came out
+      9-11 cm too far (part of the table) from both wrists, posed, 60 deg apart. Not yet known: whether a second view
+      helps on a textured object (the test that would justify an orthogonal-view tool), and what `wrist_contacts`
+      should fall back to on a plain object (the head's depth saw it well).
 
 ## Rendering
 

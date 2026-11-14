@@ -377,9 +377,10 @@ and occlusion scores, the clearance and swept move-in checks) were the prototype
   the most antipodal first, and the model narrows `GraspSettings.rotation_bounds_deg` for a slippery one.
 - **Ends that are not free.** "From level or above" (pen2's book) could be said as a fact about the object instead:
   a cylinder's end that is buried or attached, ruling out approaches from it. Try if the model finds `where` awkward.
-- **Joints at their bounds rank high when antipodal.** On the jar, grasps with a joint at its bound (pitch 0) are in
-  the top 8, after the ones that worked, inside the first 5 deg step. If they reach the top in a session, a bound on the
-  joint margin (in `GraspSettings`) is the setting to add.
+- **Joints at their bounds** (done, 2026-11-14). Once the approach's preference ranked before the joint margin, the
+  jar's level grasps (pitch 0) came first with a joint at its bound, as ruler2's level approaches did on the robot.
+  A filter stage now rejects them: every joint `GraspSettings.min_joint_margin_deg` (15) from its bound at the attack
+  point and the grasp; the jar's best is now pitch -15 with 30 deg to spare (bowl1's pitch -40 is still found).
 - **Ranking beyond antipodal and the joint margin.** To add when a session shows the need: the arm's expected sag
   (it grows with a level reach: `open_issues.md` 16), depth in the jaws.
 - **The camera's pose.** The checks use the capture's head pose; rule 1 looks from the `look_at` pose at the attack
@@ -822,6 +823,14 @@ line; the radius held at the measured value unless "free".)
 - **DA3's own poses do not** (contacts 0.5-1.4 cm off, a free fit failing): give it poses.
 - So the checkpoint: a short wrist roll -> DA3 posed by the model's joints -> the table's scale -> the primitive ->
   the contacts. (Rolls only: the model's motion was 5% off for the wrist roll, more for the elbow and the wrist flex.)
+
+### The other arm as a second view (ruler2, 2026-11-14): failed on a plain white bottle
+
+The right wrist camera, 60 deg around the bottle from the left one (the most the right arm could reach with the left
+at its hold; [sessions.md](sessions.md), ruler2), and DA3-SMALL on both frames with the model's poses and each
+camera's lens: the table came out right (within 1 cm, though tilted in the grazing right view) and the bottle did not
+(9-11 cm too far in both views: part of the table). Each frame alone was no better. Until a textured object says
+otherwise, a second view does not rescue DA3 on a plain object; the head's depth does (a clean arc of its near face).
 
 ### DA3 in the repo (2026-11-09)
 

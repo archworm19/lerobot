@@ -89,16 +89,24 @@ class AntipodalGrasp:
         return f"grasp ({params}): opening {_cm(self.opening)} cm"
 
 
-class Primitive(Protocol):
-    """A shape with a pose in the root frame that generates its own antipodal grasps."""
+class Surface(Protocol):
+    """Something in the scene to keep clear of: its signed distance from points (`grasp_candidates`' obstacles)."""
+
+    def surface_distance(self, points_root: np.ndarray) -> np.ndarray:
+        """Signed distance (m) of each point (N, 3) to the surface: negative inside (or below)."""
+        ...
+
+    def describe(self) -> str:
+        """The surface and where it is, in words and numbers."""
+        ...
+
+
+class Primitive(Surface, Protocol):
+    """A shape with a pose in the root frame that generates its own antipodal grasps: a `Surface` to grasp."""
 
     @property
     def root_from_obj(self) -> np.ndarray:
         """(4, 4): the shape's own axes and origin in the root frame."""
-        ...
-
-    def surface_distance(self, points_root: np.ndarray) -> np.ndarray:
-        """Signed distance (m) of each point (N, 3) to the surface: negative inside."""
         ...
 
     def antipodal_grasps(
@@ -107,9 +115,28 @@ class Primitive(Protocol):
         """The family's grasps on a grid, within `where`, no wider than `max_opening`."""
         ...
 
-    def describe(self) -> str:
-        """The shape and where it is, in words and numbers."""
+    def approach_preference(self, approach_root: np.ndarray) -> float:
+        """How far (deg) the gripper coming in along `approach_root` (root frame, unit) is from the shape's best way in.
+
+        0 the best. `grasp_candidates` ranks by it after how antipodal a grasp is.
+        """
         ...
+
+
+@dataclass(frozen=True)
+class HorizontalPlane:
+    """A level plane at height `z` (root frame), e.g. a table measured another way than its `TableEstimate`."""
+
+    z: float
+    label: str = "the table"
+
+    def surface_distance(self, points_root: np.ndarray) -> np.ndarray:
+        """Each point's height above the plane (m): negative below it."""
+        return np.atleast_2d(np.asarray(points_root, dtype=np.float64))[:, 2] - self.z
+
+    def describe(self) -> str:
+        """The plane's height."""
+        return f"{self.label}: level, at z = {100 * self.z:.1f} cm"
 
 
 @dataclass(frozen=True, eq=False)
@@ -174,6 +201,16 @@ class Cylinder:
     def top_root(self) -> np.ndarray:
         """The top end's center."""
         return self.bottom_root + self.length * self.axis_root
+
+    def approach_preference(self, approach_root: np.ndarray) -> float:
+        """How far (deg) an approach is off square to the axis: 0 from the side, 90 along it (from above or below).
+
+        From the side the jaws close across it, the gripper and its wrist camera level with it; a steep approach saw only
+        an upright bottle's top from the wrist camera (ruler2).
+        """
+        a = np.asarray(approach_root, dtype=np.float64)
+        along = abs(float(a @ self.axis_root)) / float(np.linalg.norm(a))
+        return float(np.degrees(np.arcsin(min(1.0, along))))
 
     def surface_distance(self, points_root: np.ndarray) -> np.ndarray:
         """Signed distance (m) of each point (N, 3) to the surface, ends included: negative inside."""

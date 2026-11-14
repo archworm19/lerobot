@@ -218,6 +218,39 @@ def test_rank_antipodal_first_then_joint_margin():
     ]
 
 
+def test_the_approach_ranks_after_antipodal_and_before_the_joints():
+    """Within an antipodal step, the gripper nearer the object's best way in ranks first, whatever its joints; with
+    `prefer_approach` off, the joints decide."""
+
+    def candidate(preference: float, limit: float, settings: GraspSettings) -> GraspCandidate:
+        solved = SimpleNamespace(rotation_error_deg=np.array([0.0, 1.0, 1.0]))
+        return GraspCandidate("", None, None, solved, limit, 0.0, settings, float("nan"), preference)  # type: ignore[arg-type]
+
+    on = GraspSettings()
+    side, steep = candidate(3.0, 20.0, on), candidate(40.0, 60.0, on)
+    assert sorted([steep, side], key=GraspCandidate.rank_key) == [side, steep]
+    off = GraspSettings(prefer_approach=False)
+    side, steep = candidate(3.0, 20.0, off), candidate(40.0, 60.0, off)
+    assert sorted([side, steep], key=GraspCandidate.rank_key) == [steep, side]
+
+
+def test_the_move_to_a_plans_pose_is_from_the_pinch_now_to_its_pinch():
+    """`move_to_pose`: the plan's pinch frame, not its points (the jaws' middle) nor its targets (angles)."""
+    from lerobot.felix_jr.harness.wrist import move_to_pose
+
+    now = np.eye(4)
+    now[:3, 3] = [-0.43, -0.09, 0.84]
+    goal = np.eye(4)
+    goal[:3, 3] = [-0.46, -0.07, 0.80]
+    plan = SimpleNamespace(labels=("pick.back", "pick"), frames=np.array([now, goal]))
+    view = SimpleNamespace(root_from_pinch=now)
+    move, label = move_to_pose(view, plan, "pick", 0.5)  # type: ignore[arg-type]
+    np.testing.assert_allclose(move, 0.5 * (goal[:3, 3] - now[:3, 3]))
+    assert "'pick'" in label and "5.4 cm away" in label and "0 deg off" in label
+    with pytest.raises(ValueError, match="no pose"):
+        move_to_pose(view, plan, "lift")  # type: ignore[arg-type]
+
+
 # ---- objects and the pick plan ----------------------------------------------------------------------------------
 
 
@@ -282,3 +315,93 @@ def test_settings_are_the_callers(model):
     assert "approach 0.01" in narrow.describe() and "approach 45" in loose.describe()
     for c in loose.candidates:
         assert c.grasp.ok and max(c.grasp.rotation_error_deg) <= 45.0
+
+
+def test_the_wrist_camera_is_kept_off_the_table():
+    """With a wrist camera's pose (the current calibration), every candidate keeps it `camera_clearance` from the
+    obstacles (by default the target's lower end as a level table), says how far, and a clearance nothing meets
+    rejects them all at that stage."""
+    from lerobot.felix_jr.harness import api
+    from lerobot.felix_jr.harness.grasping import wrist_camera_position
+
+    with_camera = XleRobotModel.load(api.MODEL)
+    where = {"t": (0.04, 0.07), "psi": (0.0, 45.0)}
+    found = grasp_candidates(JAR, with_camera, BOWL1_CAPTURE, arms=("right",), where=where)
+    table_z = JAR.bottom_root[2]
+    assert found.candidates
+    for c in found.candidates:
+        assert c.camera_clearance_m >= GraspSettings().camera_clearance
+        lowest = min(wrist_camera_position(with_camera, "right", s)[2] for s in (c.attack, c.grasp))
+        assert c.camera_clearance_m == pytest.approx(lowest - table_z)
+        assert "the wrist camera" in c.describe()
+    nothing = grasp_candidates(
+        JAR,
+        with_camera,
+        BOWL1_CAPTURE,
+        arms=("right",),
+        where=where,
+        settings=GraspSettings(camera_clearance=1.0),
+    )
+    assert nothing.passed == 0
+    assert "the wrist camera too near an obstacle" in nothing.rejected_by_reason()
+
+
+def test_the_joints_keep_a_margin_from_their_bounds(model):
+    """Every candidate keeps its joints `min_joint_margin_deg` from their bounds; what does not is rejected at that stage
+    with its margin, and a margin nothing meets rejects them all there."""
+    where = {"t": (0.059, 0.079), "psi": (0.0, 90.0)}
+    found = grasp_candidates(JAR, model, BOWL1_CAPTURE, arms=("right",), where=where, n=50)
+    assert found.candidates
+    assert all(c.limit_margin_deg >= GraspSettings().min_joint_margin_deg for c in found.candidates)
+    near = [r for r in found.rejected if r.stage == "joints"]
+    assert near and all(r.reason == "a joint too near its bound" and r.detail.endswith(" deg") for r in near)
+    loose = grasp_candidates(
+        JAR,
+        model,
+        BOWL1_CAPTURE,
+        arms=("right",),
+        where=where,
+        n=50,
+        settings=GraspSettings(min_joint_margin_deg=0.0),
+    )
+    assert loose.passed == found.passed + len(near)
+    nothing = grasp_candidates(
+        JAR,
+        model,
+        BOWL1_CAPTURE,
+        arms=("right",),
+        where=where,
+        settings=GraspSettings(min_joint_margin_deg=180.0),
+    )
+    assert nothing.passed == 0 and "a joint too near its bound" in nothing.rejected_by_reason()
+
+
+def test_obstacles_are_surfaces_and_each_counts():
+    """A table estimate and a level plane are `Surface`s; an obstacle the camera passes rejects what passed without it."""
+    from lerobot.felix_jr.harness import api
+    from lerobot.felix_jr.harness.objects import TableEstimate
+    from lerobot.felix_jr.harness.primitives import HorizontalPlane
+
+    points = np.array([[0.0, 0.0, 0.80], [0.1, 0.2, 0.70]])
+    table = TableEstimate(BOWL1_CAPTURE, 0.75, 100, 0.002, 1.0, np.zeros((2, 2), bool))
+    np.testing.assert_allclose(table.surface_distance(points), [0.05, -0.05])
+    np.testing.assert_allclose(HorizontalPlane(0.75).surface_distance(points), [0.05, -0.05])
+
+    with_camera = XleRobotModel.load(api.MODEL)
+    where = {"t": (0.04, 0.07), "psi": (0.0, 45.0)}
+    plain = grasp_candidates(JAR, with_camera, BOWL1_CAPTURE, arms=("right",), where=where)
+    best = plain.candidates[0]
+    from lerobot.felix_jr.harness.grasping import wrist_camera_position
+
+    camera = wrist_camera_position(with_camera, "right", best.attack)
+    in_the_way = Cylinder.upright(camera - np.array([0.0, 0.0, 0.05]), 0.1, 0.02)  # around the camera's spot
+    blocked = grasp_candidates(
+        JAR,
+        with_camera,
+        BOWL1_CAPTURE,
+        arms=("right",),
+        where=where,
+        obstacles=[HorizontalPlane(JAR.bottom_root[2]), in_the_way],
+    )
+    assert blocked.passed < plain.passed
+    assert all(c.camera_clearance_m >= GraspSettings().camera_clearance for c in blocked.candidates)

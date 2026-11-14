@@ -7,6 +7,49 @@ renders and the workspace log; `session.py log <name>` prints the calls and obje
 (`workspace.pkl`) of the sessions before pen1 (`cable1`, `cable1_new`, `chapstick1`, `desk1`) no longer loads: it
 holds objects removed since (`Plan`, `Reach`) or lacks the call log. Their images and `log.jsonl` still read.
 
+## ruler2 (2026-11-14): the bottle past the ruler; the other arm as a second view for DA3 (failed; not picked)
+
+**Setup.** The Aleve bottle (white, plain, ~5-6.5 cm wide, tapered) upright at (-45.5, -3.9) cm (the head's depth),
+the ruler flat at y ~ -6; `urdfs/xle_calib_1114_joint.urdf`. DA3's contacts had failed on this bottle from the left
+wrist alone (the segmentation kept slivers), so: does a second wrist view, from the right arm, fix it? The left arm
+held at step 6 of its approach (the pinch at (-41.7, -7.3, 83.8) cm, attack heading 164 deg); the pick itself was not
+finished. Frames, DA3's output and the plots in `harness/scratch/sessions/ruler2/multiview/` (`depthmaps.png`,
+`topdown.png`); the scripts were scratch (not kept).
+
+1. **The view search (offline).** For the right wrist camera: `joint_views.look_at` around the bottle (azimuths every
+   15 deg, 16-28 cm, tilts 20-65 deg, 4 starts each), kept when off the joint stops by 5 deg, clear of the table and
+   of its own arm, the arms' chains 10 cm apart, the line of sight 4 cm from the left arm, the bottle 60 px inside the
+   picture. **No view near 90 deg**: the best was **60 deg** from the left camera's line of sight to the bottle (15
+   views passed; most rejected at a joint stop, the rest by the arms' gap), **70 deg** with the left arm at home. A
+   first search asked for 90 deg turns and got views ~10 deg from the left camera's: `look_at` lands on whatever it
+   can reach, so only the achieved angle tells.
+2. **The view (robot).** The right arm (pan -29.5, lift -31.6, elbow 46.4, flex 34.9, roll 60.6; camera at (-21.1,
+   2.8, 89.3) cm, 28 cm from the bottle, looking out and down) reached it within 1.3 deg, the arms 11 cm apart. In both
+   wrist frames the bottle was within ~10 px of where the model put it: the poses were good.
+3. **DA3-SMALL on both frames, each with its pose (the model at the joints read) and its own lens.** Against the
+   depth the head implies (the table plane and an upright cylinder of radius 2.8 cm at the head's axis):
+
+   | | the table | the bottle |
+   | --- | --- | --- |
+   | left wrist (looking down at the cap) | +0.3 cm | **+10.6 cm** (pressed into the table) |
+   | right wrist (grazing, the label side) | +0.8 cm median, but tilted: 5-10 cm too far at the image's top | **+9.2 cm** (the farthest thing around) |
+
+   (median DA3 minus expected, along the optical axis.) The two views' points near the bottle do not agree (circles
+   fitted to each: centers 11 cm apart; both together: radius 6.1 cm, the head 2.5). Each frame alone, unposed, was
+   no better (DA3's own focal length 535-565 px, ours 336-342).
+
+### Findings
+
+- **The second view did not fix DA3 on this bottle:** the bottle comes out as part of the table in both views,
+  together or alone. Likely the plain white surface, plus the right view's grazing angle on the table; this run cannot
+  separate those from the wide (60 deg) two-frame baseline, DA3-SMALL, or the clutter in the right frame (the window,
+  the robot, the left gripper).
+- **On a plain object, the head's depth is the measurement:** a clean arc of the near face (0.9 mm rms to a circle).
+- **An object ~46 cm out on the midline has no orthogonal view from the other arm:** 60 deg with the attacking arm
+  in place. A view tool has to check the angle it got, not the one it asked for.
+- **Next:** the same two-view test on a textured object, to tell texture from viewpoint; the orthogonal-view tool
+  only if that works.
+
 ## bowl8 (2026-11-08): the chapstick, by DA3 contact patches, without touching, into the container (done)
 
 **Setup.** The bottle in the container from bowl7; the chapstick (1.75 cm) upright at (-51, 7) cm, near the right arm's

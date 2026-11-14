@@ -74,6 +74,7 @@ os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
+from lerobot.felix_jr.calibration.boards import Checkerboard
 from lerobot.felix_jr.calibration.live_view import decode_key
 from lerobot.felix_jr.calibration.xle_robot_model import (
     HEAD_JOINTS,
@@ -186,27 +187,7 @@ SHARP_ENOUGH = (
 # ---- the board ----------------------------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class Board:
-    """A checkerboard: `cols` x `rows` inner corners, squares `square_m` wide."""
-
-    cols: int
-    rows: int
-    square_m: float
-
-    @property
-    def symmetric(self) -> bool:
-        """Whether the board looks the same turned around: both counts even, or both odd.
-
-        Then which end its corners start from cannot be told from the picture (`find_board`), only from the arm's
-        motion (`orient_views`).
-        """
-        return self.cols % 2 == self.rows % 2
-
-    def points(self) -> np.ndarray:
-        """The inner corners in the board's frame (N, 3), row by row, z = 0: OpenCV's order."""
-        grid = np.mgrid[0 : self.cols, 0 : self.rows].T.reshape(-1, 2)
-        return np.c_[grid * self.square_m, np.zeros(len(grid))].astype(np.float64)
+Board = Checkerboard  # the plain checkerboard (`boards`, where every board kind is)
 
 
 def parse_pattern(text: str) -> tuple[int, int]:
@@ -218,32 +199,11 @@ def parse_pattern(text: str) -> tuple[int, int]:
 
 
 def find_board(image: np.ndarray, board: Board) -> np.ndarray | None:
-    """The board's inner corners in an RGB image (N, 2), or None if it is not found whole.
+    """The board's inner corners in an RGB image (N, 2), or None if it is not found whole (`Checkerboard.corners`).
 
-    In OpenCV's order (row by row), started from the end whose outer square, diagonally past the first corner, is
-    dark: the detector may start from either end, and a fixed board must keep one frame across the views (the
-    extrinsics). With one odd and one even count the two ends' outer squares differ in color; a symmetric board
-    (`Board.symmetric`) is left as found, and `orient_views` tells its ends apart from the arm's motion.
+    A symmetric board is left as found: `orient_views` tells its ends apart from the arm's motion.
     """
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    found, corners = cv2.findChessboardCornersSB(
-        gray, (board.cols, board.rows), flags=cv2.CALIB_CB_NORMALIZE_IMAGE
-    )
-    if not found:
-        return None
-    corners = corners.reshape(-1, 2).astype(np.float64)
-    if board.symmetric:  # both ends alike: left as found (`calibrate_extrinsics` sorts it out)
-        return corners
-    first, last = _outer_brightness(gray, corners, board, 0), _outer_brightness(gray, corners, board, -1)
-    if first is not None and last is not None:
-        flip = first > last
-    elif first is not None:
-        flip = first > 127
-    elif last is not None:
-        flip = last < 127
-    else:
-        flip = False
-    return corners[::-1].copy() if flip else corners
+    return board.corners(image)
 
 
 def pattern_hint(image: np.ndarray, board: Board) -> str | None:
@@ -268,17 +228,6 @@ def pattern_hint(image: np.ndarray, board: Board) -> str | None:
                 f"(count the squares, less one each way): restart with --pattern {cols}x{rows}"
             )
     return None
-
-
-def _outer_brightness(gray: np.ndarray, corners: np.ndarray, board: Board, end: int) -> float | None:
-    """The brightness of the square diagonally outside the grid at its first (`end` 0) or last (-1) corner."""
-    grid = corners.reshape(board.rows, board.cols, 2)
-    corner, inner = (grid[0, 0], grid[1, 1]) if end == 0 else (grid[-1, -1], grid[-2, -2])
-    u, v = corner + 0.5 * (corner - inner)
-    height, width = gray.shape
-    if not (2 <= u < width - 2 and 2 <= v < height - 2):
-        return None
-    return float(gray[int(v) - 1 : int(v) + 2, int(u) - 1 : int(u) + 2].mean())
 
 
 def sharpness(image: np.ndarray, corners: np.ndarray | None = None) -> float:

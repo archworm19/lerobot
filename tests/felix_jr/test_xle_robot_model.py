@@ -258,6 +258,64 @@ def test_the_default_parameters_cover_the_head_once_and_each_arm():
     assert (overridden.mean, overridden.sigma) == (0.3, 0.05)
 
 
+def test_the_head_axes_are_optional_and_kept(model, tmp_path):
+    """`head_axes` adds the pan and tilt axes' tilts (4), at 0; a copy keeps the other estimates; save and load keep them."""
+    names = {"rot:head_pan_joint:x", "rot:head_pan_joint:y", "rot:head_tilt_joint:x", "rot:head_tilt_joint:z"}
+    assert not names & {p.name for p in default_parameters()}
+    assert names <= {p.name for p in default_parameters(head_axes=True)}
+    assert len(default_parameters(head_axes=True)) == len(default_parameters()) + 4
+    estimates = model.estimate_dict() | {"zero:head_pan_joint": 0.1, "pos:fixed_Base:x": 0.004}
+    before = XleRobotModel(model.urdf, SIGNS, REFS, INTRINSICS)
+    before.set_estimates(estimates)
+    axes = before.with_head_axes()
+    assert axes.with_head_axes() is axes and len(axes.parameters) == len(before.parameters) + 4
+    got = axes.estimate_dict()
+    assert all(got[k] == v for k, v in estimates.items()) and all(got[n] == 0.0 for n in names)
+    q = before.joint_vector(head_ticks={"head_neck": 1700, "head_eyes": 1500})
+    np.testing.assert_allclose(axes.camera_pose(q), before.camera_pose(q))  # at 0 they change nothing
+    tilted = axes.estimate_dict() | {"rot:head_pan_joint:x": np.radians(2.0)}
+    assert np.linalg.norm(axes.camera_pose(q, tilted)[:3, 3] - before.camera_pose(q)[:3, 3]) > 0.003
+    axes.set_estimates(tilted)
+    axes.save(tmp_path / "axes.urdf")
+    back = XleRobotModel.load(tmp_path / "axes.urdf")
+    assert back.estimate_dict() == pytest.approx(tilted)
+
+
+def test_a_new_fit_takes_todays_priors_and_keeps_the_estimates(model):
+    """A saved calibration's stored priors give way to the table's (`with_current_priors`); its estimates stay."""
+    from dataclasses import replace
+
+    old = XleRobotModel(
+        model.urdf, SIGNS, REFS, INTRINSICS, [replace(p, sigma=p.sigma / 5) for p in default_parameters()]
+    )
+    old.set_estimates(old.estimate_dict() | {"pos:fixed_head_camera_link:z": 0.004})
+    fresh = old.with_current_priors()
+    table = {p.name: p.sigma for p in default_parameters()}
+    assert all(p.sigma == table[p.name] for p in fresh.parameters)
+    assert fresh.estimate_dict() == old.estimate_dict()
+
+
+def test_the_head_axes_pixel_jacobian_matches_finite_differences(model):
+    axes = model.with_head_axes()
+    rng = np.random.default_rng(7)
+    theta = np.array([rng.normal(0, p.sigma) for p in axes.parameters])
+    theta[[p.name == "zero:head_tilt_joint" for p in axes.parameters]] = 0.58  # look down at the arms
+    while True:
+        arm_pose, ticks = random_readings(rng)
+        q = axes.joint_vector({"left": arm_pose}, ticks)
+        if axes.predict("left", q, theta).z > 0.1:
+            break
+    d_parameters, _ = axes.pixel_jacobian("left", q, theta, [])
+    step = 1e-6
+    for i, p in enumerate(axes.parameters):
+        if not p.name.startswith(("rot:head_pan_joint", "rot:head_tilt_joint")):
+            continue
+        e = np.zeros_like(theta)
+        e[i] = step
+        numeric = (axes.predict("left", q, theta + e).uv - axes.predict("left", q, theta - e).uv) / (2 * step)
+        np.testing.assert_allclose(d_parameters[:, i], numeric, atol=1e-4, err_msg=p.name)
+
+
 def test_unknown_parameters_and_estimates_are_refused(model):
     with pytest.raises(KeyError):
         model.predict("left", model.joint_vector(), {"zero:no_such_joint": 0.1})
@@ -331,3 +389,27 @@ def test_the_frame_jacobian_matches_finite_differences(model, arm):
             jacobian[3:, i], [spin[2, 1], spin[0, 2], spin[1, 0]], atol=1e-6, err_msg=joint
         )
     np.testing.assert_array_equal(jacobian[:, -1], 0.0)
+
+
+def test_the_applied_estimates_cache_never_serves_others():
+    """Switching `theta` and back, `set_estimates` and a shallow copy each give what a fresh model computes."""
+    import copy
+
+    model = XleRobotModel.from_urdf(head_signs=SIGNS, head_refs=REFS, intrinsics=INTRINSICS)
+    fresh = XleRobotModel.from_urdf(head_signs=SIGNS, head_refs=REFS, intrinsics=INTRINSICS)
+    q = model.joint_vector({"right": {"shoulder_pan.pos": 10.0, "elbow_flex.pos": 20.0}})
+    frame = pinch_frame("right")
+    moved = np.zeros(len(model.parameters))
+    moved[[p.name for p in model.parameters].index("pos:right_elbow_flex:x")] = 0.05
+    for theta in (moved, None, moved, moved, None):
+        np.testing.assert_allclose(model.frame_pose(frame, q, theta), fresh.frame_pose(frame, q, theta))
+    model.set_estimates(moved)  # the current estimates change: `None` means them now
+    np.testing.assert_allclose(model.frame_pose(frame, q), fresh.frame_pose(frame, q, moved))
+    model.set_estimates(np.zeros(len(model.parameters)))
+    # a shallow copy applying other estimates must not leave the original's placements behind its cache
+    model.frame_pose(frame, q, moved)
+    other = copy.copy(model)
+    assert other.pin_model is not model.pin_model
+    other.frame_pose(frame, q, None)
+    np.testing.assert_allclose(model.frame_pose(frame, q, moved), fresh.frame_pose(frame, q, moved))
+    np.testing.assert_allclose(other.frame_pose(frame, q, moved), fresh.frame_pose(frame, q, moved))

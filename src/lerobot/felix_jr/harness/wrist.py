@@ -44,7 +44,7 @@ own error mostly cancels.
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import cv2
 import numpy as np
@@ -612,6 +612,25 @@ class WristMove:
                 else f"NOT reached: {_mm(self.solve_error_m)} mm off"
             )
         )
+
+
+def move_to_pose(view: WristView, plan: Any, pose: str, fraction: float = 1.0) -> tuple[np.ndarray, str]:
+    """The move (root frame, m) `fraction` of the way to `plan`'s pose `pose`, and a label saying how far and how turned.
+
+    From the pinch point as `view`'s joints put it to that pose's pinch point (`Poses.frames`: the pinch frames). The
+    label says how much the pose's turn differs (`plan_move` keeps the current turn).
+    """
+    if pose not in plan.labels:
+        raise ValueError(f"no pose {pose!r} in the plan: one of {list(plan.labels)}")
+    goal = np.asarray(plan.frames[list(plan.labels).index(pose)], dtype=np.float64)
+    away = goal[:3, 3] - view.root_from_pinch[:3, 3]
+    relative = view.root_from_pinch[:3, :3].T @ goal[:3, :3]
+    turn = float(np.degrees(np.arccos(np.clip((np.trace(relative) - 1.0) / 2.0, -1.0, 1.0))))
+    label = (
+        f"{fraction:g} of the way to {pose!r} ({100 * np.linalg.norm(away):.1f} cm away; its turn {turn:.0f} deg off, "
+        "kept as now)"
+    )
+    return fraction * away, label
 
 
 def plan_move(

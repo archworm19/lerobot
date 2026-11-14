@@ -60,6 +60,7 @@ from .objects import (
     TableEstimate,
     View,
 )
+from .primitives import Surface
 from .render import contact_sheet as _contact_sheet, render as _render  # the package re-exports `render`
 from .sfm import SfmResult
 from .workspace import Workspace
@@ -72,7 +73,9 @@ if TYPE_CHECKING:
 # xle_calib_1008 with the right wrist camera turned 5.2 deg to fit its fingertips in a gripper sweep (bowl5), the
 # fingers' 1 cm thickness accounted for (`JAW_THICKNESS_M`: the wrist camera sees their other face). The 7.8 deg of
 # `xle_calib_1008_wrist.urdf` absorbed that thickness.
-MODEL = Path(__file__).parents[1] / "urdfs" / "xle_calib_1008_wrist2.urdf"
+# the joint calibration of the head, both arms and their wrist cameras (2026-11-14: joint_left_full4 + joint_right_full2;
+# docs/camera_calibration.md, "The rework")
+MODEL = Path(__file__).parents[1] / "urdfs" / "xle_calib_1114_joint.urdf"
 ENDPOINT = "tcp://ikeabot.local:5555"
 
 
@@ -97,20 +100,27 @@ class Tool:
     deprecated: str = (
         ""  # what replaces it, if it is on its way out (shown in `describe_tools`, logged when called)
     )
+    # keyword arguments that say where to go, not what was seen (e.g. `plan_wrist_move`'s `to`): recorded as parents,
+    # but they do not make the result stale (`Workspace.call`)
+    goals: tuple[str, ...] = ()
 
 
 TOOLS: dict[str, Tool] = {}
 
 
 def tool(
-    effect: Effect, records: bool = True, deprecated: str = ""
+    effect: Effect, records: bool = True, deprecated: str = "", goals: tuple[str, ...] = ()
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Register the decorated function as a tool with `effect`; `deprecated` says what replaces it, if anything."""
+    """Register the decorated function as a tool with `effect`.
+
+    `deprecated` says what replaces it, if anything; `goals` the keyword arguments that do not age its result
+    (`Tool.goals`).
+    """
 
     def register(fn: Callable[..., Any]) -> Callable[..., Any]:
         if not fn.__doc__:
             raise ValueError(f"tool {fn.__name__} needs a docstring: it is the model's documentation")
-        TOOLS[fn.__name__] = Tool(fn.__name__, fn, effect, records, deprecated)
+        TOOLS[fn.__name__] = Tool(fn.__name__, fn, effect, records, deprecated, goals)
         return fn
 
     return register
@@ -231,7 +241,11 @@ class Harness:
                     self.ws.moved()
 
         try:
-            result = self.ws.call(run, *args, **kwargs) if spec.records else run(*args, **kwargs)
+            result = (
+                self.ws.call(run, *args, _goals=spec.goals, **kwargs)
+                if spec.records
+                else run(*args, **kwargs)
+            )
         except Exception as e:
             entry["outcome"] = f"error: {type(e).__name__}: {e}"
             stopped_at = getattr(e, "capture", None)  # a move that did not settle: what the camera saw there
@@ -582,6 +596,7 @@ def grasp_candidates(
     where: Mapping[str, Sequence[float]] | None = None,
     n: int = 5,
     part: str | None = None,
+    obstacles: Sequence[Any] | None = None,
     **settings: Any,
 ) -> _grasping.GraspCandidates:
     """The best grasps of `target` (from `fit_cylinder`), ranked and named A, B, ...: you choose one by name.
@@ -599,12 +614,20 @@ def grasp_candidates(
     `**settings` change what is assumed (`GraspSettings`, printed with the result): `rotation_bounds_deg` (how far
     the arm may turn off the exact grasp, about the closing line, the approach, the hinge; default 45 each: narrow
     the approach for a slippery object), `position_bound_m`, `rank_step_deg`, `margin` (the fixed jaw's clearance,
-    m), `attack` (m). Whether the grasp is seen is not checked: judge it at the hold. Draw them with `render`. Nothing
-    moves.
+    m), `attack` (m), `camera_clearance` (m: the wrist camera's optics from every obstacle at the attack point and the
+    grasp, default 4 cm). `obstacles`: what the wrist camera must keep clear of: `TableEstimate`s (`table_height`) and
+    objects (`fit_cylinder`: all their parts), e.g. the target's neighbors; by default the best table estimate you have
+    (the most points; the table does not move, so an older one serves), else a level plane at the target's lower end.
+    Whether the grasp is seen is not checked: judge it at the hold. Draw them with `render`. Nothing moves.
     """
     _fresh(h, capture, "the capture")
     _fresh(h, target, "the object")
     ranges = {k: (float(v[0]), float(v[1])) for k, v in (where or {}).items()}
+    if obstacles is None:
+        tables = [node.obj for node in h.ws.nodes.values() if isinstance(node.obj, TableEstimate)]
+        surfaces: list[Surface] | None = [max(tables, key=lambda t: t.n_inliers)] if tables else None
+    else:
+        surfaces = [part for o in obstacles for part in (o.parts.values() if isinstance(o, Object) else (o,))]
     return _grasping.grasp_candidates(
         target,
         h.model,
@@ -614,6 +637,7 @@ def grasp_candidates(
         n=n,
         part=part,
         settings=_settings(settings),
+        obstacles=surfaces,
     )
 
 
@@ -792,28 +816,37 @@ def render_contacts(h: Harness, contacts: ContactPatches) -> np.ndarray:
     return contacts.image
 
 
-@tool(Effect.SOFTWARE)
+@tool(Effect.SOFTWARE, goals=("to",))
 def plan_wrist_move(
     h: Harness,
     view: WristView | HoldViews,
     contacts: ContactPatches | None = None,
     move_m: Sequence[float] | None = None,
     fraction: float = 1.0,
+    to: Poses | None = None,
+    pose: str = "",
 ) -> WristMove:
     """A small move of the gripper from where `view` saw it (a hold's: its current view), solved for `align_step`.
 
-    `contacts`' move (times `fraction`: e.g. 0.5 to stop short and look again), or `move_m` (m, root frame: e.g.
-    straight up, or forward with no drop toward the table). The gripper's turn is kept; at most 3 cm (more is clipped
-    and said). Nothing moves.
+    One of: `contacts`' move (times `fraction`: e.g. 0.5 to stop short and look again); `move_m` (m, root frame: e.g.
+    straight up, or forward with no drop toward the table); or `to` a plan's pose named `pose` (e.g. `to=pick,
+    pose="pick"`, times `fraction`): from the pinch point as the joints now put it to that pose's, no arithmetic of
+    yours (a plan's `points` are the jaws' middle, not the pinch point; its `targets` are angles); a plan from before
+    the arm moved serves (it is where to go; the view is the measurement). The gripper's turn is kept (how far the
+    pose's differs is said); at most 3 cm (more is clipped and said). Nothing moves.
     """
     _fresh(h, view, "the wrist view")
     if contacts is not None:
         _fresh(h, contacts, "the contacts")
-    if (contacts is None) == (move_m is None):
-        raise ValueError("give either the contacts or a move")
-    move = np.asarray(move_m, dtype=np.float64) if move_m is not None else fraction * contacts.move_root  # type: ignore[union-attr]
-    label = f"{fraction:g} of the contacts' move" if contacts is not None else "the move given"
+    if sum(x is not None for x in (contacts, move_m, to)) != 1:
+        raise ValueError("give one of: the contacts, a move, or a plan's pose to move to")
     now = view.views[view.current] if isinstance(view, HoldViews) else view
+    if to is not None:
+        move, label = _wrist.move_to_pose(now, to, pose, fraction)
+    elif move_m is not None:
+        move, label = np.asarray(move_m, dtype=np.float64), "the move given"
+    else:
+        move, label = fraction * contacts.move_root, f"{fraction:g} of the contacts' move"  # type: ignore[union-attr]
     return _wrist.plan_move(h.model, now, move, label)
 
 
