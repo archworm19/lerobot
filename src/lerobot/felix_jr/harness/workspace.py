@@ -12,7 +12,7 @@ captures stale. A node that depends on no capture (a grid at a height typed in b
 
 import json
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -72,9 +72,17 @@ class Workspace:
     # ---- recording ----------------------------------------------------------------------------------------------
 
     def add(
-        self, obj: Any, call: str = "add", parents: tuple[str, ...] = (), args: dict | None = None
+        self,
+        obj: Any,
+        call: str = "add",
+        parents: tuple[str, ...] = (),
+        args: dict | None = None,
+        aging: tuple[str, ...] | None = None,
     ) -> str:
-        """Record `obj` (once: adding it again returns its id) and return its id, e.g. "view3"."""
+        """Record `obj` (once: adding it again returns its id) and return its id, e.g. "view3".
+
+        Its freshness is its oldest parent's, of `aging` if given (the parents that are measurements: a goal is not).
+        """
         if (existing := self.id_of(obj)) is not None:
             return existing
         kind = "image" if isinstance(obj, np.ndarray) else type(obj).__name__.lower()
@@ -83,25 +91,35 @@ class Workspace:
         if isinstance(obj, Capture) or getattr(obj, "sensed", False):  # read off the robot now: fresh
             epoch: int | None = self.epoch
         else:
-            epochs = [e for p in parents if (e := self.nodes[p].epoch) is not None]
+            epochs = [
+                e for p in (parents if aging is None else aging) if (e := self.nodes[p].epoch) is not None
+            ]
             epoch = min(epochs) if epochs else None
         self.nodes[node_id] = Node(node_id, obj, call, args or {}, tuple(parents), epoch)
         self._ids[id(obj)] = node_id
         return node_id
 
-    def call(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    def call(self, fn: Callable[..., Any], *args: Any, _goals: Sequence[str] = (), **kwargs: Any) -> Any:
         """Run `fn(*args, **kwargs)` and record its result (unless None) with its arguments as parents.
 
-        Harness objects passed in that the workspace has not seen are added first (call "external"). Returns the
-        result itself; `id_of` gives its id.
+        Harness objects passed in that the workspace has not seen are added first (call "external"). The keyword
+        arguments named in `_goals` say where to go, not what was seen: parents, but not aging the result (a plan from
+        before the arm moved still names where to go). Returns the result itself; `id_of` gives its id.
         """
         parents: list[str] = []
-        for value in _walk([*args, *kwargs.values()]):
-            node_id = self.id_of(value)
-            if node_id is None and isinstance(value, OBJECT_TYPES):
-                node_id = self.add(value, "external")
-            if node_id is not None and node_id not in parents:
-                parents.append(node_id)
+        goals: set[str] = set()
+        for name, value in [*((None, a) for a in args), *kwargs.items()]:
+            for one in _walk([value]):
+                node_id = self.id_of(one)
+                if node_id is None and isinstance(one, OBJECT_TYPES):
+                    node_id = self.add(one, "external")
+                if node_id is None:
+                    continue
+                if node_id not in parents:
+                    parents.append(node_id)
+                if name in _goals:
+                    goals.add(node_id)
+        aging = tuple(p for p in parents if p not in goals)
         result = fn(*args, **kwargs)
         if result is not None:
             logged = {f"arg{i}": self._summarize(a) for i, a in enumerate(args)} | {
@@ -114,7 +132,7 @@ class Workspace:
                 and all(isinstance(r, OBJECT_TYPES) for r in result)
             )
             for one in result if several else [result]:  # a tool that makes several objects records each
-                self.add(one, name, tuple(parents), logged)
+                self.add(one, name, tuple(parents), logged, aging)
         return result
 
     def moved(self) -> None:

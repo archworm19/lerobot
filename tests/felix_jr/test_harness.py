@@ -300,6 +300,9 @@ class TestWorkspace:
         assert not ws.is_stale(fresh) and not ws.is_stale(points)
         mixed = ws.call(lambda a, b: Points(np.zeros((1, 3)), ("p",)), view, fresh)
         assert ws.is_stale(mixed)  # the oldest capture it depends on wins
+        # a goal (where to go) is a parent but does not age the result: the measurement does
+        aimed = ws.call(lambda a, to: Points(np.zeros((1, 3)), ("q",)), fresh, to=view, _goals=("to",))
+        assert not ws.is_stale(aimed) and ws.id_of(view) in ws.nodes[ws.id_of(aimed)].parents
 
     def test_log_is_json(self, capture, tmp_path):
         ws = Workspace()

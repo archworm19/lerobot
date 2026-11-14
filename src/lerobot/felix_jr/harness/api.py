@@ -99,20 +99,27 @@ class Tool:
     deprecated: str = (
         ""  # what replaces it, if it is on its way out (shown in `describe_tools`, logged when called)
     )
+    # keyword arguments that say where to go, not what was seen (e.g. `plan_wrist_move`'s `to`): recorded as parents,
+    # but they do not make the result stale (`Workspace.call`)
+    goals: tuple[str, ...] = ()
 
 
 TOOLS: dict[str, Tool] = {}
 
 
 def tool(
-    effect: Effect, records: bool = True, deprecated: str = ""
+    effect: Effect, records: bool = True, deprecated: str = "", goals: tuple[str, ...] = ()
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Register the decorated function as a tool with `effect`; `deprecated` says what replaces it, if anything."""
+    """Register the decorated function as a tool with `effect`.
+
+    `deprecated` says what replaces it, if anything; `goals` the keyword arguments that do not age its result
+    (`Tool.goals`).
+    """
 
     def register(fn: Callable[..., Any]) -> Callable[..., Any]:
         if not fn.__doc__:
             raise ValueError(f"tool {fn.__name__} needs a docstring: it is the model's documentation")
-        TOOLS[fn.__name__] = Tool(fn.__name__, fn, effect, records, deprecated)
+        TOOLS[fn.__name__] = Tool(fn.__name__, fn, effect, records, deprecated, goals)
         return fn
 
     return register
@@ -233,7 +240,11 @@ class Harness:
                     self.ws.moved()
 
         try:
-            result = self.ws.call(run, *args, **kwargs) if spec.records else run(*args, **kwargs)
+            result = (
+                self.ws.call(run, *args, _goals=spec.goals, **kwargs)
+                if spec.records
+                else run(*args, **kwargs)
+            )
         except Exception as e:
             entry["outcome"] = f"error: {type(e).__name__}: {e}"
             stopped_at = getattr(e, "capture", None)  # a move that did not settle: what the camera saw there
@@ -804,7 +815,7 @@ def render_contacts(h: Harness, contacts: ContactPatches) -> np.ndarray:
     return contacts.image
 
 
-@tool(Effect.SOFTWARE)
+@tool(Effect.SOFTWARE, goals=("to",))
 def plan_wrist_move(
     h: Harness,
     view: WristView | HoldViews,
@@ -819,8 +830,9 @@ def plan_wrist_move(
     One of: `contacts`' move (times `fraction`: e.g. 0.5 to stop short and look again); `move_m` (m, root frame: e.g.
     straight up, or forward with no drop toward the table); or `to` a plan's pose named `pose` (e.g. `to=pick,
     pose="pick"`, times `fraction`): from the pinch point as the joints now put it to that pose's, no arithmetic of
-    yours (a plan's `points` are the jaws' middle, not the pinch point; its `targets` are angles). The gripper's turn
-    is kept (how far the pose's differs is said); at most 3 cm (more is clipped and said). Nothing moves.
+    yours (a plan's `points` are the jaws' middle, not the pinch point; its `targets` are angles); a plan from before
+    the arm moved serves (it is where to go; the view is the measurement). The gripper's turn is kept (how far the
+    pose's differs is said); at most 3 cm (more is clipped and said). Nothing moves.
     """
     _fresh(h, view, "the wrist view")
     if contacts is not None:
