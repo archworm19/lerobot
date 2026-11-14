@@ -293,8 +293,9 @@ records the servo signs to match. The URDF's camera is a generic `head_camera_li
 
 ## The rework: one joint calibration of the head, the arms and the wrist cameras (design, 2026-11-09)
 
-Branch `calibration_rework`. **Status: built; two short trials on the robot's left arm (2026-11-11, "First trials on
-the robot" below), no full session yet:** the boards (`calibration/boards.py`), the fit (`calibration/joint_fit.py`),
+Branch `calibration_rework`. **Status: in use.** Both arms calibrated together (2026-11-14: `joint_left_full4` +
+`joint_right_full2`, fitted as one: held-out head vs arm 21.6 mm / 3.9 deg before, 5.2 mm / 0.7 deg after), checked on
+the robot with `calibration.check`, and `urdfs/xle_calib_1114_joint.urdf` is now `api.MODEL`. Built: the boards (`calibration/boards.py`), the fit (`calibration/joint_fit.py`),
 a simulator to size a session (`calibration/joint_sim.py`), the views' planning (`calibration/joint_views.py`) and the
 session on the robot (`calibration/joint_collect.py`); below.
 

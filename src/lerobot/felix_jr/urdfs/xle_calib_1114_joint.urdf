@@ -1,0 +1,1351 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot name="xlerobot_so101">
+  
+  <link name="world">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0" />
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0" />
+    </inertial>
+  </link>
+  <link name="chassis">
+    <inertial>
+      <origin xyz="0 0 -0.38" rpy="0 0 0" />
+      <mass value="10" />
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001" />
+    </inertial>
+  </link>
+  <link name="left_wheel">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1" />
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01" />
+    </inertial>
+  </link>
+  <link name="right_wheel">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1" />
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01" />
+    </inertial>
+  </link>
+  <link name="Base">
+    <inertial>
+      <origin xyz="0.0137179 -0.000052 0.0334843" rpy="0 0 0" />
+      <mass value="0.147" />
+      <inertia ixx="0.0001147" ixy="-0.0000005" ixz="0.000005" iyy="0.0001361" iyz="0.0000001" izz="0.0001304" />
+    </inertial>
+  </link>
+  <link name="Base_2">
+    <inertial>
+      <origin xyz="0.0137179 -0.000052 0.0334843" rpy="0 0 0" />
+      <mass value="0.147" />
+      <inertia ixx="0.0001147" ixy="-0.0000005" ixz="0.000005" iyy="0.0001361" iyz="0.0000001" izz="0.0001304" />
+    </inertial>
+  </link>
+  <link name="top_base_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.2542" />
+      <inertia ixx="0.0045" ixy="0" ixz="0" iyy="0.005" iyz="0" izz="0.0045" />
+    </inertial>
+  </link>
+  <link name="head_pan_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.2556" />
+      <inertia ixx="0.0129" ixy="0" ixz="0" iyy="0.0095" iyz="0" izz="0.0184" />
+    </inertial>
+  </link>
+  <link name="head_tilt_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.02087" />
+      <inertia ixx="0.0061" ixy="0" ixz="0" iyy="0.0014" iyz="0" izz="0.0061" />
+    </inertial>
+  </link>
+  <link name="head_camera_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0" />
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0" />
+    </inertial>
+  </link>
+  <joint name="joint_0" type="fixed">
+    <parent link="world" />
+    <child link="chassis" />
+    <origin xyz="0 0 0.38" rpy="0 0 0" />
+  </joint>
+  <joint name="left_wheel_joint" type="continuous">
+    <parent link="chassis" />
+    <child link="left_wheel" />
+    <origin xyz="-0.15 0.225 -0.32" rpy="1.5707963 0 3.1415927" />
+    <axis xyz="0 0 1" />
+    <limit effort="0" velocity="0" />
+  </joint>
+  <joint name="right_wheel_joint" type="continuous">
+    <parent link="chassis" />
+    <child link="right_wheel" />
+    <origin xyz="-0.15 -0.225 -0.32" rpy="1.5707963 0 3.1415927" />
+    <axis xyz="0 0 1" />
+    <limit effort="0" velocity="0" />
+  </joint>
+  <joint name="fixed_Base" type="fixed">
+    <parent link="chassis" />
+    <child link="Base" />
+    <origin xyz="-0.0844085768139878 -0.0880307321299656 0.393042928772885" rpy="0.0323728532748007 0.0258173242363515 -0.06703018810606" /></joint>
+  <joint name="fixed_Base_2" type="fixed">
+    <parent link="chassis" />
+    <child link="Base_2" />
+    <origin xyz="-0.11863684857575 0.0999607012951233 0.394973439669395" rpy="-0.00573408625639862 -0.0123052945654793 3.07306004631977" /></joint>
+  <joint name="fixed_top_base_link" type="fixed">
+    <parent link="chassis" />
+    <child link="top_base_link" />
+    <origin xyz="0 0 0.35" rpy="0 0 0" />
+  </joint>
+  <joint name="head_pan_joint" type="revolute">
+    <parent link="top_base_link" />
+    <child link="head_pan_link" />
+    <axis xyz="0 0 1" />
+    <limit lower="-3.2" upper="3.2" effort="0" velocity="0" />
+    <dynamics damping="0.6" friction="0.052" />
+  <origin xyz="-0.0927540859877131 -0.0053007610778006 0.323881468299872" rpy="0 -0 0.0533632124196527" /></joint>
+  <joint name="head_tilt_joint" type="revolute">
+    <parent link="head_pan_link" />
+    <child link="head_tilt_link" />
+    <axis xyz="0 1 0" />
+    <limit lower="-0.76" upper="1.45" effort="0" velocity="0" />
+    <dynamics damping="0.6" friction="0.052" />
+  <origin xyz="0.0083347167260698 -0.00911548146997702 0.0990314682998729" rpy="0 0.524144950300303 -3.14159260717959" /></joint>
+  <joint name="fixed_head_camera_link" type="fixed">
+    <parent link="head_tilt_link" />
+    <child link="head_camera_link" />
+    <origin xyz="0.0140325196946452 0.0250098512177865 0.0462304383977142" rpy="0.00819961442504024 0.0886307825542339 0.0221784682777528" /></joint>
+  <link name="left_base_link">
+    <inertial>
+      <origin xyz="0.0137179 -5.19711e-05 0.0334843" rpy="0 0 0" />
+      <mass value="0.147" />
+      <inertia ixx="0.000114686" ixy="-4.59787e-07" ixz="4.97151e-06" iyy="0.000136117" iyz="9.75275e-08" izz="0.000130364" />
+    </inertial>
+  </link>
+  <link name="left_shoulder_link">
+    <inertial>
+      <origin xyz="-0.0307604 -1.66727e-05 -0.0252713" rpy="0 0 0" />
+      <mass value="0.100006" />
+      <inertia ixx="8.3759e-05" ixy="7.55525e-08" ixz="-1.16342e-06" iyy="8.10403e-05" iyz="1.54663e-07" izz="2.39783e-05" />
+    </inertial>
+  </link>
+  <link name="left_upper_arm_link">
+    <inertial>
+      <origin xyz="-0.0898471 -0.00838224 0.0184089" rpy="0 0 0" />
+      <mass value="0.103" />
+      <inertia ixx="4.08002e-05" ixy="-1.97819e-05" ixz="-4.03016e-08" iyy="0.000147318" iyz="8.97326e-09" izz="0.000142487" />
+    </inertial>
+  </link>
+  <link name="left_lower_arm_link">
+    <inertial>
+      <origin xyz="-0.0980701 0.00324376 0.0182831" rpy="0 0 0" />
+      <mass value="0.104" />
+      <inertia ixx="2.87438e-05" ixy="7.41152e-06" ixz="1.26409e-06" iyy="0.000159844" iyz="-4.90188e-08" izz="0.00014529" />
+    </inertial>
+  </link>
+  <link name="left_wrist_link">
+    <inertial>
+      <origin xyz="-0.000103312 -0.0386143 0.0281156" rpy="0 0 0" />
+      <mass value="0.079" />
+      <inertia ixx="3.68263e-05" ixy="1.7893e-08" ixz="-5.28128e-08" iyy="2.5391e-05" iyz="3.6412e-06" izz="2.1e-05" />
+    </inertial>
+  </link>
+  <link name="left_gripper_link">
+    <inertial>
+      <origin xyz="0.000213627 0.000245138 -0.025187" rpy="0 0 0" />
+      <mass value="0.087" />
+      <inertia ixx="2.75087e-05" ixy="-3.35241e-07" ixz="-5.7352e-06" iyy="4.33657e-05" iyz="-5.17847e-08" izz="3.45059e-05" />
+    </inertial>
+  </link>
+  <link name="left_gripper_frame_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1e-9" />
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0" />
+    </inertial>
+  </link>
+  <link name="left_moving_jaw_so101_v1_link">
+    <inertial>
+      <origin xyz="-0.00157495 -0.0300244 0.0192755" rpy="0 0 0" />
+      <mass value="0.012" />
+      <inertia ixx="6.61427e-06" ixy="-3.19807e-07" ixz="-5.90717e-09" iyy="1.89032e-06" iyz="-1.09945e-07" izz="5.28738e-06" />
+    </inertial>
+  </link>
+  <joint name="left_gripper_frame_joint" type="fixed">
+    <parent link="left_gripper_link" />
+    <child link="left_gripper_frame_link" />
+    <axis xyz="0 0 0" />
+  <origin xyz="-0.00638310586404021 -0.0039635328411154 -0.102366739344573" rpy="3.14159265358979 2.65358979335584e-06 3.14159265358979" /></joint>
+  <joint name="left_gripper" type="revolute">
+    <origin xyz="0.0202 0.0188 -0.0234" rpy="1.5708 -5.24284e-08 -1.41553e-15" />
+    <parent link="left_gripper_link" />
+    <child link="left_moving_jaw_so101_v1_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" velocity="10" lower="-0.174533" upper="1.74533" />
+  </joint>
+  <joint name="left_wrist_roll" type="revolute">
+    <parent link="left_wrist_link" />
+    <child link="left_gripper_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" velocity="10" lower="-2.74385" upper="2.84121" />
+  <origin xyz="-0.00107813394184989 -0.0613649550070542 0.0177553213662843" rpy="1.57080000553087 0.0733144701110457 3.14159009072386" /></joint>
+  <joint name="left_wrist_flex" type="revolute">
+    <parent link="left_lower_arm_link" />
+    <child link="left_wrist_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" velocity="10" lower="-1.65806" upper="1.65806" />
+  <origin xyz="-0.133357261420046 0.00800596930707175 -0.000344678483465748" rpy="3.99680288865056e-15 4.44089209850063e-16 -1.52286398330041" /></joint>
+  <joint name="left_elbow_flex" type="revolute">
+    <parent link="left_upper_arm_link" />
+    <child link="left_lower_arm_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" velocity="10" lower="-1.69" upper="1.69" />
+  <origin xyz="-0.113686902803441 -0.0306658273213567 -0.000344678508756578" rpy="-4.46601221298471e-16 8.34961295749518e-16 1.47376621841072" /></joint>
+  <joint name="left_shoulder_lift" type="revolute">
+    <parent link="left_shoulder_link" />
+    <child link="left_upper_arm_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" velocity="10" lower="-1.74533" upper="1.74533" />
+  <origin xyz="-0.0311576558413308 -0.0186224757224295 -0.0541518884895224" rpy="-1.5707963256771 -1.5587255450562 -3.67432282066815e-06" /></joint>
+  <joint name="left_shoulder_pan" type="revolute">
+    <parent link="left_base_link" />
+    <child link="left_shoulder_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" velocity="10" lower="-1.91986" upper="1.91986" />
+  <origin xyz="0.0387396771879935 -0.000390083898441551 0.0623518725509635" rpy="3.14159000019721 -3.23512582699807e-08 3.129403498236" /></joint>
+  <joint name="left_arm_mount" type="fixed">
+    <parent link="Base" />
+    <child link="left_base_link" />
+    <origin xyz="0.0393694915315771 -0.0547773692111682 0.00288346070380407" rpy="-0.0047543404706647 0.00589619346181669 -3.08558814928951" />
+  </joint>
+  <link name="right_base_link">
+    <inertial>
+      <origin xyz="0.0137179 -5.19711e-05 0.0334843" rpy="0 0 0" />
+      <mass value="0.147" />
+      <inertia ixx="0.000114686" ixy="-4.59787e-07" ixz="4.97151e-06" iyy="0.000136117" iyz="9.75275e-08" izz="0.000130364" />
+    </inertial>
+  </link>
+  <link name="right_shoulder_link">
+    <inertial>
+      <origin xyz="-0.0307604 -1.66727e-05 -0.0252713" rpy="0 0 0" />
+      <mass value="0.100006" />
+      <inertia ixx="8.3759e-05" ixy="7.55525e-08" ixz="-1.16342e-06" iyy="8.10403e-05" iyz="1.54663e-07" izz="2.39783e-05" />
+    </inertial>
+  </link>
+  <link name="right_upper_arm_link">
+    <inertial>
+      <origin xyz="-0.0898471 -0.00838224 0.0184089" rpy="0 0 0" />
+      <mass value="0.103" />
+      <inertia ixx="4.08002e-05" ixy="-1.97819e-05" ixz="-4.03016e-08" iyy="0.000147318" iyz="8.97326e-09" izz="0.000142487" />
+    </inertial>
+  </link>
+  <link name="right_lower_arm_link">
+    <inertial>
+      <origin xyz="-0.0980701 0.00324376 0.0182831" rpy="0 0 0" />
+      <mass value="0.104" />
+      <inertia ixx="2.87438e-05" ixy="7.41152e-06" ixz="1.26409e-06" iyy="0.000159844" iyz="-4.90188e-08" izz="0.00014529" />
+    </inertial>
+  </link>
+  <link name="right_wrist_link">
+    <inertial>
+      <origin xyz="-0.000103312 -0.0386143 0.0281156" rpy="0 0 0" />
+      <mass value="0.079" />
+      <inertia ixx="3.68263e-05" ixy="1.7893e-08" ixz="-5.28128e-08" iyy="2.5391e-05" iyz="3.6412e-06" izz="2.1e-05" />
+    </inertial>
+  </link>
+  <link name="right_gripper_link">
+    <inertial>
+      <origin xyz="0.000213627 0.000245138 -0.025187" rpy="0 0 0" />
+      <mass value="0.087" />
+      <inertia ixx="2.75087e-05" ixy="-3.35241e-07" ixz="-5.7352e-06" iyy="4.33657e-05" iyz="-5.17847e-08" izz="3.45059e-05" />
+    </inertial>
+  </link>
+  <link name="right_gripper_frame_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1e-9" />
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0" />
+    </inertial>
+  </link>
+  <link name="right_moving_jaw_so101_v1_link">
+    <inertial>
+      <origin xyz="-0.00157495 -0.0300244 0.0192755" rpy="0 0 0" />
+      <mass value="0.012" />
+      <inertia ixx="6.61427e-06" ixy="-3.19807e-07" ixz="-5.90717e-09" iyy="1.89032e-06" iyz="-1.09945e-07" izz="5.28738e-06" />
+    </inertial>
+  </link>
+  <joint name="right_gripper_frame_joint" type="fixed">
+    <parent link="right_gripper_link" />
+    <child link="right_gripper_frame_link" />
+    <axis xyz="0 0 0" />
+  <origin xyz="-0.00658511887045076 -0.00472936543765912 -0.101598593687767" rpy="3.14159265358979 2.65358979335584e-06 3.14159265358979" /></joint>
+  <joint name="right_gripper" type="revolute">
+    <origin xyz="0.0202 0.0188 -0.0234" rpy="1.5708 -5.24284e-08 -1.41553e-15" />
+    <parent link="right_gripper_link" />
+    <child link="right_moving_jaw_so101_v1_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" velocity="10" lower="-0.174533" upper="1.74533" />
+  </joint>
+  <joint name="right_wrist_roll" type="revolute">
+    <parent link="right_wrist_link" />
+    <child link="right_gripper_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" velocity="10" lower="-2.74385" upper="2.84121" />
+  <origin xyz="0.00316158937135653 -0.0613169562650832 0.0190312898793038" rpy="1.57079999613398 0.0162642864352536 3.14158988093738" /></joint>
+  <joint name="right_wrist_flex" type="revolute">
+    <parent link="right_lower_arm_link" />
+    <child link="right_wrist_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" velocity="10" lower="-1.65806" upper="1.65806" />
+  <origin xyz="-0.13350319999053 0.00645426212866588 0.000931289996442129" rpy="3.99680288865056e-15 8.88178419700125e-16 -1.58685936399393" /></joint>
+  <joint name="right_elbow_flex" type="revolute">
+    <parent link="right_upper_arm_link" />
+    <child link="right_lower_arm_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" velocity="10" lower="-1.69" upper="1.69" />
+  <origin xyz="-0.11289956677889 -0.0307440396751474 0.000931289825084679" rpy="-4.4219715010762e-16 8.37302034335101e-16 1.47903340442105" /></joint>
+  <joint name="right_shoulder_lift" type="revolute">
+    <parent link="right_shoulder_link" />
+    <child link="right_upper_arm_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" velocity="10" lower="-1.74533" upper="1.74533" />
+  <origin xyz="-0.0298945513131453 -0.0173465120760328 -0.0541985125260985" rpy="-1.57079632616636 -1.54932844233899 -3.67383349786365e-06" /></joint>
+  <joint name="right_shoulder_pan" type="revolute">
+    <parent link="right_base_link" />
+    <child link="right_shoulder_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" velocity="10" lower="-1.91986" upper="1.91986" />
+  <origin xyz="0.0393422232139587 0.000184905668405475 0.062398514571121" rpy="3.14159000033967 -4.24565644292731e-08 3.12559495317172" /></joint>
+  <joint name="right_arm_mount" type="fixed">
+    <parent link="Base_2" />
+    <child link="right_base_link" />
+    <origin xyz="-0.039369491531577 -0.0356225307564069 0.00288353106345438" rpy="-0.00474700545098735 0.00589578224463866 0.0560045475472164" />
+  </joint>
+  <link name="head_camera_optical" />
+  <joint name="head_camera_optical_joint" type="fixed">
+    <parent link="head_camera_link" />
+    <child link="head_camera_optical" />
+    <origin xyz="0 0 0" rpy="-1.5707963267949 0 -1.5707963267949" />
+  </joint>
+<felix_calibration version="1">
+{
+ "version": 1,
+ "head_signs": {
+  "head_neck": -1,
+  "head_eyes": 1
+ },
+ "head_refs": {
+  "head_neck": 1475,
+  "head_eyes": 1324
+ },
+ "intrinsics": {
+  "fx": 610.9661865234375,
+  "fy": 610.01416015625,
+  "ppx": 315.9468994140625,
+  "ppy": 247.0277862548828,
+  "width": 640,
+  "height": 480
+ },
+ "floor_z": 0.7778834607038041,
+ "visible_side": {
+  "left": "positive",
+  "right": "positive"
+ },
+ "gripper_maps": {
+  "right": {
+   "pos_closed": -1.9406309605395657,
+   "deg_per_unit": 1.27177734375,
+   "calibration": {
+    "drive_mode": 0,
+    "homing_offset": -860,
+    "range_min": 2046,
+    "range_max": 3493
+   },
+   "measurements": [
+    [
+     8.984105044920526,
+     0.02
+    ],
+    [
+     23.911541119557704,
+     0.05
+    ],
+    [
+     39.11541119557705,
+     0.075
+    ],
+    [
+     53.76641326883207,
+     0.098
+    ],
+    [
+     69.17760884588805,
+     0.121
+    ],
+    [
+     83.8977194194886,
+     0.14
+    ]
+   ],
+   "radius_m": 0.08546270867157496
+  },
+  "left": {
+   "pos_closed": 0.06205590249420086,
+   "deg_per_unit": 1.262109375,
+   "calibration": {
+    "drive_mode": 0,
+    "homing_offset": -225,
+    "range_min": 2026,
+    "range_max": 3462
+   },
+   "measurements": [
+    [
+     8.565459610027855,
+     0.016
+    ],
+    [
+     23.74651810584958,
+     0.044
+    ],
+    [
+     38.788300835654596,
+     0.07
+    ],
+    [
+     53.62116991643454,
+     0.097
+    ],
+    [
+     68.7325905292479,
+     0.117
+    ],
+    [
+     83.70473537604457,
+     0.136
+    ]
+   ],
+   "radius_m": 0.08559902560302637
+  }
+ },
+ "arm_calibration": {
+  "left": {
+   "shoulder_pan": {
+    "drive_mode": 0,
+    "homing_offset": -78,
+    "range_min": 747,
+    "range_max": 3447
+   },
+   "shoulder_lift": {
+    "drive_mode": 0,
+    "homing_offset": 1489,
+    "range_min": 829,
+    "range_max": 3180
+   },
+   "elbow_flex": {
+    "drive_mode": 0,
+    "homing_offset": 935,
+    "range_min": 1052,
+    "range_max": 3245
+   },
+   "wrist_flex": {
+    "drive_mode": 0,
+    "homing_offset": -75,
+    "range_min": 925,
+    "range_max": 3109
+   },
+   "wrist_roll": {
+    "drive_mode": 0,
+    "homing_offset": -1356,
+    "range_min": 0,
+    "range_max": 4095
+   },
+   "gripper": {
+    "drive_mode": 0,
+    "homing_offset": -225,
+    "range_min": 2026,
+    "range_max": 3462
+   }
+  },
+  "right": {
+   "shoulder_pan": {
+    "drive_mode": 0,
+    "homing_offset": -558,
+    "range_min": 778,
+    "range_max": 3483
+   },
+   "shoulder_lift": {
+    "drive_mode": 0,
+    "homing_offset": 431,
+    "range_min": 819,
+    "range_max": 3178
+   },
+   "elbow_flex": {
+    "drive_mode": 0,
+    "homing_offset": 785,
+    "range_min": 966,
+    "range_max": 3164
+   },
+   "wrist_flex": {
+    "drive_mode": 0,
+    "homing_offset": -118,
+    "range_min": 924,
+    "range_max": 3147
+   },
+   "wrist_roll": {
+    "drive_mode": 0,
+    "homing_offset": -972,
+    "range_min": 0,
+    "range_max": 4095
+   },
+   "gripper": {
+    "drive_mode": 0,
+    "homing_offset": -860,
+    "range_min": 2046,
+    "range_max": 3493
+   }
+  }
+ },
+ "wrist_cameras": {
+  "left": {
+   "width": 640,
+   "height": 480,
+   "fx": 336.06742644829467,
+   "fy": 337.332855725403,
+   "ppx": 296.0710614181242,
+   "ppy": 255.08346363124366,
+   "model": "rational",
+   "coeffs": [
+    0.9979337375173041,
+    -1.9337447393753586,
+    0.004680537262562925,
+    0.0020016566085544335,
+    0.49866582328909703,
+    0.8913021226845325,
+    -1.7534351738392473,
+    0.42384186871432417,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rms_px": 0.5986161736537272,
+   "n_views": 117,
+   "gripper_from_camera": [
+    [
+     0.999366310361788,
+     -0.03512756479779051,
+     0.005747338970612137,
+     0.006181154247161299
+    ],
+    [
+     -0.02867897224154364,
+     -0.8902724849121401,
+     -0.4545243878600269,
+     0.07616013545286644
+    ],
+    [
+     0.021083032633728408,
+     0.4540715326903245,
+     -0.890715750919015,
+     -0.009550439156782487
+    ],
+    [
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "extrinsics_rms_px": 3.5804471736275842,
+   "extrinsics_views": 9
+  },
+  "right": {
+   "width": 640,
+   "height": 480,
+   "fx": 341.5008176343795,
+   "fy": 340.32652690284544,
+   "ppx": 315.15008371406856,
+   "ppy": 261.0258717653023,
+   "model": "rational",
+   "coeffs": [
+    -0.713254262932631,
+    1.5386003694440866,
+    -0.002480354345363757,
+    -0.0033673720450321373,
+    -1.8577966171363882,
+    -0.7941076099795583,
+    1.698155780058804,
+    -1.936386740511188,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rms_px": 0.7086997728189971,
+   "n_views": 96,
+   "gripper_from_camera": [
+    [
+     0.9995570632582732,
+     -0.01929064580712166,
+     -0.022661603536374062,
+     0.006041585502162704
+    ],
+    [
+     -0.027188652123140863,
+     -0.9015714979857334,
+     -0.43177495436336666,
+     0.07676217132241775
+    ],
+    [
+     -0.012101838134037732,
+     0.4321998438270249,
+     -0.9016966455020629,
+     -0.006186736323726803
+    ],
+    [
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "extrinsics_rms_px": 3.4576597281501167,
+   "extrinsics_views": 9
+  }
+ },
+ "parameters": [
+  {
+   "name": "zero:head_pan_joint",
+   "sigma": 0.3490658503988659,
+   "group": "head",
+   "mean": 0.0,
+   "arm": null
+  },
+  {
+   "name": "zero:head_tilt_joint",
+   "sigma": 0.3490658503988659,
+   "group": "head",
+   "mean": 0.0,
+   "arm": null
+  },
+  {
+   "name": "pos:head_pan_joint:x",
+   "sigma": 0.01,
+   "group": "head",
+   "mean": 0.0,
+   "arm": null
+  },
+  {
+   "name": "pos:head_pan_joint:y",
+   "sigma": 0.01,
+   "group": "head",
+   "mean": 0.0,
+   "arm": null
+  },
+  {
+   "name": "pos:head_pan_joint:z",
+   "sigma": 0.01,
+   "group": "head",
+   "mean": 0.0,
+   "arm": null
+  },
+  {
+   "name": "pos:head_tilt_joint:x",
+   "sigma": 0.01,
+   "group": "head",
+   "mean": 0.0,
+   "arm": null
+  },
+  {
+   "name": "pos:head_tilt_joint:y",
+   "sigma": 0.01,
+   "group": "head",
+   "mean": 0.0,
+   "arm": null
+  },
+  {
+   "name": "pos:head_tilt_joint:z",
+   "sigma": 0.01,
+   "group": "head",
+   "mean": 0.0,
+   "arm": null
+  },
+  {
+   "name": "pos:fixed_head_camera_link:x",
+   "sigma": 0.01,
+   "group": "head",
+   "mean": 0.0,
+   "arm": null
+  },
+  {
+   "name": "pos:fixed_head_camera_link:y",
+   "sigma": 0.015,
+   "group": "head",
+   "mean": 0.0,
+   "arm": null
+  },
+  {
+   "name": "pos:fixed_head_camera_link:z",
+   "sigma": 0.01,
+   "group": "head",
+   "mean": 0.0,
+   "arm": null
+  },
+  {
+   "name": "rot:fixed_head_camera_link:x",
+   "sigma": 0.08726646259971647,
+   "group": "head",
+   "mean": 0.0,
+   "arm": null
+  },
+  {
+   "name": "rot:fixed_head_camera_link:y",
+   "sigma": 0.08726646259971647,
+   "group": "head",
+   "mean": 0.0,
+   "arm": null
+  },
+  {
+   "name": "rot:fixed_head_camera_link:z",
+   "sigma": 0.08726646259971647,
+   "group": "head",
+   "mean": 0.0,
+   "arm": null
+  },
+  {
+   "name": "pos:fixed_Base:x",
+   "sigma": 0.015,
+   "group": "mount",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:fixed_Base:y",
+   "sigma": 0.015,
+   "group": "mount",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:fixed_Base:z",
+   "sigma": 0.015,
+   "group": "mount",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "rot:fixed_Base:x",
+   "sigma": 0.08726646259971647,
+   "group": "mount",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "rot:fixed_Base:y",
+   "sigma": 0.08726646259971647,
+   "group": "mount",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "rot:fixed_Base:z",
+   "sigma": 0.08726646259971647,
+   "group": "mount",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "zero:left_shoulder_pan",
+   "sigma": 0.03490658503988659,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_shoulder_pan:x",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_shoulder_pan:y",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_shoulder_pan:z",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "zero:left_shoulder_lift",
+   "sigma": 0.03490658503988659,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_shoulder_lift:x",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_shoulder_lift:y",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_shoulder_lift:z",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "zero:left_elbow_flex",
+   "sigma": 0.03490658503988659,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_elbow_flex:x",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_elbow_flex:y",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_elbow_flex:z",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "zero:left_wrist_flex",
+   "sigma": 0.03490658503988659,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_wrist_flex:x",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_wrist_flex:y",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_wrist_flex:z",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "zero:left_wrist_roll",
+   "sigma": 0.03490658503988659,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_wrist_roll:x",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_wrist_roll:y",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_wrist_roll:z",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_gripper_frame_joint:x",
+   "sigma": 0.008,
+   "group": "tip",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_gripper_frame_joint:y",
+   "sigma": 0.008,
+   "group": "tip",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_gripper_frame_joint:z",
+   "sigma": 0.008,
+   "group": "tip",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:fixed_Base_2:x",
+   "sigma": 0.015,
+   "group": "mount",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:fixed_Base_2:y",
+   "sigma": 0.015,
+   "group": "mount",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:fixed_Base_2:z",
+   "sigma": 0.015,
+   "group": "mount",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "rot:fixed_Base_2:x",
+   "sigma": 0.08726646259971647,
+   "group": "mount",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "rot:fixed_Base_2:y",
+   "sigma": 0.08726646259971647,
+   "group": "mount",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "rot:fixed_Base_2:z",
+   "sigma": 0.08726646259971647,
+   "group": "mount",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "zero:right_shoulder_pan",
+   "sigma": 0.03490658503988659,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_shoulder_pan:x",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_shoulder_pan:y",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_shoulder_pan:z",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "zero:right_shoulder_lift",
+   "sigma": 0.03490658503988659,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_shoulder_lift:x",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_shoulder_lift:y",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_shoulder_lift:z",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "zero:right_elbow_flex",
+   "sigma": 0.03490658503988659,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_elbow_flex:x",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_elbow_flex:y",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_elbow_flex:z",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "zero:right_wrist_flex",
+   "sigma": 0.03490658503988659,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_wrist_flex:x",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_wrist_flex:y",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_wrist_flex:z",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "zero:right_wrist_roll",
+   "sigma": 0.03490658503988659,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_wrist_roll:x",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_wrist_roll:y",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_wrist_roll:z",
+   "sigma": 0.002,
+   "group": "arm",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_gripper_frame_joint:x",
+   "sigma": 0.008,
+   "group": "tip",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_gripper_frame_joint:y",
+   "sigma": 0.008,
+   "group": "tip",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_gripper_frame_joint:z",
+   "sigma": 0.008,
+   "group": "tip",
+   "mean": 0.0,
+   "arm": "right"
+  }
+ ],
+ "estimates": [
+  0.053363212419652716,
+  0.5241449503003028,
+  0.010245914012286916,
+  -0.005300761077800599,
+  0.0008814682998716065,
+  0.007334716726069805,
+  -0.011115481469977017,
+  0.0008814682998728522,
+  -0.01096748030535481,
+  0.0250098512177865,
+  0.01623043839771424,
+  0.007211063294182421,
+  0.08871746018797798,
+  0.021800454634623663,
+  0.005591423186012199,
+  0.02196926787003443,
+  -0.0019570712271154123,
+  0.033224205094022574,
+  0.02472054124157279,
+  -0.067438500757438,
+  0.012191808943626694,
+  -9.562281200649446e-05,
+  -0.0003900749218715511,
+  -4.812744903653881e-05,
+  0.012074454943802632,
+  -0.0007584558413307788,
+  -0.0003446757224294726,
+  4.8111510477556426e-05,
+  -0.09703378158928366,
+  -0.0011169028034412876,
+  -0.0026658273213566886,
+  -0.0003446785087567518,
+  0.04793601669959262,
+  0.0015427385799540892,
+  0.0028059693070717462,
+  -0.00034467848346578445,
+  -0.02463497011121217,
+  -0.00107813394184995,
+  -0.0002649550070541998,
+  -0.0003446786337157319,
+  0.0015168941359597953,
+  -0.003745411841115401,
+  -0.0042393393445728286,
+  -0.028636848575750468,
+  -0.010039298704876687,
+  -2.6560330604915592e-05,
+  -0.006153426783906168,
+  -0.012103963085602238,
+  -0.06856688078418158,
+  0.016000354007919992,
+  0.0005069232139587259,
+  0.00018491464497547518,
+  -1.485428879047305e-06,
+  0.021471557661006904,
+  0.0005046486868546948,
+  0.0009312879239672403,
+  1.4874739015203652e-06,
+  -0.09176659557894794,
+  -0.00032956677888991437,
+  -0.0027440396751474082,
+  0.0009312898250845056,
+  -0.01605936399392864,
+  0.0013968000094703888,
+  0.0012542621286658795,
+  0.0009312899964420932,
+  0.0324152135649648,
+  0.0031615893713564766,
+  -0.000216956265083187,
+  0.0009312898793037824,
+  0.0013148811295492426,
+  -0.004511244437659124,
+  -0.0034711936877665577
+ ],
+ "covariance": null,
+ "fit_info": {
+  "sessions": [
+   "calib1007_left",
+   "calib1007_right"
+  ],
+  "clicks": 80,
+  "sigma_px": 3.0,
+  "huber": 2.0,
+  "pixel_rms": {
+   "calib1007_left": 2.3335273086576587,
+   "calib1007_right": 1.5972882091678253
+  },
+  "holdout": {
+   "calib1007_left": {
+    "n": 8.0,
+    "before": 515.1871798472812,
+    "after": 2.2642997841748778
+   },
+   "calib1007_right": {
+    "n": 8.0,
+    "before": 547.5492452813018,
+    "after": 1.3086335643083364
+   }
+  },
+  "joint_fit": {
+   "sessions": [
+    "/Users/ztcecere/CalibrationScratch2/joint_left_full4",
+    "/Users/ztcecere/CalibrationScratch2/joint_right_full2"
+   ],
+   "sightings": {
+    "head": 64,
+    "left": 15,
+    "right": 18
+   },
+   "clicks": {
+    "head": 11,
+    "left": 26,
+    "right": 25
+   },
+   "rms_px": {
+    "head board": 0.5087909645532529,
+    "left board": 0.4295960652552329,
+    "right board": 0.33193014487616096,
+    "left click": 1.4663441178013121,
+    "head click": 1.88693525265586,
+    "right click": 2.1254915394633263
+   },
+   "held_out": {
+    "moments": 7,
+    "before": {
+     "mm": 21.555191866273642,
+     "deg": 3.9179987797978124
+    },
+    "after": {
+     "mm": 5.237488194048966,
+     "deg": 0.7102972509321173
+    }
+   },
+   "thickness_mm": 10.283899128677612,
+   "camera_moved": {
+    "left": {
+     "mm": 0.616847194597478,
+     "deg": 0.05535514789581779
+    },
+    "right": {
+     "mm": 9.425627862301956,
+     "deg": 4.7941471019870825
+    }
+   },
+   "nfev": 47,
+   "message": "`ftol` termination condition is satisfied."
+  }
+ },
+ "nominal_origins": {
+  "fixed_Base": {
+   "xyz": "-0.09 -0.11 0.395",
+   "rpy": "0 0 0"
+  },
+  "fixed_Base_2": {
+   "xyz": "-0.09 0.11 0.395",
+   "rpy": "0 0 3.1415927"
+  },
+  "head_pan_joint": {
+   "xyz": "-0.103 0 0.323",
+   "rpy": "0 0 0"
+  },
+  "head_tilt_joint": {
+   "xyz": "0.001 0.002 0.09815",
+   "rpy": "0 0 3.1415927"
+  },
+  "fixed_head_camera_link": {
+   "xyz": "0.025 0 0.03",
+   "rpy": "0 0 0"
+  },
+  "left_gripper_frame_joint": {
+   "xyz": "-0.0079 -0.000218121 -0.0981274",
+   "rpy": "0 3.14159 0"
+  },
+  "left_wrist_roll": {
+   "xyz": "5.55112e-17 -0.0611 0.0181",
+   "rpy": "1.5708 0.0486795 3.14159"
+  },
+  "left_wrist_flex": {
+   "xyz": "-0.1349 0.0052 3.62355e-17",
+   "rpy": "4.02456e-15 8.67362e-16 -1.5708"
+  },
+  "left_elbow_flex": {
+   "xyz": "-0.11257 -0.028 1.73763e-16",
+   "rpy": "-3.63608e-16 8.74301e-16 1.5708"
+  },
+  "left_shoulder_lift": {
+   "xyz": "-0.0303992 -0.0182778 -0.0542",
+   "rpy": "-1.5708 -1.5708 0"
+  },
+  "left_shoulder_pan": {
+   "xyz": "0.0388353 -8.97657e-09 0.0624",
+   "rpy": "3.14159 4.18253e-17 -3.14159"
+  },
+  "right_gripper_frame_joint": {
+   "xyz": "-0.0079 -0.000218121 -0.0981274",
+   "rpy": "0 3.14159 0"
+  },
+  "right_wrist_roll": {
+   "xyz": "5.55112e-17 -0.0611 0.0181",
+   "rpy": "1.5708 0.0486795 3.14159"
+  },
+  "right_wrist_flex": {
+   "xyz": "-0.1349 0.0052 3.62355e-17",
+   "rpy": "4.02456e-15 8.67362e-16 -1.5708"
+  },
+  "right_elbow_flex": {
+   "xyz": "-0.11257 -0.028 1.73763e-16",
+   "rpy": "-3.63608e-16 8.74301e-16 1.5708"
+  },
+  "right_shoulder_lift": {
+   "xyz": "-0.0303992 -0.0182778 -0.0542",
+   "rpy": "-1.5708 -1.5708 0"
+  },
+  "right_shoulder_pan": {
+   "xyz": "0.0388353 -8.97657e-09 0.0624",
+   "rpy": "3.14159 4.18253e-17 -3.14159"
+  }
+ }
+}
+</felix_calibration></robot>

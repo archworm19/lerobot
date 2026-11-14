@@ -17,9 +17,13 @@ from lerobot.felix_jr.calibration.joint_sim import ARM, Scenario, World, draw_tr
 from lerobot.felix_jr.calibration.xle_robot_model import JAW_THICKNESS_M, XleRobotModel  # noqa: E402
 from lerobot.felix_jr.harness import api  # noqa: E402
 
+# the simulations start from (and draw their true robots around) this calibration, not `api.MODEL`: a new default
+# calibration must not change what these tests check
+SIM_START = api.MODEL.parent / "xle_calib_1008_wrist2.urdf"
+
 
 def test_a_simulated_session_is_fitted():
-    model = XleRobotModel.load(api.MODEL)
+    model = XleRobotModel.load(SIM_START)
     rng = np.random.default_rng(3)
     world = World(
         model, draw_truth(model, rng, scale=0.3), CharucoBoard(9, 7, 0.025, 0.018, "DICT_4X4_50"), rng

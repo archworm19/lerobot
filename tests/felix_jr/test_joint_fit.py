@@ -17,10 +17,14 @@ from lerobot.felix_jr.calibration.joint_sim import ARM, Scenario, World, draw_tr
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel  # noqa: E402
 from lerobot.felix_jr.harness import api  # noqa: E402
 
+# the simulations start from (and draw their true robots around) this calibration, not `api.MODEL`: a new default
+# calibration must not change what these tests check
+SIM_START = api.MODEL.parent / "xle_calib_1008_wrist2.urdf"
+
 
 @pytest.fixture(scope="module")
 def session():
-    model = XleRobotModel.load(api.MODEL)
+    model = XleRobotModel.load(SIM_START)
     rng = np.random.default_rng(1)
     world = World(model, draw_truth(model, rng), CharucoBoard(9, 7, 0.025, 0.018, "DICT_4X4_50"), rng)
     world.joint_noise_deg = world.board_noise_px = world.click_noise_px = 0.0

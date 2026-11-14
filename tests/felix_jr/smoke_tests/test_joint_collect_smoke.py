@@ -26,6 +26,10 @@ from lerobot.felix_jr.server.client import FelixClient  # noqa: E402
 from lerobot.felix_jr.server.hardware import FakeHardware  # noqa: E402
 from lerobot.felix_jr.server.server import RobotServer  # noqa: E402
 
+# the simulations start from (and draw their true robots around) this calibration, not `api.MODEL`: a new default
+# calibration must not change what these tests check
+SIM_START = api.MODEL.parent / "xle_calib_1008_wrist2.urdf"
+
 ARM = "right"
 BOARD = CharucoBoard(9, 7, 0.025, 0.018, "DICT_4X4_50")  # the one printed
 PX_PER_M = 8000.0  # the printout's resolution (blurred before the warp: no aliasing)
@@ -50,7 +54,7 @@ def render_board(color_size, matrix, camera_from_board):
 
 @pytest.fixture
 def setup(tmp_path):
-    start = XleRobotModel.load(api.MODEL)
+    start = XleRobotModel.load(SIM_START)
     lens = start.wrist_cameras[ARM]
     from dataclasses import replace
 
