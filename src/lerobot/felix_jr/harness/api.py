@@ -811,21 +811,29 @@ def plan_wrist_move(
     contacts: ContactPatches | None = None,
     move_m: Sequence[float] | None = None,
     fraction: float = 1.0,
+    to: Poses | None = None,
+    pose: str = "",
 ) -> WristMove:
     """A small move of the gripper from where `view` saw it (a hold's: its current view), solved for `align_step`.
 
-    `contacts`' move (times `fraction`: e.g. 0.5 to stop short and look again), or `move_m` (m, root frame: e.g.
-    straight up, or forward with no drop toward the table). The gripper's turn is kept; at most 3 cm (more is clipped
-    and said). Nothing moves.
+    One of: `contacts`' move (times `fraction`: e.g. 0.5 to stop short and look again); `move_m` (m, root frame: e.g.
+    straight up, or forward with no drop toward the table); or `to` a plan's pose named `pose` (e.g. `to=pick,
+    pose="pick"`, times `fraction`): from the pinch point as the joints now put it to that pose's, no arithmetic of
+    yours (a plan's `points` are the jaws' middle, not the pinch point; its `targets` are angles). The gripper's turn
+    is kept (how far the pose's differs is said); at most 3 cm (more is clipped and said). Nothing moves.
     """
     _fresh(h, view, "the wrist view")
     if contacts is not None:
         _fresh(h, contacts, "the contacts")
-    if (contacts is None) == (move_m is None):
-        raise ValueError("give either the contacts or a move")
-    move = np.asarray(move_m, dtype=np.float64) if move_m is not None else fraction * contacts.move_root  # type: ignore[union-attr]
-    label = f"{fraction:g} of the contacts' move" if contacts is not None else "the move given"
+    if sum(x is not None for x in (contacts, move_m, to)) != 1:
+        raise ValueError("give one of: the contacts, a move, or a plan's pose to move to")
     now = view.views[view.current] if isinstance(view, HoldViews) else view
+    if to is not None:
+        move, label = _wrist.move_to_pose(now, to, pose, fraction)
+    elif move_m is not None:
+        move, label = np.asarray(move_m, dtype=np.float64), "the move given"
+    else:
+        move, label = fraction * contacts.move_root, f"{fraction:g} of the contacts' move"  # type: ignore[union-attr]
     return _wrist.plan_move(h.model, now, move, label)
 
 

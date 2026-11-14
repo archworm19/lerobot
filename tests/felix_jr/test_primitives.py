@@ -116,3 +116,13 @@ def test_a_lying_pen():
     assert g.closing_root @ pen.axis_root == pytest.approx(0.0, abs=1e-12)
     assert g.approach_root @ pen.axis_root == pytest.approx(0.0, abs=1e-12)
     assert "90 deg from vertical" in pen.describe()
+
+
+def test_a_cylinder_prefers_the_side():
+    """`approach_preference`: 0 square to the axis, 90 along it, the angle between."""
+    upright = Cylinder.upright(np.array([0.0, 0.0, 0.0]), 0.1, 0.02)
+    assert upright.approach_preference(np.array([1.0, 0.0, 0.0])) == pytest.approx(0.0)
+    assert upright.approach_preference(np.array([0.0, 0.0, -1.0])) == pytest.approx(90.0)
+    down45 = np.array([1.0, 0.0, -1.0]) / np.sqrt(2.0)
+    assert upright.approach_preference(down45) == pytest.approx(45.0)
+    assert upright.approach_preference(2.0 * down45) == pytest.approx(45.0)  # any length

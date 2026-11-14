@@ -218,6 +218,39 @@ def test_rank_antipodal_first_then_joint_margin():
     ]
 
 
+def test_the_approach_ranks_after_antipodal_and_before_the_joints():
+    """Within an antipodal step, the gripper nearer the object's best way in ranks first, whatever its joints; with
+    `prefer_approach` off, the joints decide."""
+
+    def candidate(preference: float, limit: float, settings: GraspSettings) -> GraspCandidate:
+        solved = SimpleNamespace(rotation_error_deg=np.array([0.0, 1.0, 1.0]))
+        return GraspCandidate("", None, None, solved, limit, 0.0, settings, float("nan"), preference)  # type: ignore[arg-type]
+
+    on = GraspSettings()
+    side, steep = candidate(3.0, 20.0, on), candidate(40.0, 60.0, on)
+    assert sorted([steep, side], key=GraspCandidate.rank_key) == [side, steep]
+    off = GraspSettings(prefer_approach=False)
+    side, steep = candidate(3.0, 20.0, off), candidate(40.0, 60.0, off)
+    assert sorted([side, steep], key=GraspCandidate.rank_key) == [steep, side]
+
+
+def test_the_move_to_a_plans_pose_is_from_the_pinch_now_to_its_pinch():
+    """`move_to_pose`: the plan's pinch frame, not its points (the jaws' middle) nor its targets (angles)."""
+    from lerobot.felix_jr.harness.wrist import move_to_pose
+
+    now = np.eye(4)
+    now[:3, 3] = [-0.43, -0.09, 0.84]
+    goal = np.eye(4)
+    goal[:3, 3] = [-0.46, -0.07, 0.80]
+    plan = SimpleNamespace(labels=("pick.back", "pick"), frames=np.array([now, goal]))
+    view = SimpleNamespace(root_from_pinch=now)
+    move, label = move_to_pose(view, plan, "pick", 0.5)  # type: ignore[arg-type]
+    np.testing.assert_allclose(move, 0.5 * (goal[:3, 3] - now[:3, 3]))
+    assert "'pick'" in label and "5.4 cm away" in label and "0 deg off" in label
+    with pytest.raises(ValueError, match="no pose"):
+        move_to_pose(view, plan, "lift")  # type: ignore[arg-type]
+
+
 # ---- objects and the pick plan ----------------------------------------------------------------------------------
 
 

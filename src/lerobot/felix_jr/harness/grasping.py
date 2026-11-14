@@ -53,10 +53,11 @@ from .reach import OPEN_CLEARANCE_M, POSITION_TOL_M, ROLL_TOL_DEG, SQUEEZE_M, Ar
 SAG_LIFT_M = 0.01  # grasps aimed this much higher than the object (`GraspSettings.sag_lift`)
 ATTACK_M = 0.05  # the attack point: this far back along the approach from the grasp (`protocols.md`, rule 1)
 MARGIN_M = 0.008  # the fixed jaw this far clear of its contact (bowl1: 0.8-1.3 cm, every grasp landed)
-# the wrist camera's optics at least this far above the table at the attack point and the grasp: its housing (~2 cm
-# about them), the sag (~1 cm) and 1 cm to spare. ruler1 (2026-11-14): a grasp with the gripper upside down held at
-# its attack point with the camera 2.3 cm up, and the camera hit the table
-CAMERA_CLEARANCE_M = 0.04
+# the wrist camera's optics at least this far from every obstacle at the attack point and the grasp: its housing (~2
+# cm about them), the sag (~1 cm) and room to spare. ruler1 (2026-11-14): a grasp with the gripper upside down held at
+# its attack point with the camera 2.3 cm up, and the camera hit the table; 4 cm then let an upside-down grasp pass
+# at 4.3 cm (ruler2)
+CAMERA_CLEARANCE_M = 0.08
 MIN_TIP_APART_M = 1e-3  # the tip-to-tip direction of jaws this little apart, for a grasp of no opening
 AXIS_NAMES = ("closing line", "approach", "hinge")  # the grasp's axes (`ClawTarget.axes_root`)
 # the solve's preferences: how much a turn about each axis costs (a turn of its scale costs as much as a position error
@@ -96,6 +97,9 @@ class GraspSettings:
     sag_lift: float = SAG_LIFT_M
     # the wrist camera's optics this far from every obstacle, at least
     camera_clearance: float = CAMERA_CLEARANCE_M
+    # rank by the target's `approach_preference` (after how antipodal; e.g. a cylinder from the side), in the steps of
+    # `rank_step_deg`; False: not at all
+    prefer_approach: bool = True
 
     def describe(self) -> str:
         """The settings in a line."""
@@ -104,7 +108,9 @@ class GraspSettings:
         )
         return (
             f"accepted: turns up to ({bounds}) deg, the grasp point within {_cm(self.position_bound_m)} cm; "
-            f"ranked by the antipodal error in {self.rank_step_deg:g} deg steps, then the joint margin; fixed jaw "
+            f"ranked by the antipodal error in {self.rank_step_deg:g} deg steps, "
+            + ("then the approach's preference in the same steps, " if self.prefer_approach else "")
+            + "then the joint margin; fixed jaw "
             f"{_cm(self.margin)} cm clear, attack point {_cm(self.attack)} cm back, aimed {_cm(self.sag_lift)} cm high "
             f"against the arm's sag; the wrist camera {_cm(self.camera_clearance)} cm from every obstacle at least"
         )
@@ -236,6 +242,8 @@ class GraspCandidate:
     settings: GraspSettings = field(default_factory=GraspSettings)
     # the wrist camera's optics from the nearest obstacle, over both poses (nan: not checked)
     camera_clearance_m: float = float("nan")
+    # how far (deg) the solved gripper axis is from the target's best way in (`Primitive.approach_preference`)
+    approach_preference_deg: float = 0.0
 
     @property
     def antipodal_error_deg(self) -> float:
@@ -246,10 +254,16 @@ class GraspCandidate:
         """
         return float(max(self.grasp.rotation_error_deg[1], self.grasp.rotation_error_deg[2]))
 
-    def rank_key(self) -> tuple[int, float, float]:
-        """The ranking (lower first): the antipodal error in the settings' steps, the joint margin, the solves' cost."""
-        step = int(self.antipodal_error_deg / self.settings.rank_step_deg + 1e-9)
-        return (step, -self.limit_margin_deg, self.cost)
+    def rank_key(self) -> tuple[int, int, float, float]:
+        """The ranking, lower first.
+
+        The antipodal error in the settings' steps, the approach's preference in the same steps (if
+        `prefer_approach`), the joint margin, the solves' cost.
+        """
+        step = self.settings.rank_step_deg
+        antipodal = int(self.antipodal_error_deg / step + 1e-9)
+        approach = int(self.approach_preference_deg / step + 1e-9) if self.settings.prefer_approach else 0
+        return (antipodal, approach, -self.limit_margin_deg, self.cost)
 
     def describe(self) -> str:
         """The grasp in the object's terms, the jaws, the solved gripper pose (root frame), how antipodal, joints."""
@@ -259,7 +273,8 @@ class GraspCandidate:
             f"{self.name}: {self.claw.arm} arm, {self.claw.grasp.describe()}; fixed jaw on contact "
             f"{self.claw.fixed_side}, {_cm(self.claw.margin)} cm clear; gripper at pitch {pitch:.0f}, heading "
             f"{heading:.0f}, roll {roll:.0f} (root frame); antipodal error {self.antipodal_error_deg:.0f} deg (about the "
-            f"approach {approach:.0f}, about the hinge {hinge:.0f}), approach tilted {closing:.0f} deg; joints >= "
+            f"approach {approach:.0f}, about the hinge {hinge:.0f}), approach tilted {closing:.0f} deg; the gripper "
+            f"{self.approach_preference_deg:.0f} deg off the object's best way in; joints >= "
             f"{self.limit_margin_deg:.0f} deg from their bounds; off the target by "
             f"{_cm(self.grasp.position_error_m)} cm"
             + (
@@ -422,6 +437,7 @@ def _evaluate(
     timed: _Timer,
     init: np.ndarray | None = None,
     obstacles: Sequence[Surface] = (),
+    primitive: Primitive | None = None,
 ) -> GraspCandidate | Rejected:
     """One claw target through the filters after the jaws (`STAGES`): a candidate, or why it is rejected."""
     grasp, arm, fixed_side = claw.grasp, claw.arm, claw.fixed_side
@@ -466,8 +482,17 @@ def _evaluate(
         + float(np.sum((np.asarray(s.rotation_error_deg) / np.asarray(ROTATION_SCALES_DEG)) ** 2))
         for s in (at_attack, at_grasp)
     )
+    preference = 0.0 if primitive is None else primitive.approach_preference(at_grasp.root_from_pinch[:3, 2])
     return GraspCandidate(
-        "", claw, at_attack, at_grasp, _limit_margin_deg(ik, at_attack, at_grasp), cost, settings, clearance
+        "",
+        claw,
+        at_attack,
+        at_grasp,
+        _limit_margin_deg(ik, at_attack, at_grasp),
+        cost,
+        settings,
+        clearance,
+        preference,
     )
 
 
@@ -528,7 +553,13 @@ def grasp_candidates(
                         model, arm, capture.arms, capture.head_ticks, grasp.opening, settings.margin
                     )
                 result = _evaluate(
-                    model, claw, iks[grasp.opening], settings, timed, obstacles=tuple(obstacles)
+                    model,
+                    claw,
+                    iks[grasp.opening],
+                    settings,
+                    timed,
+                    obstacles=tuple(obstacles),
+                    primitive=primitive,
                 )
                 if isinstance(result, GraspCandidate):
                     passed.append(result)

@@ -115,6 +115,13 @@ class Primitive(Surface, Protocol):
         """The family's grasps on a grid, within `where`, no wider than `max_opening`."""
         ...
 
+    def approach_preference(self, approach_root: np.ndarray) -> float:
+        """How far (deg) the gripper coming in along `approach_root` (root frame, unit) is from the shape's best way in.
+
+        0 the best. `grasp_candidates` ranks by it after how antipodal a grasp is.
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class HorizontalPlane:
@@ -194,6 +201,16 @@ class Cylinder:
     def top_root(self) -> np.ndarray:
         """The top end's center."""
         return self.bottom_root + self.length * self.axis_root
+
+    def approach_preference(self, approach_root: np.ndarray) -> float:
+        """How far (deg) an approach is off square to the axis: 0 from the side, 90 along it (from above or below).
+
+        From the side the jaws close across it, the gripper and its wrist camera level with it; a steep approach saw only
+        an upright bottle's top from the wrist camera (ruler2).
+        """
+        a = np.asarray(approach_root, dtype=np.float64)
+        along = abs(float(a @ self.axis_root)) / float(np.linalg.norm(a))
+        return float(np.degrees(np.arcsin(min(1.0, along))))
 
     def surface_distance(self, points_root: np.ndarray) -> np.ndarray:
         """Signed distance (m) of each point (N, 3) to the surface, ends included: negative inside."""
