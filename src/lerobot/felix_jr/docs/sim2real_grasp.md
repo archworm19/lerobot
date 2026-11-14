@@ -1,7 +1,8 @@
 # Sim-to-real grasping: the last centimeters from the wrist camera
 
-**Status (2026-11-09): research, branch `sim2real_grasp`.** Built: the SO-101 in MuJoCo on a table with objects
-(`sim/`), a render of random motion. Not yet: the jaws' contacts, the wrist camera, a grasp environment, any policy.
+**Status (2026-11-14): research, branch `sim2real_grasp`.** Built: **our calibrated arm in MuJoCo with its wrist camera
+and the head camera** (`sim2real/`, below), checked against ruler2's real frames. Not yet: the jaws' zero and contacts, a grasp
+environment, any policy. Plain MuJoCo on this Mac for now; later mjlab on rented GPUs (RunPod or similar).
 
 ## The idea
 
@@ -45,22 +46,55 @@ into a vision policy, there at a large scale; ours is a smaller problem, and GPU
 
 ## The robot model
 
-- **TheRobotStudio's SO-101** (`SO-ARM100/Simulation/SO101`, Apache-2.0; `sim/assets.py` downloads it once at a
+- **TheRobotStudio's SO-101** (`SO-ARM100/Simulation/SO101`, Apache-2.0; `sim2real/assets.py` downloads it once at a
   pinned commit, ~16 MB of meshes, not vendored): our arm, in LeRobot's "new" calibration (each joint's zero
   mid-range, as our readings are), STS3215 servos (position control, kp, damping, armature, friction from the Open
   Duck Mini's measurements), a backlash class, and the wrist camera's mount. **Not** the XLeRobot repository's
   MuJoCo model: its arms are the older SO-100 (`Rotation`, `Pitch`, ...), with no cameras, the jaw free over +-180
   deg, and the jaws colliding as whole meshes.
-- **What MuJoCo collides with** (`sim/render_random.py` draws it): each mesh's convex hull. For the arm that is fine;
+- **What MuJoCo collides with** (`sim2real.view --collision` draws it): each mesh's convex hull. For the arm that is fine;
   for the claw it fills the jaw's inner curve, so an object cannot seat as deep as on the robot and contacts land on
   the hulls' faces.
 
+## Decisions (2026-11-14)
+
+- **The model learns in simulation.** Real frames are only its test set (wrist frames at holds, labelled by the head's
+  depth before the arm hides the object, or by the person). Learning from real observations is a separate line of
+  experiments, for another branch.
+- **Both outputs:** the object's offset in the pinch frame (checkable on real frames; the existing moves act on it)
+  and an action. The offset is the check and the fallback until the action is trusted.
+- **DA3 as the bridge is in doubt:** on ruler2's plain white bottle its depth was the table's from both wrists
+  (`sessions.md`). Plain objects need handling whatever the input.
+
+## Our calibrated arm in MuJoCo (`sim2real/`, 2026-11-14)
+
+- **`robot.arm_spec(model, arm)`:** TheRobotStudio's SO-101 (meshes, servos), each body posed from `XleRobotModel`
+  at all-zero readings: the calibrated joint origins with the joints' zero corrections folded in, so MuJoCo's joint
+  angles are LeRobot's readings in radians. World = the model's root frame; the arm's base where the calibration
+  puts it. Added: a `pinch` site, the wrist camera on the gripper (its calibrated pose and lens: `focal_pixel`,
+  `principal_pixel`, no distortion, as our undistorted frames), the head camera fixed at the given head ticks. Their
+  wrist camera mount is removed (ours is elsewhere: our camera looked out from inside theirs); our camera's housing
+  is a box behind its lens, for collisions only.
+- **`scene.build`:** the arm over a table (top at 0.747 m, ruler2's), objects (`Cylinder`, `Box`) on it. One arm, no head or chassis meshes yet (the XLeRobot repository's MuJoCo model has them; its license to check
+  before copying).
+- **`view`:** renders from the head and the wrist camera, the visual meshes and (`--collision`) the convex hulls
+  MuJoCo collides with; with `--robot` the robot's frames next to the renders at the same joints (nothing moves).
+- **Tested** (`tests/felix_jr/test_sim2real.py`): every link, the pinch point and both cameras where the calibrated
+  model puts them (to 1e-9 m), and a ball rendering where the lens projects it (within 1 px; this caught MuJoCo's
+  principal point convention: the image's center minus ours).
+- **Against ruler2's frames** (the joints and frames recorded there): the head view's gripper and bottle within a
+  few tens of pixels; the left wrist's fixed jaw on the real one and the bottle centered within ~10 px (its size was a
+  guess). **The moving jaw is off:** opened by the gripper map from the SO-101's zero taken as closed, it is wider
+  than the real one in both wrists (the right gripper at 1.9 is closed on the robot, open in the sim). The jaw's zero
+  needs calibrating. The wrist camera's raised mount is not modeled.
+
 ## Next
 
-1. **The jaws' contacts:** pads (boxes, capsules) where the real claw touches, the meshes' hulls left to the rest.
-2. **A grasp check before any RL:** open, approach a cylinder, close, lift: does it hold, as the real claw holds a
+1. **The jaw's zero:** where the SO-101's moving jaw meets the fixed one, from a real wrist frame at a known
+   `gripper.pos` (`view --robot`).
+2. **The jaws' contacts:** pads (boxes, capsules) where the real claw touches, the meshes' hulls left to the rest;
+   `view --collision` shows them.
+3. **A grasp check before any RL:** open, approach a cylinder, close, lift: does it hold, as the real claw holds a
    bottle? Tune the friction, the contacts' softness (`solref`, `solimp`) and the gripper servo's force.
-3. **The wrist camera** from our calibration (its pose on the gripper, its lens), the fingers in its view; and the arm
-   placed as the calibrated model has it.
 4. **The grasp environment:** starts near an attack pose (as the head's plan leaves it), the robot's errors
    randomized; then the teacher.

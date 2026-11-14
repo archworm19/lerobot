@@ -610,8 +610,10 @@ class JointCollect:
             "head:wrist": in_head[1],
             "wrist": jv.wrist_pixels(self.model, self.arm, q, wrist_tip[None])[0],
         }
-        expected = f"head:{self.head_face}"  # the face the model expects the head to see
-        titles = {pane: PANE_TITLES[pane] + (" (expected)" if pane == expected else "") for pane in PANES}
+        expected_face = f"head:{self.head_face}"  # the face the model expects the head to see
+        titles = {
+            pane: PANE_TITLES[pane] + (" (expected)" if pane == expected_face else "") for pane in PANES
+        }
         # the board where the model has it: its outline (the suggested placement, then the measured one), and once
         # measured its corners, in every pane: their gap to the corners found is the model's error
         outlines: dict[str, np.ndarray] = {}
