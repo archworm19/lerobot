@@ -116,6 +116,10 @@ the IK smoke test is built on pen1).
       the DA3 parity test). Next session: at a hold, save `wrist_hold_views` and a close single `wrist_look`, with
       the person's judgment of where the object really is (or the head's depth), and freeze DA3's depth, the poses
       and the expected contacts from them.
+    - **DA3 fails on plain white objects, from one wrist view or two (ruler2, 2026-11-14).** The bottle came out
+      9-11 cm too far (part of the table) from both wrists, posed, 60 deg apart. Not yet known: whether a second view
+      helps on a textured object (the test that would justify an orthogonal-view tool), and what `wrist_contacts`
+      should fall back to on a plain object (the head's depth saw it well).
 
 ## Rendering
 

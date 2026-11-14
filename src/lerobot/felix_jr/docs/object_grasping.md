@@ -823,6 +823,14 @@ line; the radius held at the measured value unless "free".)
 - So the checkpoint: a short wrist roll -> DA3 posed by the model's joints -> the table's scale -> the primitive ->
   the contacts. (Rolls only: the model's motion was 5% off for the wrist roll, more for the elbow and the wrist flex.)
 
+### The other arm as a second view (ruler2, 2026-11-14): failed on a plain white bottle
+
+The right wrist camera, 60 deg around the bottle from the left one (the most the right arm could reach with the left
+at its hold; [sessions.md](sessions.md), ruler2), and DA3-SMALL on both frames with the model's poses and each
+camera's lens: the table came out right (within 1 cm, though tilted in the grazing right view) and the bottle did not
+(9-11 cm too far in both views: part of the table). Each frame alone was no better. Until a textured object says
+otherwise, a second view does not rescue DA3 on a plain object; the head's depth does (a clean arc of its near face).
+
 ### DA3 in the repo (2026-11-09)
 
 `harness/depth_anything.py` (`DepthAnything.from_hub()`, `.depth(images, world_from_camera, intrinsics)` -> `Depth`):
