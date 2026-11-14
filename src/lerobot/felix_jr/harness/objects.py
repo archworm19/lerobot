@@ -236,6 +236,10 @@ class TableEstimate:
     inlier_mask: np.ndarray  # (H, W) bool, capture pixels that are on the table
     other_h: float | None = None  # a second surface with many points (a shelf?), if any
 
+    def surface_distance(self, points_root: np.ndarray) -> np.ndarray:
+        """Each point's height above the table (m), negative below: a `Surface` (`grasp_candidates`' obstacles)."""
+        return np.atleast_2d(np.asarray(points_root, dtype=np.float64))[:, 2] - self.h
+
     def describe(self) -> str:
         """The height and how much to trust it."""
         text = (

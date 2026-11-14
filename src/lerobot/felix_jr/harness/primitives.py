@@ -89,16 +89,24 @@ class AntipodalGrasp:
         return f"grasp ({params}): opening {_cm(self.opening)} cm"
 
 
-class Primitive(Protocol):
-    """A shape with a pose in the root frame that generates its own antipodal grasps."""
+class Surface(Protocol):
+    """Something in the scene to keep clear of: its signed distance from points (`grasp_candidates`' obstacles)."""
+
+    def surface_distance(self, points_root: np.ndarray) -> np.ndarray:
+        """Signed distance (m) of each point (N, 3) to the surface: negative inside (or below)."""
+        ...
+
+    def describe(self) -> str:
+        """The surface and where it is, in words and numbers."""
+        ...
+
+
+class Primitive(Surface, Protocol):
+    """A shape with a pose in the root frame that generates its own antipodal grasps: a `Surface` to grasp."""
 
     @property
     def root_from_obj(self) -> np.ndarray:
         """(4, 4): the shape's own axes and origin in the root frame."""
-        ...
-
-    def surface_distance(self, points_root: np.ndarray) -> np.ndarray:
-        """Signed distance (m) of each point (N, 3) to the surface: negative inside."""
         ...
 
     def antipodal_grasps(
@@ -107,9 +115,21 @@ class Primitive(Protocol):
         """The family's grasps on a grid, within `where`, no wider than `max_opening`."""
         ...
 
+
+@dataclass(frozen=True)
+class HorizontalPlane:
+    """A level plane at height `z` (root frame), e.g. a table measured another way than its `TableEstimate`."""
+
+    z: float
+    label: str = "the table"
+
+    def surface_distance(self, points_root: np.ndarray) -> np.ndarray:
+        """Each point's height above the plane (m): negative below it."""
+        return np.atleast_2d(np.asarray(points_root, dtype=np.float64))[:, 2] - self.z
+
     def describe(self) -> str:
-        """The shape and where it is, in words and numbers."""
-        ...
+        """The plane's height."""
+        return f"{self.label}: level, at z = {100 * self.z:.1f} cm"
 
 
 @dataclass(frozen=True, eq=False)

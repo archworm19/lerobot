@@ -282,3 +282,63 @@ def test_settings_are_the_callers(model):
     assert "approach 0.01" in narrow.describe() and "approach 45" in loose.describe()
     for c in loose.candidates:
         assert c.grasp.ok and max(c.grasp.rotation_error_deg) <= 45.0
+
+
+def test_the_wrist_camera_is_kept_off_the_table():
+    """With a wrist camera's pose (the current calibration), every candidate keeps it `camera_clearance` from the
+    obstacles (by default the target's lower end as a level table), says how far, and a clearance nothing meets
+    rejects them all at that stage."""
+    from lerobot.felix_jr.harness import api
+    from lerobot.felix_jr.harness.grasping import wrist_camera_position
+
+    with_camera = XleRobotModel.load(api.MODEL)
+    where = {"t": (0.04, 0.07), "psi": (0.0, 45.0)}
+    found = grasp_candidates(JAR, with_camera, BOWL1_CAPTURE, arms=("right",), where=where)
+    table_z = JAR.bottom_root[2]
+    assert found.candidates
+    for c in found.candidates:
+        assert c.camera_clearance_m >= GraspSettings().camera_clearance
+        lowest = min(wrist_camera_position(with_camera, "right", s)[2] for s in (c.attack, c.grasp))
+        assert c.camera_clearance_m == pytest.approx(lowest - table_z)
+        assert "the wrist camera" in c.describe()
+    nothing = grasp_candidates(
+        JAR,
+        with_camera,
+        BOWL1_CAPTURE,
+        arms=("right",),
+        where=where,
+        settings=GraspSettings(camera_clearance=1.0),
+    )
+    assert nothing.passed == 0
+    assert "the wrist camera too near an obstacle" in nothing.rejected_by_reason()
+
+
+def test_obstacles_are_surfaces_and_each_counts():
+    """A table estimate and a level plane are `Surface`s; an obstacle the camera passes rejects what passed without it."""
+    from lerobot.felix_jr.harness import api
+    from lerobot.felix_jr.harness.objects import TableEstimate
+    from lerobot.felix_jr.harness.primitives import HorizontalPlane
+
+    points = np.array([[0.0, 0.0, 0.80], [0.1, 0.2, 0.70]])
+    table = TableEstimate(BOWL1_CAPTURE, 0.75, 100, 0.002, 1.0, np.zeros((2, 2), bool))
+    np.testing.assert_allclose(table.surface_distance(points), [0.05, -0.05])
+    np.testing.assert_allclose(HorizontalPlane(0.75).surface_distance(points), [0.05, -0.05])
+
+    with_camera = XleRobotModel.load(api.MODEL)
+    where = {"t": (0.04, 0.07), "psi": (0.0, 45.0)}
+    plain = grasp_candidates(JAR, with_camera, BOWL1_CAPTURE, arms=("right",), where=where)
+    best = plain.candidates[0]
+    from lerobot.felix_jr.harness.grasping import wrist_camera_position
+
+    camera = wrist_camera_position(with_camera, "right", best.attack)
+    in_the_way = Cylinder.upright(camera - np.array([0.0, 0.0, 0.05]), 0.1, 0.02)  # around the camera's spot
+    blocked = grasp_candidates(
+        JAR,
+        with_camera,
+        BOWL1_CAPTURE,
+        arms=("right",),
+        where=where,
+        obstacles=[HorizontalPlane(JAR.bottom_root[2]), in_the_way],
+    )
+    assert blocked.passed < plain.passed
+    assert all(c.camera_clearance_m >= GraspSettings().camera_clearance for c in blocked.candidates)

@@ -584,6 +584,7 @@ def grasp_candidates(
     where: Mapping[str, Sequence[float]] | None = None,
     n: int = 5,
     part: str | None = None,
+    obstacles: Sequence[Any] | None = None,
     **settings: Any,
 ) -> _grasping.GraspCandidates:
     """The best grasps of `target` (from `fit_cylinder`), ranked and named A, B, ...: you choose one by name.
@@ -601,12 +602,20 @@ def grasp_candidates(
     `**settings` change what is assumed (`GraspSettings`, printed with the result): `rotation_bounds_deg` (how far
     the arm may turn off the exact grasp, about the closing line, the approach, the hinge; default 45 each: narrow
     the approach for a slippery object), `position_bound_m`, `rank_step_deg`, `margin` (the fixed jaw's clearance,
-    m), `attack` (m). Whether the grasp is seen is not checked: judge it at the hold. Draw them with `render`. Nothing
-    moves.
+    m), `attack` (m), `camera_clearance` (m: the wrist camera's optics from every obstacle at the attack point and the
+    grasp, default 4 cm). `obstacles`: what the wrist camera must keep clear of: `TableEstimate`s (`table_height`) and
+    objects (`fit_cylinder`: all their parts), e.g. the target's neighbors; by default the best table estimate you have
+    (the most points; the table does not move, so an older one serves), else a level plane at the target's lower end.
+    Whether the grasp is seen is not checked: judge it at the hold. Draw them with `render`. Nothing moves.
     """
     _fresh(h, capture, "the capture")
     _fresh(h, target, "the object")
     ranges = {k: (float(v[0]), float(v[1])) for k, v in (where or {}).items()}
+    if obstacles is None:
+        tables = [node.obj for node in h.ws.nodes.values() if isinstance(node.obj, TableEstimate)]
+        surfaces = [max(tables, key=lambda t: t.n_inliers)] if tables else None
+    else:
+        surfaces = [part for o in obstacles for part in (o.parts.values() if isinstance(o, Object) else (o,))]
     return _grasping.grasp_candidates(
         target,
         h.model,
@@ -616,6 +625,7 @@ def grasp_candidates(
         n=n,
         part=part,
         settings=_settings(settings),
+        obstacles=surfaces,
     )
 
 

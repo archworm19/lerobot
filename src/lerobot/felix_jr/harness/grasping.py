@@ -17,6 +17,10 @@ recorded with the reason (`Rejected`), and each stage is timed (`GraspCandidates
 - **attack point**, then **grasp:** the arm reaches them (`ArmIK.solve_frame`), the grasp from the attack point's
   joints, so the move in has no joint jump. The solve prefers the exact antipodal pose (`ROTATION_SCALES_DEG`: the
   closing line kept square to the object most); what it accepts is the settings' bounds, generous by default.
+- **wrist camera:** its optics `camera_clearance` (4 cm) from every obstacle (`Surface`s: the table's
+  `TableEstimate`, other objects; without any, a level plane at the target's lower end) at the attack point and the
+  grasp, through the model (`wrist_camera_position`). With the gripper upside down the camera hangs ~5 cm below the
+  pinch point: ruler1 put it on the table. Not checked without the camera's pose on the gripper.
 
 Whether the grasp is seen is not checked here: the head camera, behind the gripper, could not judge it (bowl3, bowl4),
 and the wrist cameras will (`docs/object_grasping.md`, section 6).
@@ -43,12 +47,16 @@ import numpy as np
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 
 from .objects import Capture, Object, Poses, angles_of
-from .primitives import AntipodalGrasp, Primitive, Ranges, Spacing
+from .primitives import AntipodalGrasp, HorizontalPlane, Primitive, Ranges, Spacing, Surface
 from .reach import OPEN_CLEARANCE_M, POSITION_TOL_M, ROLL_TOL_DEG, SQUEEZE_M, ArmIK, FrameSolution
 
 SAG_LIFT_M = 0.01  # grasps aimed this much higher than the object (`GraspSettings.sag_lift`)
 ATTACK_M = 0.05  # the attack point: this far back along the approach from the grasp (`protocols.md`, rule 1)
 MARGIN_M = 0.008  # the fixed jaw this far clear of its contact (bowl1: 0.8-1.3 cm, every grasp landed)
+# the wrist camera's optics at least this far above the table at the attack point and the grasp: its housing (~2 cm
+# about them), the sag (~1 cm) and 1 cm to spare. ruler1 (2026-11-14): a grasp with the gripper upside down held at
+# its attack point with the camera 2.3 cm up, and the camera hit the table
+CAMERA_CLEARANCE_M = 0.04
 MIN_TIP_APART_M = 1e-3  # the tip-to-tip direction of jaws this little apart, for a grasp of no opening
 AXIS_NAMES = ("closing line", "approach", "hinge")  # the grasp's axes (`ClawTarget.axes_root`)
 # the solve's preferences: how much a turn about each axis costs (a turn of its scale costs as much as a position error
@@ -56,7 +64,7 @@ AXIS_NAMES = ("closing line", "approach", "hinge")  # the grasp's axes (`ClawTar
 # approach (tilts the closing line off the object's normal: bowl1's jar at roll -60 the worst), the hinge (slides the
 # contacts along the approach). Not what is accepted: `GraspSettings.rotation_bounds_deg`.
 ROTATION_SCALES_DEG = (20.0, 5.0, 10.0)
-STAGES = ("jaws", "attack point", "grasp")  # in order: cheap first, each after its needs
+STAGES = ("jaws", "attack point", "grasp", "wrist camera")  # in order: cheap first, each after its needs
 
 
 def _cm(value: float) -> str:
@@ -86,6 +94,8 @@ class GraspSettings:
     # elbow stopping 1.2-1.3 deg short under load), and the errors are not alike: too high grips higher on the
     # object, too low hits what it stands on
     sag_lift: float = SAG_LIFT_M
+    # the wrist camera's optics this far from every obstacle, at least
+    camera_clearance: float = CAMERA_CLEARANCE_M
 
     def describe(self) -> str:
         """The settings in a line."""
@@ -96,7 +106,7 @@ class GraspSettings:
             f"accepted: turns up to ({bounds}) deg, the grasp point within {_cm(self.position_bound_m)} cm; "
             f"ranked by the antipodal error in {self.rank_step_deg:g} deg steps, then the joint margin; fixed jaw "
             f"{_cm(self.margin)} cm clear, attack point {_cm(self.attack)} cm back, aimed {_cm(self.sag_lift)} cm high "
-            "against the arm's sag"
+            f"against the arm's sag; the wrist camera {_cm(self.camera_clearance)} cm from every obstacle at least"
         )
 
 
@@ -224,6 +234,8 @@ class GraspCandidate:
     limit_margin_deg: float  # the closest any joint comes to its bound, over both poses
     cost: float  # the solves' summed squared residuals, in their scales: the last tie-break
     settings: GraspSettings = field(default_factory=GraspSettings)
+    # the wrist camera's optics from the nearest obstacle, over both poses (nan: not checked)
+    camera_clearance_m: float = float("nan")
 
     @property
     def antipodal_error_deg(self) -> float:
@@ -250,6 +262,11 @@ class GraspCandidate:
             f"approach {approach:.0f}, about the hinge {hinge:.0f}), approach tilted {closing:.0f} deg; joints >= "
             f"{self.limit_margin_deg:.0f} deg from their bounds; off the target by "
             f"{_cm(self.grasp.position_error_m)} cm"
+            + (
+                f"; the wrist camera {_cm(self.camera_clearance_m)} cm from the nearest obstacle"
+                if np.isfinite(self.camera_clearance_m)
+                else ""
+            )
         )
 
 
@@ -389,6 +406,14 @@ def _shifted(claw: ClawTarget, offset_root: np.ndarray) -> ClawTarget:
     return replace(claw, root_from_pinch=pinch, root_from_attack=attack)
 
 
+def wrist_camera_position(model: XleRobotModel, arm: str, solution: FrameSolution) -> np.ndarray | None:
+    """The wrist camera's optics (root frame, m) at a solve's joints; None without its pose on the gripper."""
+    camera = model.wrist_cameras.get(arm)
+    if camera is None or camera.gripper_from_camera is None:
+        return None
+    return model.wrist_camera_pose(arm, model.joint_vector({arm: dict(solution.joints)}))[:3, 3]
+
+
 def _evaluate(
     model: XleRobotModel,
     claw: ClawTarget,
@@ -396,6 +421,7 @@ def _evaluate(
     settings: GraspSettings,
     timed: _Timer,
     init: np.ndarray | None = None,
+    obstacles: Sequence[Surface] = (),
 ) -> GraspCandidate | Rejected:
     """One claw target through the filters after the jaws (`STAGES`): a candidate, or why it is rejected."""
     grasp, arm, fixed_side = claw.grasp, claw.arm, claw.fixed_side
@@ -413,13 +439,35 @@ def _evaluate(
     if reason is not None:
         return Rejected(grasp, arm, fixed_side, "grasp", reason, claw, at_attack, at_grasp)
 
+    start = time.perf_counter()
+    positions = [wrist_camera_position(model, arm, s) for s in (at_attack, at_grasp)]
+    clearance, nearest = float("nan"), None
+    if obstacles and all(p is not None for p in positions):
+        points = np.array(positions)
+        distances = [float(np.min(o.surface_distance(points))) for o in obstacles]
+        k = int(np.argmin(distances))
+        clearance, nearest = distances[k], obstacles[k]
+    timed("wrist camera", start)
+    if clearance < settings.camera_clearance:  # (False when unknown: nan)
+        return Rejected(
+            grasp,
+            arm,
+            fixed_side,
+            "wrist camera",
+            "the wrist camera too near an obstacle",
+            claw,
+            at_attack,
+            at_grasp,
+            f"{_cm(clearance)} cm from {nearest.describe() if nearest is not None else 'it'}",
+        )
+
     cost = sum(
         (s.position_error_m / POSITION_TOL_M) ** 2
         + float(np.sum((np.asarray(s.rotation_error_deg) / np.asarray(ROTATION_SCALES_DEG)) ** 2))
         for s in (at_attack, at_grasp)
     )
     return GraspCandidate(
-        "", claw, at_attack, at_grasp, _limit_margin_deg(ik, at_attack, at_grasp), cost, settings
+        "", claw, at_attack, at_grasp, _limit_margin_deg(ik, at_attack, at_grasp), cost, settings, clearance
     )
 
 
@@ -438,16 +486,23 @@ def grasp_candidates(
     n: int = 5,
     part: str | None = None,
     settings: GraspSettings | None = None,
+    obstacles: Sequence[Surface] | None = None,
 ) -> GraspCandidates:
     """Generate -> claw -> filters -> rank (`docs/object_grasping.md`, section 3; the stages: the module docstring).
 
     `target` is an `Object` (grasped by its `part`: the only one if not given) or a primitive: only what may be
     grasped. For each of its grasps in `where`, each arm and each contact on the fixed jaw. The attack point is solved
     from the arm's pose in `capture`, the grasp from the attack point's joints. The best `n` are named A, B, ...; every rejected one is kept, with its stage.
+    `obstacles`: what the wrist camera keeps `camera_clearance` from (the table first); None: a level plane at the
+    target's lower end (it stands on the table).
     """
     settings = GraspSettings() if settings is None else settings
     primitive = target.part(part) if isinstance(target, Object) else target
     grasps = primitive.antipodal_grasps(where, spacing)
+    if obstacles is None:  # the target stands on the table: a level plane at its lower end
+        obstacles = []
+        if hasattr(primitive, "bottom_root") and hasattr(primitive, "top_root"):
+            obstacles = [HorizontalPlane(float(min(primitive.bottom_root[2], primitive.top_root[2])))]
     rejected: list[Rejected] = []
     passed: list[GraspCandidate] = []
     timed = _Timer()
@@ -472,7 +527,9 @@ def grasp_candidates(
                     iks[grasp.opening] = ArmIK(
                         model, arm, capture.arms, capture.head_ticks, grasp.opening, settings.margin
                     )
-                result = _evaluate(model, claw, iks[grasp.opening], settings, timed)
+                result = _evaluate(
+                    model, claw, iks[grasp.opening], settings, timed, obstacles=tuple(obstacles)
+                )
                 if isinstance(result, GraspCandidate):
                     passed.append(result)
                 else:
