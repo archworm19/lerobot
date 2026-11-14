@@ -17,7 +17,10 @@ recorded with the reason (`Rejected`), and each stage is timed (`GraspCandidates
 - **attack point**, then **grasp:** the arm reaches them (`ArmIK.solve_frame`), the grasp from the attack point's
   joints, so the move in has no joint jump. The solve prefers the exact antipodal pose (`ROTATION_SCALES_DEG`: the
   closing line kept square to the object most); what it accepts is the settings' bounds, generous by default.
-- **wrist camera:** its optics `camera_clearance` (4 cm) from every obstacle (`Surface`s: the table's
+- **joints:** every joint `min_joint_margin_deg` (15) from its bound at the attack point and the grasp. Ranked by
+  the approach's preference alone, a cylinder's level grasp won with a joint at its stop (bowl1's jar; on the robot,
+  ruler2's level approaches were only reachable that way).
+- **wrist camera:** its optics `camera_clearance` (8 cm) from every obstacle (`Surface`s: the table's
   `TableEstimate`, other objects; without any, a level plane at the target's lower end) at the attack point and the
   grasp, through the model (`wrist_camera_position`). With the gripper upside down the camera hangs ~5 cm below the
   pinch point: ruler1 put it on the table. Not checked without the camera's pose on the gripper.
@@ -58,6 +61,7 @@ MARGIN_M = 0.008  # the fixed jaw this far clear of its contact (bowl1: 0.8-1.3 
 # its attack point with the camera 2.3 cm up, and the camera hit the table; 4 cm then let an upside-down grasp pass
 # at 4.3 cm (ruler2)
 CAMERA_CLEARANCE_M = 0.08
+MIN_JOINT_MARGIN_DEG = 15.0  # every joint this far from its bound, at the attack point and the grasp
 MIN_TIP_APART_M = 1e-3  # the tip-to-tip direction of jaws this little apart, for a grasp of no opening
 AXIS_NAMES = ("closing line", "approach", "hinge")  # the grasp's axes (`ClawTarget.axes_root`)
 # the solve's preferences: how much a turn about each axis costs (a turn of its scale costs as much as a position error
@@ -65,7 +69,13 @@ AXIS_NAMES = ("closing line", "approach", "hinge")  # the grasp's axes (`ClawTar
 # approach (tilts the closing line off the object's normal: bowl1's jar at roll -60 the worst), the hinge (slides the
 # contacts along the approach). Not what is accepted: `GraspSettings.rotation_bounds_deg`.
 ROTATION_SCALES_DEG = (20.0, 5.0, 10.0)
-STAGES = ("jaws", "attack point", "grasp", "wrist camera")  # in order: cheap first, each after its needs
+STAGES = (
+    "jaws",
+    "attack point",
+    "grasp",
+    "joints",
+    "wrist camera",
+)  # in order: cheap first, each after its needs
 
 
 def _cm(value: float) -> str:
@@ -97,6 +107,8 @@ class GraspSettings:
     sag_lift: float = SAG_LIFT_M
     # the wrist camera's optics this far from every obstacle, at least
     camera_clearance: float = CAMERA_CLEARANCE_M
+    # every joint this far from its bound at the attack point and the grasp (deg)
+    min_joint_margin_deg: float = MIN_JOINT_MARGIN_DEG
     # rank by the target's `approach_preference` (after how antipodal; e.g. a cylinder from the side), in the steps of
     # `rank_step_deg`; False: not at all
     prefer_approach: bool = True
@@ -112,7 +124,8 @@ class GraspSettings:
             + ("then the approach's preference in the same steps, " if self.prefer_approach else "")
             + "then the joint margin; fixed jaw "
             f"{_cm(self.margin)} cm clear, attack point {_cm(self.attack)} cm back, aimed {_cm(self.sag_lift)} cm high "
-            f"against the arm's sag; the wrist camera {_cm(self.camera_clearance)} cm from every obstacle at least"
+            f"against the arm's sag; the joints {self.min_joint_margin_deg:g} deg from their bounds and the wrist camera "
+            f"{_cm(self.camera_clearance)} cm from every obstacle at least"
         )
 
 
@@ -456,6 +469,22 @@ def _evaluate(
         return Rejected(grasp, arm, fixed_side, "grasp", reason, claw, at_attack, at_grasp)
 
     start = time.perf_counter()
+    limit_margin = _limit_margin_deg(ik, at_attack, at_grasp)
+    timed("joints", start)
+    if limit_margin < settings.min_joint_margin_deg:
+        return Rejected(
+            grasp,
+            arm,
+            fixed_side,
+            "joints",
+            "a joint too near its bound",
+            claw,
+            at_attack,
+            at_grasp,
+            f"{limit_margin:.0f} deg",
+        )
+
+    start = time.perf_counter()
     positions = [wrist_camera_position(model, arm, s) for s in (at_attack, at_grasp)]
     clearance, nearest = float("nan"), None
     if obstacles and all(p is not None for p in positions):
@@ -488,7 +517,7 @@ def _evaluate(
         claw,
         at_attack,
         at_grasp,
-        _limit_margin_deg(ik, at_attack, at_grasp),
+        limit_margin,
         cost,
         settings,
         clearance,

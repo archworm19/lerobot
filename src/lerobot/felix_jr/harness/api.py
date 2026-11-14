@@ -60,6 +60,7 @@ from .objects import (
     TableEstimate,
     View,
 )
+from .primitives import Surface
 from .render import contact_sheet as _contact_sheet, render as _render  # the package re-exports `render`
 from .sfm import SfmResult
 from .workspace import Workspace
@@ -624,7 +625,7 @@ def grasp_candidates(
     ranges = {k: (float(v[0]), float(v[1])) for k, v in (where or {}).items()}
     if obstacles is None:
         tables = [node.obj for node in h.ws.nodes.values() if isinstance(node.obj, TableEstimate)]
-        surfaces = [max(tables, key=lambda t: t.n_inliers)] if tables else None
+        surfaces: list[Surface] | None = [max(tables, key=lambda t: t.n_inliers)] if tables else None
     else:
         surfaces = [part for o in obstacles for part in (o.parts.values() if isinstance(o, Object) else (o,))]
     return _grasping.grasp_candidates(

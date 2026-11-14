@@ -377,9 +377,10 @@ and occlusion scores, the clearance and swept move-in checks) were the prototype
   the most antipodal first, and the model narrows `GraspSettings.rotation_bounds_deg` for a slippery one.
 - **Ends that are not free.** "From level or above" (pen2's book) could be said as a fact about the object instead:
   a cylinder's end that is buried or attached, ruling out approaches from it. Try if the model finds `where` awkward.
-- **Joints at their bounds rank high when antipodal.** On the jar, grasps with a joint at its bound (pitch 0) are in
-  the top 8, after the ones that worked, inside the first 5 deg step. If they reach the top in a session, a bound on the
-  joint margin (in `GraspSettings`) is the setting to add.
+- **Joints at their bounds** (done, 2026-11-14). Once the approach's preference ranked before the joint margin, the
+  jar's level grasps (pitch 0) came first with a joint at its bound, as ruler2's level approaches did on the robot.
+  A filter stage now rejects them: every joint `GraspSettings.min_joint_margin_deg` (15) from its bound at the attack
+  point and the grasp; the jar's best is now pitch -15 with 30 deg to spare (bowl1's pitch -40 is still found).
 - **Ranking beyond antipodal and the joint margin.** To add when a session shows the need: the arm's expected sag
   (it grows with a level reach: `open_issues.md` 16), depth in the jaws.
 - **The camera's pose.** The checks use the capture's head pose; rule 1 looks from the `look_at` pose at the attack

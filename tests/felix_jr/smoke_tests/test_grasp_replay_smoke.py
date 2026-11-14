@@ -8,12 +8,13 @@ fixed jaw 0.8 cm clear. Checked, with no robot and no capture, only the cylinder
 1. The best candidates close level across the jar: the roll -60 grasp is not in a cylinder's family, and the
    ranking puts the most antipodal first (generous bounds accept more: they rank lower).
 2. The grasp that worked is found as it was planned, with nothing said about pitch, heading or roll.
-3. Ranked by the antipodal error (5 deg steps), then the joint margin, the best is the grasp that worked (pitch -44,
-   antipodal within 2 deg, every joint >= 50 deg from its bound).
+3. Ranked by the antipodal error (5 deg steps), then the approach's preference (a cylinder: from the side), then the
+   joint margin, with every joint 15 deg from its bound (`GraspSettings.min_joint_margin_deg`): the best is lower
+   than the grasp that worked (pitch -15, not -40: the level grasps put a joint at its bound) and keeps 30 deg.
 4. Every stage is timed.
 5. The best, planned (`plan_pick`), runs through the harness's execution as it is (`prepare_execution`): stage,
-   attack point, grasp, lift, every step reached with no joint jump; its attack point and grasp within 1 cm of
-   bowl1's.
+   attack point, grasp, lift, every step reached with no joint jump; its grasp within 1 cm of bowl1's across, on the lid
+   (bowl1's was 1.3 cm lower on it; the attack point is back along a lower approach).
 
 The numbers are bowl1's recorded objects (`harness/scratch/sessions/bowl1`, gitignored), copied here.
 """
@@ -65,6 +66,7 @@ CAPTURE = SimpleNamespace(  # bowl1's capture1: the arms at rest
     head_ticks={"head_neck": 1256, "head_eyes": 1329},
 )
 WORKED = (-40.0, -129.0, 0.0)  # pitch, heading, roll of the pick that landed
+BEST_PITCH = -15.0  # the best now: the lowest approach whose joints keep their margin
 
 
 def _wrap(deg: float) -> float:
@@ -111,18 +113,19 @@ def test_the_grasp_that_worked_is_found(found):
 
 
 def test_the_best_keeps_its_joints_clear(found):
-    assert found.candidates[0].limit_margin_deg >= 40.0
+    assert all(c.limit_margin_deg >= found.settings.min_joint_margin_deg for c in found.candidates)
+    assert found.candidates[0].limit_margin_deg >= 25.0
 
 
-def test_the_best_is_like_the_grasp_that_worked(found):
+def test_the_best_is_from_the_side_as_far_as_the_joints_allow(found):
     best = found.candidates[0]
     pitch, heading, roll = angles_of(best.grasp.root_from_pinch[:3, :3], WORKED[1])
     level = min(_wrap(roll - WORKED[2]), _wrap(roll - WORKED[2] - 180.0))  # either jaw on either side
-    # 6.5: bowl1 aimed the pinch point (one face of the fingers); the aim is now their middle, half a thickness along
-    # the hinge (`JAW_THICKNESS_M`, 2026-11-08), which turns the solve slightly (the roll 6.0 deg off bowl1's)
-    assert max(abs(pitch - WORKED[0]), _wrap(heading - WORKED[1]), level) <= 6.5, best.describe()
-    low = [c for c in found.candidates if c.grasp.root_from_pinch[2, 2] > -0.3]  # pitch above about -17
-    assert all(c.limit_margin_deg < best.limit_margin_deg for c in low)
+    # 6.5: the roll came out 6.0 deg off bowl1's (`JAW_THICKNESS_M`: the aim is the fingers' middle, 2026-11-08)
+    assert max(abs(pitch - BEST_PITCH), _wrap(heading - WORKED[1]), level) <= 6.5, best.describe()
+    # nothing more level made it: the level grasps are rejected at the joints
+    assert all(c.approach_preference_deg >= best.approach_preference_deg - 1e-6 for c in found.candidates)
+    assert any(r.stage == "joints" for r in found.rejected)
 
 
 def test_the_stages_are_timed(found):
@@ -140,5 +143,8 @@ def test_the_best_is_planned_and_runs_through_the_execution(model, found):
     # bowl1's own plan, as executed: the attack point (pick.back) and the grasp aim (pick), root frame; aimed
     # SAG_LIFT_M higher now (bowl6), which bowl1's was not
     high = np.array([0.0, 0.0, SAG_LIFT_M])
-    np.testing.assert_allclose(pick.points[1] - high, [-0.329, -0.083, 0.806], atol=0.01)
-    np.testing.assert_allclose(pick.points[2] - high, [-0.348, -0.107, 0.780], atol=0.01)
+    aim = pick.points[2] - high
+    np.testing.assert_allclose(aim[:2], [-0.348, -0.107], atol=0.01)
+    assert (
+        JAR.bottom_root[2] + 0.059 - 1e-6 <= aim[2] <= JAR.bottom_root[2] + 0.079 + 1e-6
+    )  # on the lid, as asked

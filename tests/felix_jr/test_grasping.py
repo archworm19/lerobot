@@ -346,6 +346,36 @@ def test_the_wrist_camera_is_kept_off_the_table():
     assert "the wrist camera too near an obstacle" in nothing.rejected_by_reason()
 
 
+def test_the_joints_keep_a_margin_from_their_bounds(model):
+    """Every candidate keeps its joints `min_joint_margin_deg` from their bounds; what does not is rejected at that stage
+    with its margin, and a margin nothing meets rejects them all there."""
+    where = {"t": (0.059, 0.079), "psi": (0.0, 90.0)}
+    found = grasp_candidates(JAR, model, BOWL1_CAPTURE, arms=("right",), where=where, n=50)
+    assert found.candidates
+    assert all(c.limit_margin_deg >= GraspSettings().min_joint_margin_deg for c in found.candidates)
+    near = [r for r in found.rejected if r.stage == "joints"]
+    assert near and all(r.reason == "a joint too near its bound" and r.detail.endswith(" deg") for r in near)
+    loose = grasp_candidates(
+        JAR,
+        model,
+        BOWL1_CAPTURE,
+        arms=("right",),
+        where=where,
+        n=50,
+        settings=GraspSettings(min_joint_margin_deg=0.0),
+    )
+    assert loose.passed == found.passed + len(near)
+    nothing = grasp_candidates(
+        JAR,
+        model,
+        BOWL1_CAPTURE,
+        arms=("right",),
+        where=where,
+        settings=GraspSettings(min_joint_margin_deg=180.0),
+    )
+    assert nothing.passed == 0 and "a joint too near its bound" in nothing.rejected_by_reason()
+
+
 def test_obstacles_are_surfaces_and_each_counts():
     """A table estimate and a level plane are `Surface`s; an obstacle the camera passes rejects what passed without it."""
     from lerobot.felix_jr.harness import api
