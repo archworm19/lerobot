@@ -249,3 +249,59 @@ def test_the_preview_check_holds_the_fits_limits():
     assert sweep.preview_check(good) == []
     assert len(sweep.preview_check(sweep.FingerFit(30.0, 38.0, None, None, None, 0.5))) == 2
     assert "px" in sweep.preview_check(sweep.FingerFit(30.0, 38.0, 40.0, 12.0, 12.0, 0.85))[0]
+
+
+def test_saved_sweeps_of_an_arm_are_pooled(tmp_path):
+    """Two folders of the left arm (an older one saved before sweeps were numbered) and one of the right: the left's
+    pooled into a new folder, its sweeps numbered one after the other; the right's fitted where it is."""
+    image = np.zeros((4, 4, 3), np.uint8)
+    old, new, right = tmp_path / "old", tmp_path / "new", tmp_path / "right"
+    for folder in (old, new, right):
+        folder.mkdir()
+    np.savez_compressed(
+        old / "frame_00.npz", color=image, pose='{"gripper.pos": 10.0}', arm="left"
+    )  # (no sweep)
+    for i, index in enumerate((0, 0, 1)):
+        sweep.save_frame(new, i, sweep.SweepFrame("left", {"gripper.pos": 10.0 * i}, image, index))
+    sweep.save_frame(right, 0, sweep.SweepFrame("right", {"gripper.pos": 10.0}, image))
+    groups = sweep.pooled([old, new, right], tmp_path / "out", "now")
+    assert [(arm, folder.name) for arm, folder, _ in groups] == [
+        ("left", "left_pooled_now"),
+        ("right", "right"),
+    ]
+    assert [f.sweep for f in groups[0][2]] == [0, 1, 1, 2]
+
+
+def test_each_sweeps_hinge_and_the_fixed_tip_per_sweep(model, tmp_path):
+    """Two sweeps of the same drawn gripper: the pooled fit, and each sweep's own hinge, near the truth; the fixed
+    finger's tip found where the model puts it in both. The second sweep's frames shifted 6 px (the camera moved on its
+    mount): the fixed tips 6 px apart, past `CAMERA_MOVED_PX`."""
+    truth = sweep.corrected_model(model, "left", np.array([-0.0038, 0.0, -0.0008]), 0.0, -12.0, 4.0)
+    drawn = sweep.FingerRenderer(truth, "left")
+    images = {}
+    for index in (0, 1):
+        for pos in (10.0, 20.0, 30.0, 40.0, 50.0):
+            pose = dict(RULER2_POSE, **{"gripper.pos": pos})
+            images[index, pos] = (pose, _frame(drawn, pose, truth.opening_deg("left", pos)))
+    drawn.close()
+
+    def fitted(shift_px: int):
+        fitter = sweep.Fitter(truth, "left", tmp_path, window=False)
+        for (index, _), (pose, image) in images.items():
+            moved = np.roll(image, shift_px * index, axis=0)
+            frame = sweep.SweepFrame("left", pose, moved, index)
+            fit, seen = sweep.fit_frame(fitter.fingers, frame, moved)
+            fitter.seen.append((frame, seen, fit))
+        return fitter.seen
+
+    still = fitted(0)
+    geometry = sweep.fit_geometry(model, "left", still)
+    assert geometry is not None and len(geometry.sweep_hinges_mm) == 2
+    for hinge in geometry.sweep_hinges_mm:
+        np.testing.assert_allclose(hinge, (-3.8, 0.0, -0.8), atol=0.8)
+    tips = sweep.fixed_tips(truth, "left", still)
+    assert set(tips) == {0, 1}
+    assert all(np.linalg.norm(found - expected) < 2.5 for found, expected in tips.values())
+    moved = sweep.fixed_tips(truth, "left", fitted(6))
+    report = sweep.report_fixed_tips(moved, "left")
+    assert report["spread_px"] == pytest.approx(6.0, abs=1.0) and report["spread_px"] > sweep.CAMERA_MOVED_PX

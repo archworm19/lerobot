@@ -148,7 +148,10 @@ servo's (its calibrated range); only `pos_closed`, where the tips meet, was fitt
   and +2.0 deg about their tips (`GripperMap.fixed_finger_mount_deg`; their outlines' agreement 0.74 -> 0.93, 0.79
   -> 0.88). Only the turn about the hinge's axis is fitted: the wrist camera sees the fingers' outlines in that plane;
   their offset along the hinge's axis and their tilt out of it are the SO-101's design (the head's views could find
-  them). The hinge also moves the harness's moving tip (`moving_tip`): its radius
+  them). **The left camera moved on its mount** between the three left sweeps (the fixed finger's tip 6 px over an
+  hour: `hardware_risks.md`), which the hinge took up (-3.5 to +1.1 mm); pooled, one hinge missed the tips by 3.2 px
+  and was refused. Both mounts tightened; `gripper_sweep` now reports the fixed tip per sweep, and `--repeats N` /
+  several `--refit` folders pool an arm's sweeps into one fit. The hinge also moves the harness's moving tip (`moving_tip`): its radius
   about the hinge was 83 mm in the model, ~87 by the tips' circle (85.6 by `gripper_step`'s calipers).
 - **Not calibrated: the contact pads** (next step 2): design geometry, the same for both arms, constants in
   `sim2real/robot.py` on the jaw bodies, checked with `view --collision`.
@@ -162,4 +165,5 @@ servo's (its calibrated range); only `pos_closed`, where the tips meet, was fitt
 3. **A grasp check before any RL:** open, approach a cylinder, close, lift: does it hold, as the real claw holds a
    bottle? Tune the friction, the contacts' softness (`solref`, `solimp`) and the gripper servo's force.
 4. **The grasp environment:** starts near an attack pose (as the head's plan leaves it), the robot's errors
-   randomized; then the teacher.
+   randomized, the wrist camera's pose on the gripper among them (about half a degree, a millimeter or two: the mounts
+   move, `hardware_risks.md`); then the teacher.

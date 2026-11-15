@@ -4,7 +4,9 @@
       tcp://<pi>:5555 --arm left [--positions 0,10,20,30,40,50] [--table-z <m>] [--stay] [--urdf <calibration.urdf>]
       [--out <new calibration.urdf>] [--no-window]
   ... gripper_sweep tcp://<pi>:5555 --arm both --out <new calibration.urdf>   (left, home, then right; one URDF)
-  ... gripper_sweep --refit <sweep folder> [<sweep folder>] [--out ...]   (saved sweeps fitted again; no robot)
+  ... gripper_sweep tcp://<pi>:5555 --arm both --repeats 3 --out <new calibration.urdf>   (3 sweeps per arm, pooled)
+  ... gripper_sweep --refit <sweep folder> [<sweep folder> ...] [--out ...]   (saved sweeps fitted again, no robot;
+      several of an arm pooled into one fit)
 
 The arm goes to its sweep pose (`SWEEP_POSES`: the wrist camera looking down at the table, both fingers in view, the
 gripper well above it), the gripper steps through `--positions` (LeRobot's `gripper.pos`), a wrist frame at each once
@@ -50,7 +52,9 @@ mount, its turn on its jaw about its tip (`GripperMap.finger_mount_deg`), by its
 by more than `OUTLIER_PX` is left out and the fit done again (a misread tip took a hinge to 10 mm before). The sweep is
 fitted again with the corrected model (`corrected_*.png`), and `--out` writes it, a new calibrated URDF (`--urdf` is
 never overwritten), once every arm's fit holds (`MAX_GEOMETRY_RMS_PX`). `--arm both`: the left arm's sweep, the arms
-home, then the right's (it asks before each), both into the one URDF.
+home, then the right's (it asks before each), both into the one URDF. `--repeats N`: N sweeps per arm, the arm back
+where it started and to the pose again between (each sweep arrives anew, as the arm settles: the left hinge moved
+~2 mm between runs), all pooled into the arm's one fit; each sweep's own hinge is reported, the spread.
 
 A window shows each frame as it is fitted: the detected fingers' outline and the moving tip in green, the sim's
 fingers and the model's tip at the fitted opening in orange, at the map's in blue (`--no-window` leaves it out). Each frame, its fit and a contact sheet of all of them are
@@ -112,6 +116,10 @@ MIN_GEOMETRY_FRAMES = 3  # tips seen, at least, to fit the hinge (two coordinate
 MIN_FIXED_AGREEMENT = 0.7  # a frame trusted for the geometry (`trusted`)
 OUTLIER_PX = 6.0  # a tip the fitted geometry misses by more: left out, the fit done again
 ROBUST_SCALE_PX = 2.0  # the hinge's fit: misses past this count less than their square
+CAMERA_MOVED_PX = (
+    3.0  # the fixed finger's tip moved this much between sweeps, or off the model's: the camera may have
+)
+FIXED_BACK_M = 0.04  # the fixed finger's direction in the frame: from this far back along it to its tip
 MAX_GEOMETRY_RMS_PX = 3.0  # the corrected tips' miss, at most, for `--out` to write the fit
 MOUNT_SEARCH_DEG, MOUNT_COARSE_DEG, MOUNT_FINE_DEG = 20.0, 2.0, 0.5  # the finger's mount, searched about 0
 # what the sweep moves, or moves near the table: the gripper's bodies and the camera's
@@ -149,6 +157,7 @@ class SweepFrame:
     arm: str
     pose: dict[str, float]  # LeRobot's readings, the gripper's with them
     color: np.ndarray
+    sweep: int = 0  # which of the arm's sweeps (`--repeats`, or pooled folders)
 
 
 @dataclass
@@ -353,6 +362,7 @@ class Detected:
         np.ndarray, np.ndarray
     ]  # where the colors were learned: the finger's, the table's (`classify`)
     fixed_wood: np.ndarray  # the wood's pixels where the fixed finger could be
+    raw: np.ndarray  # the fingers' pixels before the clean-up (which blunts the tips: `detected_tip`)
 
 
 def fit_frame(fingers: FingerRenderer, frame: SweepFrame, image: np.ndarray) -> tuple[FingerFit, Detected]:
@@ -400,6 +410,7 @@ def fit_frame(fingers: FingerRenderer, frame: SweepFrame, image: np.ndarray) -> 
             wood & moving_region,
             (finger_sample, table_sample),
             wood & fixed_region,
+            raw_colored,
         )
 
     def miss(angle: float) -> float:
@@ -420,6 +431,7 @@ def fit_frame(fingers: FingerRenderer, frame: SweepFrame, image: np.ndarray) -> 
         wood & moving_region,
         (finger_sample, table_sample),
         wood & fixed_region,
+        raw_colored,
     )
     return fit, seen
 
@@ -563,8 +575,8 @@ def table_view(fingers: FingerRenderer, pose: dict[str, float]) -> float:
     return float((ids[rest] == fingers.scene.m.geom("table").id).mean())
 
 
-def sweep(client, arm: str, positions: Sequence[float], on_frame) -> list[SweepFrame]:
-    """Step the gripper through `positions`, a settled frame at each (`on_frame(frame)` as it comes).
+def sweep(client, arm: str, positions: Sequence[float], on_frame, index: int = 0) -> list[SweepFrame]:
+    """Step the gripper through `positions`, a settled frame at each (`on_frame(frame)` as it comes; sweep `index`).
 
     The gripper goes back to where it started, however it ends.
     """
@@ -574,7 +586,7 @@ def sweep(client, arm: str, positions: Sequence[float], on_frame) -> list[SweepF
     try:
         for target in positions:
             client.move_joints({arm_id: {"gripper.pos": float(target)}})
-            frames.append(_settled_frame(client, arm))
+            frames.append(replace(_settled_frame(client, arm), sweep=index))
             on_frame(frames[-1])
         return frames
     finally:
@@ -582,9 +594,13 @@ def sweep(client, arm: str, positions: Sequence[float], on_frame) -> list[SweepF
 
 
 def save_frame(folder: Path, i: int, frame: SweepFrame) -> None:
-    """Save a frame as `frame_<i>.npz` (its image, readings and arm)."""
+    """Save a frame as `frame_<i>.npz` (its image, readings, arm and sweep)."""
     np.savez_compressed(
-        folder / f"frame_{i:02d}.npz", color=frame.color, pose=json.dumps(frame.pose), arm=frame.arm
+        folder / f"frame_{i:02d}.npz",
+        color=frame.color,
+        pose=json.dumps(frame.pose),
+        arm=frame.arm,
+        sweep=frame.sweep,
     )
 
 
@@ -593,7 +609,8 @@ def load_frames(folder: Path) -> list[SweepFrame]:
     frames = []
     for path in sorted(folder.glob("frame_*.npz")):
         data = np.load(path)
-        frames.append(SweepFrame(str(data["arm"]), json.loads(str(data["pose"])), data["color"]))
+        sweep = int(data["sweep"]) if "sweep" in data.files else 0  # (saved before repeats: one sweep)
+        frames.append(SweepFrame(str(data["arm"]), json.loads(str(data["pose"])), data["color"], sweep))
     return frames
 
 
@@ -668,6 +685,9 @@ class GripperGeometry:
     ]  # the fixed finger's mount's score (agreement, mean over the frames)
     used: tuple[float, ...]  # the frames' gripper positions fitted to
     dropped: tuple[str, ...]  # the frames left out, and why
+    sweep_hinges_mm: tuple[
+        tuple[float, float, float], ...
+    ] = ()  # each sweep's own hinge (enough tips), the spread
 
 
 def corrected_model(
@@ -888,8 +908,26 @@ def fit_geometry(
     best = max(scores, key=scores.__getitem__)
     x, y, z = (float(v) * 1000.0 for v in shift)
     used = tuple(fit.gripper_pos for _, _, fit in kept)
+    # each sweep alone: how far its hinge lands from the others' (the pooled fit is all of them at once)
+    sweeps_kept = sorted({frame.sweep for frame, _, _ in kept})
+    sweep_hinges = []
+    for index in sweeps_kept if len(sweeps_kept) > 1 else []:
+        own = [tip for tip, (frame, _, _) in zip(tips, kept, strict=True) if frame.sweep == index]
+        if len(own) >= MIN_GEOMETRY_FRAMES:
+            sx, sy, sz = (float(v) * 1000.0 for v in fit_hinge(model, arm, own)[0])
+            sweep_hinges.append((sx, sy, sz))
     return GripperGeometry(
-        (x, y, z), offset, best, fixed_mount, rms, before, scores, fixed_scores, used, tuple(dropped)
+        (x, y, z),
+        offset,
+        best,
+        fixed_mount,
+        rms,
+        before,
+        scores,
+        fixed_scores,
+        used,
+        tuple(dropped),
+        tuple(sweep_hinges),
     )
 
 
@@ -940,6 +978,11 @@ def report_geometry(geometry: GripperGeometry, model: XleRobotModel, arm: str) -
         f"{geometry.fixed_mount_scores[geometry.fixed_finger_mount_deg]:.2f})"
     )
     print(f"fitted to the frames at gripper.pos {', '.join(f'{p:.1f}' for p in geometry.used)}")
+    if geometry.sweep_hinges_mm:
+        hinges = np.array(geometry.sweep_hinges_mm)
+        spread = np.linalg.norm(hinges - np.array(geometry.hinge_shift_mm), axis=1)
+        each = "; ".join("(" + ", ".join(f"{v:+.1f}" for v in h) + ")" for h in hinges)
+        print(f"each sweep's hinge alone (mm): {each} -- {spread.max():.1f} mm from the pooled one at most")
     for why in geometry.dropped:
         print(f"  left out: {why}")
 
@@ -1032,6 +1075,31 @@ def preview(client, arm: str, fitter: "Fitter", window: bool, ask: Callable[[str
             return True
 
 
+def pooled(folders: Sequence[Path], out_dir: Path, stamp: str) -> list[tuple[str, Path, list[SweepFrame]]]:
+    """Saved sweeps grouped by arm (in the order they come): (arm, folder, frames) each.
+
+    One folder for an arm: fitted again in it. Several: their frames pooled (each folder's sweeps numbered after the
+    one before's) into a new folder, `<arm>_pooled_<stamp>` in `out_dir`, fitted at once (`fit_geometry`).
+    """
+    groups: dict[str, list[tuple[Path, list[SweepFrame]]]] = {}
+    for folder in folders:
+        frames = load_frames(folder)
+        if not frames:
+            raise SystemExit(f"no frames in {folder}")
+        groups.setdefault(frames[0].arm, []).append((folder, frames))
+    out = []
+    for arm, saved in groups.items():
+        if len(saved) == 1:
+            out.append((arm, saved[0][0], saved[0][1]))
+            continue
+        frames, offset = [], 0
+        for _, own in saved:
+            frames += [replace(frame, sweep=frame.sweep + offset) for frame in own]
+            offset += max(frame.sweep for frame in own) + 1
+        out.append((arm, out_dir / f"{arm}_pooled_{stamp}", frames))
+    return out
+
+
 def run_on_robot(client, model: XleRobotModel, arm: str, fitter: "Fitter", args: argparse.Namespace) -> bool:
     """One arm's sweep on the robot (the module docstring), its frames saved and fitted as they come.
 
@@ -1065,8 +1133,9 @@ def run_on_robot(client, model: XleRobotModel, arm: str, fitter: "Fitter", args:
         print(f"The {arm} gripper will step through {positions} and come back; the arm stays where it is.")
     else:
         print(
-            f"The {arm} arm will move to its sweep pose {SWEEP_POSES[arm]}, the gripper step through {positions}, "
-            "and the arms go home at the end."
+            f"The {arm} arm will move to its sweep pose {SWEEP_POSES[arm]}, the gripper step through {positions}"
+            + (f" ({args.repeats} times, the arm back where it started between)" if args.repeats > 1 else "")
+            + ", and the arms go home at the end."
         )
     print("Keep the jaws clear.")
     if input("Enter to start, q to skip: ").strip().lower() == "q":
@@ -1084,8 +1153,75 @@ def run_on_robot(client, model: XleRobotModel, arm: str, fitter: "Fitter", args:
         if not preview(client, arm, fitter, fitter.window):
             print(f"{arm}: stopped at the preview")
             return False
-        sweep(client, arm, positions, on_frame)
+        back = {k: v for k, v in start.items() if k != "gripper.pos"}
+        for index in range(args.repeats):
+            if (
+                index and not args.stay
+            ):  # away and back: each sweep arrives at the pose anew, as the arm settles
+                print(
+                    f"{arm}: sweep {index + 1} of {args.repeats}: back where it started, then to the pose again"
+                )
+                client.move_joints({f"{arm}_arm": back}, max_vel=30.0, max_accel=60.0, timeout=15.0)
+                client.move_joints(
+                    {f"{arm}_arm": SWEEP_POSES[arm]}, max_vel=30.0, max_accel=60.0, timeout=15.0
+                )
+            sweep(client, arm, positions, on_frame, index)
     return True
+
+
+def fixed_tips(
+    model: XleRobotModel, arm: str, seen: Sequence[tuple[SweepFrame, Detected, FingerFit]]
+) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    """Per sweep, the fixed finger's tip as detected and as the model puts it (px, the mean over its open frames).
+
+    Fixed to the gripper as the camera is, it stays put in the wrist frame unless the camera moves on its mount
+    (`docs/hardware_risks.md`). Detected: the far end of the detected fixed finger, along the finger (from a point
+    `FIXED_BACK_M` back from its tip toward it), its corner the wrist camera sees (`FINGER_FIXED_WRIST_TIP_M`).
+    """
+    gripper_map = model.gripper_maps.get(arm)
+    mount = model.moving_jaw(arm, gripper_map.fixed_finger_mount_deg if gripper_map else 0.0)[:3, :3]
+    corner = mount @ robot.FINGER_FIXED_WRIST_TIP_M
+    back = mount @ (corner + np.array([0.0, 0.0, -FIXED_BACK_M]))  # (the pinch z points to the tips)
+    tips: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}
+    for frame, detected, fit in seen:
+        if fit.fitted_deg is None:  # closed: the moving finger lies against it
+            continue
+        q = model.joint_vector({arm: frame.pose})
+        pinch = model.frame_pose(pinch_frame(arm), q)
+        expected = _project(model, arm, q, (pinch @ np.r_[corner, 1.0])[:3])
+        base = _project(model, arm, q, (pinch @ np.r_[back, 1.0])[:3])
+        found = detected_tip(detected.fixed, base, expected, detected.raw)
+        if found is not None:
+            tips.setdefault(frame.sweep, []).append((found, expected))
+    return {
+        k: (np.mean([f for f, _ in v], axis=0), np.mean([e for _, e in v], axis=0)) for k, v in tips.items()
+    }
+
+
+def report_fixed_tips(tips: dict[int, tuple[np.ndarray, np.ndarray]], arm: str) -> dict[str, Any]:
+    """Print each sweep's fixed tip, their spread and their distance from the model's; warn past `CAMERA_MOVED_PX`."""
+    if not tips:
+        return {}
+    found = np.array([tips[k][0] for k in sorted(tips)])
+    expected = np.array([tips[k][1] for k in sorted(tips)])
+    spread = float(np.linalg.norm(found.max(axis=0) - found.min(axis=0)))
+    off = float(np.linalg.norm(found - expected, axis=1).max())
+    each = "; ".join(f"({x:.1f}, {y:.1f})" for x, y in found)
+    print(
+        f"{arm}: the fixed finger's tip in the wrist frame, per sweep: {each} px -- {spread:.1f} px between sweeps, "
+        f"{off:.1f} px from the model's at most"
+    )
+    if spread > CAMERA_MOVED_PX or off > CAMERA_MOVED_PX:
+        print(
+            f"  WARNING: more than {CAMERA_MOVED_PX:g} px: the wrist camera may have moved on its mount "
+            "(docs/hardware_risks.md): check it, and recalibrate the camera"
+        )
+    return {
+        "per_sweep_px": found.tolist(),
+        "model_px": expected.tolist(),
+        "spread_px": spread,
+        "off_model_px": off,
+    }
 
 
 def fit_arm(model: XleRobotModel, arm: str, fitter: "Fitter") -> tuple[dict[str, Any], XleRobotModel | None]:
@@ -1095,6 +1231,7 @@ def fit_arm(model: XleRobotModel, arm: str, fitter: "Fitter") -> tuple[dict[str,
     """
     result = fitter.finish()
     report(result)
+    result["fixed_tip"] = report_fixed_tips(fixed_tips(model, arm, fitter.seen), arm)
     geometry = fit_geometry(model, arm, fitter.seen)
     if geometry is None:
         kept, dropped = trusted(fitter.seen)
@@ -1143,7 +1280,10 @@ def main() -> None:
         type=Path,
         nargs="+",
         default=None,
-        help="fit saved sweeps' frames again (one per arm); no robot",
+        help="fit saved sweeps again, no robot (several of an arm: pooled into one fit)",
+    )
+    parser.add_argument(
+        "--repeats", type=int, default=1, help="sweeps per arm, the arm away and back between"
     )
     parser.add_argument("--table-z", type=float, default=None, help="the table's height (m, root frame)")
     parser.add_argument("--stay", action="store_true", help="sweep where the arm is; only the gripper moves")
@@ -1156,11 +1296,7 @@ def main() -> None:
     stamp = time.strftime("%Y%m%d_%H%M%S")
     sweeps: list[tuple[str, Path, list[SweepFrame] | None]] = []
     if args.refit is not None:
-        for folder in args.refit:
-            frames = load_frames(folder)
-            if not frames:
-                raise SystemExit(f"no frames in {folder}")
-            sweeps.append((frames[0].arm, folder, frames))
+        sweeps = list(pooled(args.refit, args.out_dir or DEFAULT_OUT, stamp))
     else:
         arms = ["left", "right"] if args.arm == "both" else [args.arm]
         sweeps = [(arm, (args.out_dir or DEFAULT_OUT) / f"{arm}_{stamp}", None) for arm in arms]

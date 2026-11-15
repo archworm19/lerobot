@@ -93,6 +93,10 @@ FINGER_MOVING_AXES = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, -1.0], [-1.0, 0.0, 0.
 FINGER_MOVING_WRIST_TIP_M = (
     FINGER_MOVING_AXES @ (np.array(FINGER_TIP_MM) - np.array(FINGER_TIP_FAR_MM)) / 1000.0
 )
+# and the fixed finger's (its other side's corner: its flat side is on the pinch point)
+FINGER_FIXED_WRIST_TIP_M = (
+    FINGER_FIXED_AXES @ (np.array(FINGER_TIP_FAR_MM) - np.array(FINGER_TIP_MM)) / 1000.0
+)
 
 
 def _pos_quat(pose: np.ndarray) -> tuple[list[float], list[float]]:

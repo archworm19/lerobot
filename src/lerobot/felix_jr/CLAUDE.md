@@ -29,6 +29,8 @@ running anything on the robot, and update it when what you do changes what it sa
 - **Experiments** (what was tried, with numbers):
   - `docs/sessions.md`: each harness session on the robot, newest first: setup, what happened, takeaways.
   - `docs/tuning_notes.md`: hardware tuning findings, marked *measured* / *inferred* / *open*.
+  - `docs/hardware_risks.md`: what on the robot can change unannounced and spoil a calibration or a measurement
+    (the wrist cameras moving on their mounts, ...): how to tell, what to do.
   - `docs/open_issues.md`: what is known missing or wrong in the harness. Close an item by deleting it; add new
     ones at the end of their section. Other areas keep their own "not done" lists (linked from its header).
 
