@@ -618,6 +618,11 @@ def split_holdout(
     )
 
 
+# a camera's board pose from fewer of the board's points than this is not trusted for the held-out check (`agreement`;
+# joint_right_full4: from 6, 91 deg off; from 11, 1 deg)
+MIN_POSE_POINTS = 10
+
+
 def agreement(
     model: XleRobotModel,
     board: Board,
@@ -625,12 +630,17 @@ def agreement(
     sightings: Sequence[BoardSighting],
     theta: np.ndarray,
     gcs: Mapping[str, np.ndarray],
+    min_points: int = MIN_POSE_POINTS,
 ) -> np.ndarray:
     """How far apart the two chains put the board, per moment the head and a wrist camera both saw it (N, 2).
 
     Through the head (its joints, the camera mount, its lens) and through the arm (its mount and joints, the wrist
     camera's pose on the gripper, its lens), from the joints as read: the board's center apart (mm) and its turn
     between the two (deg). What a grasp planned in the head's picture and done by the arm needs to be small.
+
+    Each camera's board pose is its own (`board_pose`), so a moment either camera saw fewer than `min_points` of the
+    board's points at is left out: from a few points the pose's turn is unreliable (joint_right_full4: the head saw 6
+    corners at one held-out moment, 91 deg, the other three 1 deg; the fit, which shares one board pose, was not hurt).
     """
     intr = model.intrinsics
     matrix = np.array([[intr["fx"], 0, intr["ppx"]], [0, intr["fy"], intr["ppy"]], [0, 0, 1.0]])
@@ -643,6 +653,8 @@ def agreement(
         head = seen.get(HEAD)
         for camera, s in seen.items():
             if head is None or camera not in cameras:
+                continue
+            if min(len(head.detection), len(s.detection)) < min_points:
                 continue
             q = model.joint_vector(s.look.arms, s.look.head_ticks)
             via_head = model.camera_pose(q, theta) @ board_pose(board, head.detection, matrix)
@@ -712,6 +724,7 @@ def calibrate(
         "rms_px": fit.rms_px,
         "held_out": {
             "moments": len(after),
+            "left_out": len({id(s.look) for s in held if s.camera == HEAD}) - len(after),
             **{
                 name: {
                     "mm": float(np.sqrt(np.mean(a[:, 0] ** 2))),
@@ -746,9 +759,15 @@ def _held_out_lines(held: Mapping[str, Any]) -> list[str]:
     if not held["moments"]:
         return ["- none held out (too few moments, or `--holdout-every 0`)"]
     b, a = held["before"], held["after"]
+    left_out = held.get("left_out", 0)
     return [
         f"- {held['moments']} moments: {b['mm']:.1f} mm, {b['deg']:.2f} deg before -> "
         f"{a['mm']:.1f} mm, {a['deg']:.2f} deg after"
+        + (
+            f" ({left_out} more left out: a camera saw fewer than {MIN_POSE_POINTS} of the board's points)"
+            if left_out
+            else ""
+        )
     ]
 
 

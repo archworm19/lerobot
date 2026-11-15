@@ -43,7 +43,29 @@ DEFAULT_MAX_VEL = 60.0  # deg/s; the same defaults as `home.move_all` (a test ke
 DEFAULT_MAX_ACCEL = 120.0  # deg/s^2
 REST_MAX_VEL = 30.0  # deg/s: going to rest unprompted is done slowly
 REST_MAX_ACCEL = 60.0
+# going to rest with the wrist rolled more than this from its home: the roll (and the gripper) home first, the arm still
+# out, then the rest. Folded with the roll still turning, the wrist camera's mount swings into the upper arm: after
+# joint_right_full4's low poses (rolled ~140 deg) it caught the sleeve; in the sim, 0.0-0.3 cm from the arm all
+# together, never under 2 cm (its gap at rest) unrolled first (docs/hardware_risks.md)
+UNROLL_FIRST_DEG = 20.0
+ROLL, GRIPPER = "wrist_roll.pos", "gripper.pos"
 CACHE_PERIOD_S = 0.2  # how often a running motion refreshes the snapshot `state()` answers from
+
+
+def unroll_first(
+    current: dict[str, dict[str, float]], homes: dict[str, dict[str, float]]
+) -> dict[str, dict[str, float]]:
+    """Going to rest, a first move for the arms whose wrist is rolled (empty when none is).
+
+    The arms whose wrist roll is more than `UNROLL_FIRST_DEG` from its home: the roll and the gripper to their homes,
+    the other joints staying put.
+    """
+    out = {}
+    for arm, home in homes.items():
+        now = current.get(arm, {})
+        if ROLL in home and ROLL in now and abs(now[ROLL] - home[ROLL]) > UNROLL_FIRST_DEG:
+            out[arm] = {k: home[k] for k in (ROLL, GRIPPER) if k in home}
+    return out
 
 
 class MotionBusyError(RuntimeError):
@@ -373,6 +395,8 @@ class MotionController:
     ) -> dict[str, Any]:
         """Start going to rest: the arms to their recorded home poses, then the head to its home.
 
+        An arm whose wrist is rolled far from its home unrolls first, the arm still out (`unroll_first`).
+
         `arms` picks which arms (default: every arm that has a recorded home). `autonomous` is for motions
         the server starts itself: the watchdog does not stop them.
         """
@@ -394,6 +418,11 @@ class MotionController:
     def _rest_job(
         self, homes: dict[str, dict[str, float]], max_vel: float, max_accel: float
     ) -> dict[str, Any]:
+        unroll = unroll_first(self.arms.observe(), homes)
+        if unroll:  # (`UNROLL_FIRST_DEG`: then the rest, even if the unrolling fell short)
+            self._trajectory_job(unroll, max_vel, max_accel, tol=1.5, timeout=10.0)
+            if self._stop.is_set():
+                return {"reached": False}
         result = self._trajectory_job(homes, max_vel, max_accel, tol=1.5, timeout=10.0)
         if result["reached"] and self.head is not None and not self._stop.is_set():
             for name in self.head.backend.names():

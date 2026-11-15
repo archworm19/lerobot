@@ -4,6 +4,18 @@ What on the robot can change without anything saying so, and quietly spoil a cal
 simulation: what was seen, with the numbers, how to tell, and what to do. Newest first. Tuning findings (gains,
 limits) are in [tuning_notes.md](tuning_notes.md); a session's own story in [sessions.md](sessions.md).
 
+## The wrist camera's mount catches the arm going home with the wrist rolled (2026-11-15)
+
+**Seen.** At the end of `joint_right_full4` the arm went home from its last low pose (the wrist rolled ~140 deg to show
+the head the fingertip): folding with the roll still turning, the wrist camera's mount came into the upper arm and
+caught its sleeve. In the simulation (`sim2real`, the mount's own meshes, from the session's 39 poses): all joints
+together, the mount came within 0.0-0.3 cm of the arm from every pose rolled more than ~140 deg (the sleeve takes
+more); the roll home first, the arm still out, then the rest: never under 2.0 cm, its gap at rest.
+
+**Done.** The server's going to rest (`MotionController.home`: every script's end, Ctrl+C, a lost client) unrolls an
+arm first when its wrist is more than `UNROLL_FIRST_DEG` (20) from home (`server/motion.py`). The Pi's server has to
+run the new code.
+
 ## The wrist cameras move on their mounts (2026-11-15)
 
 **Seen.** Three gripper sweeps of the left arm over about an hour (`calibration.gripper_sweep`, the arm at the same

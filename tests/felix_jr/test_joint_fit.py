@@ -159,6 +159,27 @@ def test_the_two_chains_agree_on_the_board_at_the_truth_only(session):
     assert np.median(start[:, 0]) > 2.0, start
 
 
+def test_a_moment_with_too_few_board_points_is_left_out_of_the_agreement(session):
+    """A camera's board pose from a few points is unreliable: such a moment is not scored (joint_right_full4: 6 corners
+    in the head's picture, 91 deg)."""
+    from dataclasses import replace
+
+    from lerobot.felix_jr.calibration.joint_fit import MIN_POSE_POINTS, agreement
+
+    world, problem = session
+    cameras, gcs = {ARM: world.camera}, {ARM: world.truth.gripper_from_camera}
+    full = agreement(problem.model, world.board, cameras, problem.sightings, world.truth.theta, gcs)
+    one = next(id(s.look) for s in problem.sightings if s.camera == HEAD)
+    few = [
+        replace(s, detection=replace(s.detection, ids=s.detection.ids[:6], pixels=s.detection.pixels[:6]))
+        if s.camera == HEAD and id(s.look) == one
+        else s
+        for s in problem.sightings
+    ]
+    assert MIN_POSE_POINTS > 6
+    assert len(agreement(problem.model, world.board, cameras, few, world.truth.theta, gcs)) == len(full) - 1
+
+
 def test_two_sessions_placements_are_two_boards(session, tmp_path):
     """Each session names its placements p0, p1, ...: combined, the same name in two sessions is two places."""
     from lerobot.felix_jr.calibration.joint_fit import JointSession, calibrate

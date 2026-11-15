@@ -479,3 +479,37 @@ def test_home_can_be_limited_to_some_arms(make_controller):
     for bad in (["middle_arm"], []):
         with pytest.raises(ValueError, match="unknown arms"):
             controller.home(arms=bad)
+
+
+def test_going_home_unrolls_the_wrist_first_when_it_is_rolled(make_controller):
+    """With an arm's wrist rolled far from its home, the roll (and the gripper) go home first, the rest of that arm
+    still; then everything (the camera's mount caught the sleeve, folded with the roll still turning). Not rolled: one
+    move, as before."""
+    roll, gripper = motion.ROLL, motion.GRIPPER
+    controller, arms = make_controller()
+    rolled = HOME[roll] + 140.0
+    controller.move_joints({"right_arm": {roll: rolled, PAN: 20.0}})
+    assert wait_until(lambda: not controller.status()["moving"])
+    before = len(arms.trajectories)
+    controller.home()
+    assert wait_until(lambda: not controller.status()["moving"]) and at_home(arms)
+    first, last = arms.trajectories[before][0], arms.trajectories[-1][0]
+    assert len(arms.trajectories) - before == 2
+    assert first == {"right_arm": {roll: HOME[roll], gripper: HOME[gripper]}}
+    assert set(last) == {"left_arm", "right_arm"} and last["right_arm"] == HOME  # then everything
+    controller.move_joints(FAR)  # not rolled: one move
+    assert wait_until(lambda: not controller.status()["moving"])
+    before = len(arms.trajectories)
+    controller.home()
+    assert wait_until(lambda: not controller.status()["moving"]) and at_home(arms)
+    assert len(arms.trajectories) - before == 1
+
+
+def test_unroll_first_only_for_the_rolled_arms():
+    home = {
+        "left_arm": {motion.ROLL: 0.0, motion.GRIPPER: 1.0},
+        "right_arm": {motion.ROLL: 0.0, motion.GRIPPER: 2.0},
+    }
+    current = {"left_arm": {motion.ROLL: 10.0}, "right_arm": {motion.ROLL: -150.0}}
+    assert motion.unroll_first(current, home) == {"right_arm": {motion.ROLL: 0.0, motion.GRIPPER: 2.0}}
+    assert motion.unroll_first({"left_arm": {motion.ROLL: 5.0}}, home) == {}
