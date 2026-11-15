@@ -87,11 +87,41 @@ into a vision policy, there at a large scale; ours is a smaller problem, and GPU
   guess). **The moving jaw is off:** opened by the gripper map from the SO-101's zero taken as closed, it is wider
   than the real one in both wrists (the right gripper at 1.9 is closed on the robot, open in the sim). The jaw's zero
   needs calibrating. The wrist camera's raised mount is not modeled.
+- **The fingers** (the default; `view --no-fingers` for the SO-101's own jaws): the robot's jaws are the XLeRobot's
+  Fin Ray fingers (white, ribbed; 67 mm long, a wedge 11-23 mm deep), which replace the SO-101's jaw tips: the
+  SO-101's jaw meshes are cut off at the fingers' base (drawn and collided with). Placed from the calibration alone
+  (the fixed tip on the pinch point, the straight face toward the other jaw; the moving finger the same part turned
+  over, the tips meeting with the jaws closed), **both fingers sat on the real ones in ruler2's wrist frames** (the
+  right gripper closed, the left ~55 deg open: within ~10 px). The moving jaw's error above was the stock jaw's: with
+  the fingers, the jaw's zero (next) is a small correction at most. Drawn only for now: they may serve as the contact
+  pads (their convex hull is close to their shape), or the pads go on their faces. The STL is in `sim2real/meshes/`
+  (the XLeRobot's, Apache-2.0: `meshes/README.md`; git LFS).
+
+## The jaw's zero (plan, 2026-11-14)
+
+The sim opens the moving jaw by the gripper map's opening from the SO-101's gripper zero, taken as "the tips meet";
+ruler2's frames showed the stock jaw off (the right gripper at 1.9: closed on the robot, open in the sim), but with
+the fingers on (above) they sit within ~10 px: the zero is a small correction, to confirm with a closed and an open
+capture.
+
+- **What is calibrated: one angle per arm,** the SO-101 jaw joint's angle where our tips meet (`closed_joint_deg`). The
+  sim's jaw angle is then `closed_joint_deg + GripperMap.opening_deg(gripper.pos)`. No mesh: the jaw meshes are the
+  stock SO-101 fingers, as on the robot; only where the jaw turns from is off. Per arm: it depends on how the horn sits
+  on the servo's spline and on the gripper's LeRobot calibration.
+- **Where it is kept: the calibrated URDF,** a field of each arm's `GripperMap` in `<felix_calibration>`. The map is
+  already tied to the gripper's LeRobot calibration (`XleRobotModel.check_robot` refuses a robot whose calibration
+  changed), and the zero is invalid under the same change. A URDF without it loads with 0 (today's assumption).
+- **How it is measured: a script in `calibration/`** (as `gripper_step`): wrist frames at known `gripper.pos` (closed
+  first, then one or two openings), undistorted; the person clicks the real moving jaw's tip; the sim's tip at
+  candidate angles (`sim2real.robot`) is fitted to the clicks; the result written into a new URDF. Asks before each
+  gripper move (or the gripper is set by hand, torque off). Checked by `sim2real.view --robot`: the sim's jaws on the
+  real ones in both wrists.
+- **Not calibrated: the contact pads** (next step 2): design geometry, the same for both arms, constants in
+  `sim2real/robot.py` on the jaw bodies, checked with `view --collision`.
 
 ## Next
 
-1. **The jaw's zero:** where the SO-101's moving jaw meets the fixed one, from a real wrist frame at a known
-   `gripper.pos` (`view --robot`).
+1. **The jaw's zero:** one angle per arm, in the calibrated URDF (the plan above).
 2. **The jaws' contacts:** pads (boxes, capsules) where the real claw touches, the meshes' hulls left to the rest;
    `view --collision` shows them.
 3. **A grasp check before any RL:** open, approach a cylinder, close, lift: does it hold, as the real claw holds a

@@ -1,11 +1,12 @@
 """Render one calibrated arm in the scene from the head camera and its wrist camera.
 
   uv run --extra felix_jr --extra felix_jr_sim python -m lerobot.felix_jr.sim2real.view \
-      [--arm left] [--pose '{"shoulder_pan.pos": 12, ...}'] [--robot tcp://ikeabot.local:5555] [--collision] [--out <png>]
+      [--arm left] [--pose '{"shoulder_pan.pos": 12, ...}'] [--robot tcp://ikeabot.local:5555] [--no-fingers] \
+      [--collision] [--out <png>]
 
 Without `--robot`: the arm at `--pose` (default: ruler2's left attack pose over the bottle) with a bottle on the table;
-each camera's render with the visual meshes, and with `--collision` also with what MuJoCo collides with. With
-`--robot`: reads the robot's joints, head and frames (nothing moves) and puts the real frames (the wrist's undistorted)
+each camera's render with the visual meshes, and with `--collision` also with what MuJoCo collides with. The jaws are
+the XLeRobot's fingers, as on the robot (`robot.arm_spec`); `--no-fingers`: the SO-101's own. With `--robot`: reads the robot's joints, head and frames (nothing moves) and puts the real frames (the wrist's undistorted)
 next to the renders at the same joints, and the two blended: where the calibrated sim and the robot disagree. The pinch
 point is the magenta dot. Writes `<out>` (default `felix_jr/sim2real/scratch/renders/view.png`, gitignored).
 """
@@ -22,7 +23,7 @@ from lerobot.felix_jr.calibration.xle_robot_model import WristCamera, XleRobotMo
 from lerobot.felix_jr.harness import api
 from lerobot.utils.import_utils import _mujoco_available
 
-from .robot import HEAD_CAMERA, WRIST_CAMERA
+from .robot import FINGER_STL, HEAD_CAMERA, WRIST_CAMERA
 from .scene import Box, Cylinder, Scene, build
 
 if TYPE_CHECKING or _mujoco_available:
@@ -86,6 +87,9 @@ def main() -> None:
         "--robot", default=None, help="read the joints and frames from this server (nothing moves)"
     )
     parser.add_argument("--collision", action="store_true", help="also render what MuJoCo collides with")
+    parser.add_argument(
+        "--no-fingers", action="store_true", help="the SO-101's own jaws, not the XLeRobot's fingers"
+    )
     parser.add_argument("--urdf", type=Path, default=api.MODEL)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args()
@@ -104,7 +108,10 @@ def main() -> None:
         real[HEAD_CAMERA] = client.capture().color
         frame = client.wrist_capture(args.arm).color
         real[WRIST_CAMERA] = undistort(frame, model.wrist_cameras[args.arm])
-    scene = build(model, args.arm, () if args.robot else RULER2_OBJECTS, head_ticks=head_ticks)
+    objects = () if args.robot else RULER2_OBJECTS
+    scene = build(
+        model, args.arm, objects, head_ticks=head_ticks, fingers=None if args.no_fingers else FINGER_STL
+    )
     scene.set_pose(pose)
 
     rows = []

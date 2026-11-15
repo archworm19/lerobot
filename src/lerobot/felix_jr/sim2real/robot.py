@@ -13,9 +13,17 @@ SO-101: a `pinch` site (the pinch frame: the fixed jaw's tip, `pinch_frame`), th
 undistorted frames) and the head camera (`head_camera`, fixed in the world: the head is not simulated, only where it
 looks from at the given head ticks).
 
+The fingers (`fingers`, default `FINGER_STL`): the XLeRobot's Fin Ray finger (`meshes/README.md`) on both
+jaws, drawn only (not collided with yet: the contact pads are the next step). On the robot they replace the SO-101's
+jaw tips, so with them the jaws' meshes (drawn and collided with) are cut off at the fingers' base. Placed from the
+calibration: the fixed finger's tip on the pinch point, tip to base back along the gripper (the pinch -z), its
+straight face toward the moving jaw (the pinch -x), its depth across the hinge toward the wrist camera's side; the
+moving finger the same part turned half a turn about the gripper's axis, the tips meeting with the jaws closed.
+Against ruler2's frames both fingers sat on the real ones (within ~10 px; the gripper closed and ~55 deg open).
+
 The moving jaw: MuJoCo's gripper joint is the opening from where the tips meet (`GripperMap.opening_deg`), taking
-the SO-101's gripper zero as closed. That is not calibrated: compare the jaws in a render with a real wrist frame
-(`sim2real.view --robot`).
+the SO-101's gripper zero as closed. Not calibrated (the stock jaw was visibly off; the fingers, placed closed at
+that zero, are not): confirm with a real wrist frame closed and open (`sim2real.view --robot`).
 """
 
 from collections.abc import Mapping
@@ -59,6 +67,21 @@ THEIR_CAMERA_MOUNT = "wrist_camera_mount"
 CAMERA_HOUSING = "wrist_camera_housing"
 CAMERA_HOUSING_M = (0.032, 0.032, 0.02)  # the UVC module (x, y across the lens, z along it)
 COLLISION_GROUP = 3  # the SO-101's group for what collides (drawn only in a collision view)
+VISUAL_GROUP = 2  # the SO-101's group for what is drawn
+FINGER_FIXED, FINGER_MOVING = "finger_fixed", "finger_moving"
+FINGER_STL = Path(__file__).parent / "meshes" / "xlerobot_finger.stl"  # the XLeRobot's (`meshes/README.md`)
+LFS_POINTER = b"version https://git-lfs"  # what a git LFS file holds until `git lfs pull`
+# the XLeRobot finger's STL, in its own coordinates (mm, an assembly's): x from the tip to the base, y out of the
+# straight face, z its depth (11 mm at the tip, 23 at the base) from its flat side (z = 0)
+FINGER_TIP_MM = (628.0218, 201.2773, 0.0)  # the tip's vertex on the flat side
+FINGER_TIP_FAR_MM = (626.8879, 201.2773, 11.115)  # and on the other side (the tip's edge leans 1 mm)
+FINGER_BASE_MM = 694.1  # its base's x: the SO-101's jaws are cut off ahead of it
+# the SO-101's meshes that hold its jaw tips, by body (the fixed jaw is part of the gripper's frame)
+JAW_MESHES = {"gripper": "wrist_roll_follower_so101_v1", "moving_jaw_so101_v1": "moving_jaw_so101_v1"}
+# its axes in the pinch frame: the fixed finger's x to -z (back along the gripper), y to -x (toward the moving jaw),
+# z to +y (across the hinge); the moving one turned half a turn about the gripper's axis
+FINGER_FIXED_AXES = np.array([[0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0]])
+FINGER_MOVING_AXES = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, -1.0], [-1.0, 0.0, 0.0]])
 
 
 def _pos_quat(pose: np.ndarray) -> tuple[list[float], list[float]]:
@@ -86,12 +109,95 @@ def _camera(
     return camera
 
 
+def _finger_pose(axes: np.ndarray, tip_mm: tuple[float, float, float]) -> np.ndarray:
+    """pinch_from_finger (4x4, the STL in meters): `axes` the STL's axes in the pinch frame, its point `tip_mm` on the pinch."""
+    pose = np.eye(4)
+    pose[:3, :3] = axes
+    pose[:3, 3] = -axes @ (np.asarray(tip_mm) / 1000.0)
+    return pose
+
+
+def _read_stl(path: Path) -> np.ndarray:
+    """A binary STL's triangles (N, 3, 3), in its own units."""
+    data = Path(path).read_bytes()
+    n = int.from_bytes(data[80:84], "little")
+    record = np.dtype([("normal", "<f4", 3), ("v", "<f4", (3, 3)), ("attr", "<u2")])
+    return np.frombuffer(data[84 : 84 + record.itemsize * n], dtype=record)["v"].astype(float)
+
+
+def _pose_of(pos, quat) -> np.ndarray:
+    pose = np.eye(4)
+    mat = np.zeros(9)
+    mujoco.mju_quat2Mat(mat, np.asarray(quat, dtype=float))
+    pose[:3, :3], pose[:3, 3] = mat.reshape(3, 3), pos
+    return pose
+
+
+def _cut_jaw(spec: "mujoco.MjSpec", body: str, body_from_finger: np.ndarray) -> None:
+    """Cut `body`'s jaw mesh off ahead of the finger's base (keep the triangles wholly behind it)."""
+    name = JAW_MESHES[body]  # the SO-101's meshes are named after their files (their own names are empty)
+    mesh = next(m for m in spec.meshes if Path(m.file).stem == name)
+    triangles = _read_stl(Path(spec.meshdir) / mesh.file) * np.asarray(mesh.scale)
+    geoms = [g for g in spec.body(body).geoms if g.meshname == name]
+    body_from_geom = _pose_of(geoms[0].pos, geoms[0].quat)  # the drawn and the collided geom are placed alike
+    finger_from_geom = np.linalg.inv(body_from_finger) @ body_from_geom
+    flat = triangles.reshape(-1, 3)
+    along = (flat @ finger_from_geom[:3, :3].T + finger_from_geom[:3, 3])[:, 0].reshape(
+        -1, 3
+    )  # the finger's x
+    kept = triangles[(along >= FINGER_BASE_MM / 1000.0).all(axis=1)]
+    cut = spec.add_mesh(name=f"{name}_cut")
+    cut.uservert = kept.reshape(-1).tolist()
+    cut.userface = np.arange(kept.shape[0] * 3).tolist()
+    for g in geoms:
+        g.meshname = cut.name
+
+
+def _add_fingers(spec: "mujoco.MjSpec", model: XleRobotModel, arm: str, q: np.ndarray, stl: Path) -> None:
+    """The finger STL on both jaws, the jaws cut off at its base (module docstring); the fingers drawn only."""
+    if Path(stl).read_bytes()[: len(LFS_POINTER)] == LFS_POINTER:
+        raise FileNotFoundError(f"{stl} is a git LFS pointer, not the mesh: run `git lfs pull`")
+    spec.add_mesh(name="finger", file=str(Path(stl).resolve()), scale=[0.001] * 3)
+    pinch = model.frame_pose(pinch_frame(arm), q)
+    # the tip on the head's side goes on the pinch point: the moving finger is turned over, its other side there
+    for body, link, name, axes, point in (
+        ("gripper", "gripper_link", FINGER_FIXED, FINGER_FIXED_AXES, FINGER_TIP_MM),
+        (
+            "moving_jaw_so101_v1",
+            "moving_jaw_so101_v1_link",
+            FINGER_MOVING,
+            FINGER_MOVING_AXES,
+            FINGER_TIP_FAR_MM,
+        ),
+    ):
+        body_pose = model.frame_pose(f"{arm}_{link}", q)
+        body_from_finger = np.linalg.inv(body_pose) @ pinch @ _finger_pose(axes, point)
+        _cut_jaw(spec, body, body_from_finger)
+        pos, quat = _pos_quat(body_from_finger)
+        spec.body(body).add_geom(
+            name=name,
+            type=mujoco.mjtGeom.mjGEOM_MESH,
+            meshname="finger",
+            pos=pos,
+            quat=quat,
+            group=VISUAL_GROUP,
+            contype=0,
+            conaffinity=0,
+            rgba=[0.95, 0.95, 0.95, 1.0],
+        )
+
+
 def arm_spec(
-    model: XleRobotModel, arm: str, head_ticks: Mapping[str, int] | None = None, mjcf: Path | None = None
+    model: XleRobotModel,
+    arm: str,
+    head_ticks: Mapping[str, int] | None = None,
+    mjcf: Path | None = None,
+    fingers: Path | None = FINGER_STL,
 ) -> "mujoco.MjSpec":
     """The SO-101's spec, posed as `model`'s `arm`, with the pinch site and the wrist and head cameras (module docstring).
 
-    `head_ticks`: where the head looks from (its servos' ticks; None: its recorded home).
+    `head_ticks`: where the head looks from (its servos' ticks; None: its recorded home). `fingers`: the XLeRobot
+    finger's STL, drawn on both jaws in place of their tips (None: the SO-101's own jaws).
     """
     require_package("mujoco", extra="felix_jr_sim")
     path = mjcf or so101_model()
@@ -137,6 +243,8 @@ def arm_spec(
             contype=1,
             conaffinity=1,
         )
+    if fingers is not None:
+        _add_fingers(spec, model, arm, q, fingers)
     k = model.intrinsics
     _camera(
         spec.worldbody,

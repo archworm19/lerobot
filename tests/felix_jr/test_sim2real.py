@@ -154,3 +154,70 @@ def test_the_joints_are_lerobots_as_position_servos_that_hold(model):
     assert (
         np.abs(np.array(joints) - [pose[f"{j}.pos"] for j in robot.JOINTS[:4]]).max() < 5.0
     )  # gravity, backlash
+
+
+def _stl(path, vertices, faces) -> None:
+    """A binary STL of `faces` (index triples into `vertices`, mm)."""
+    with open(path, "wb") as f:
+        f.write(b"\0" * 80 + len(faces).to_bytes(4, "little"))
+        for face in faces:
+            f.write(
+                np.zeros(3, "<f4").tobytes()
+                + np.asarray([vertices[i] for i in face], "<f4").tobytes()
+                + b"\0\0"
+            )
+
+
+def _world_vertices(m, d, name: str) -> np.ndarray:
+    """A mesh geom's vertices in the world (N, 3)."""
+    mesh = m.geom(name).dataid[0]
+    verts = m.mesh_vert[m.mesh_vertadr[mesh] : m.mesh_vertadr[mesh] + m.mesh_vertnum[mesh]]
+    return d.geom(name).xpos + verts @ d.geom(name).xmat.reshape(3, 3).T
+
+
+def test_the_fingers_tips_are_on_the_pinch_point(model, tmp_path):
+    """A wedge in the finger STL's coordinates, its tip at `FINGER_TIP_MM`: on both jaws, closed, the tips (the moving
+    one from its other side) are on the pinch point, and the fixed finger runs back along the gripper."""
+    tip, top = np.array(robot.FINGER_TIP_MM), np.array(robot.FINGER_TIP_FAR_MM)
+    vertices = [tip, top, [694.0, 180.0, 0.0], [694.0, 201.3, 0.0], [694.0, 201.3, 23.0]]
+    _stl(tmp_path / "finger.stl", vertices, [(0, 2, 3), (0, 3, 4), (0, 4, 2), (2, 4, 3), (1, 4, 3)])
+    scene = build(model, "left", fingers=tmp_path / "finger.stl")
+    closed = model.gripper_maps["left"].pos_closed
+    scene.set_pose({"shoulder_pan.pos": 10.0, "elbow_flex.pos": 20.0, "gripper.pos": closed})
+    m, d = scene.m, scene.d
+    pinch = d.site(robot.PINCH).xpos
+    for name in (robot.FINGER_FIXED, robot.FINGER_MOVING):
+        assert np.linalg.norm(_world_vertices(m, d, name) - pinch, axis=1).min() < 1e-6, name
+        assert (
+            m.geom(name).contype[0] == 0 and m.geom(name).group[0] == robot.VISUAL_GROUP
+        )  # drawn only, for now
+    stock = build(model, "left", fingers=None).m
+    for (
+        body,
+        mesh,
+    ) in robot.JAW_MESHES.items():  # the SO-101's jaw tips are cut off: fewer faces, drawn and collided
+        cut = [
+            m.geom(i)
+            for i in range(m.ngeom)
+            if m.geom(i).bodyid[0] == m.body(body).id and m.geom(i).dataid[0] == m.mesh(f"{mesh}_cut").id
+        ]
+        assert (
+            len(cut) == 2
+            and m.mesh_facenum[m.mesh(f"{mesh}_cut").id] < stock.mesh_facenum[stock.mesh(mesh).id]
+        )
+    toward_the_tips = d.site(robot.PINCH).xmat.reshape(3, 3)[:, 2]  # the pinch z
+    behind = (_world_vertices(m, d, robot.FINGER_FIXED) - pinch) @ toward_the_tips
+    # behind the tip (but its other side's corner: the tip's edge leans 1.1 mm forward), the base ~67 mm back
+    assert behind.max() < 1.2e-3 and behind.min() < -0.06
+
+
+@pytest.mark.skipif(
+    robot.FINGER_STL.read_bytes()[: len(robot.LFS_POINTER)] == robot.LFS_POINTER,
+    reason="git lfs pull not run",
+)
+def test_the_xlerobot_fingers_are_the_default_and_their_tips_meet_on_the_pinch_point(model):
+    scene = build(model, "right")
+    scene.set_pose({"gripper.pos": model.gripper_maps["right"].pos_closed})
+    pinch = scene.d.site(robot.PINCH).xpos
+    for name in (robot.FINGER_FIXED, robot.FINGER_MOVING):
+        assert np.linalg.norm(_world_vertices(scene.m, scene.d, name) - pinch, axis=1).min() < 1e-6, name

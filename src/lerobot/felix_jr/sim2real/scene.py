@@ -7,6 +7,7 @@ starts `TABLE_NEAR_M` ahead of the arm's base (the robot faces -x) and is wider 
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -14,7 +15,7 @@ import numpy as np
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 from lerobot.utils.import_utils import _mujoco_available, require_package
 
-from .robot import arm_spec, set_pose
+from .robot import FINGER_STL, arm_spec, set_pose
 
 if TYPE_CHECKING or _mujoco_available:
     import mujoco
@@ -83,10 +84,11 @@ def scene_spec(
     objects: Sequence[Cylinder | Box] = (),
     table_z: float = TABLE_Z,
     head_ticks: Mapping[str, int] | None = None,
+    fingers: Path | None = FINGER_STL,
 ) -> "mujoco.MjSpec":
-    """The arm's spec (`arm_spec`) with the table, the objects and lights."""
+    """The arm's spec (`arm_spec`, with `fingers` if given) with the table, the objects and lights."""
     require_package("mujoco", extra="felix_jr_sim")
-    spec = arm_spec(model, arm, head_ticks)
+    spec = arm_spec(model, arm, head_ticks, fingers=fingers)
     base = np.array(spec.body("base").pos)
     lx, ly, lz = TABLE_SIZE_M
     near = base[0] - TABLE_NEAR_M
@@ -113,9 +115,10 @@ def build(
     objects: Sequence[Cylinder | Box] = (),
     table_z: float = TABLE_Z,
     head_ticks: Mapping[str, int] | None = None,
+    fingers: Path | None = FINGER_STL,
 ) -> Scene:
     """The compiled scene (`scene_spec`), the arm at all-zero readings."""
-    m = scene_spec(model, arm, objects, table_z, head_ticks).compile()
+    m = scene_spec(model, arm, objects, table_z, head_ticks, fingers).compile()
     d = mujoco.MjData(m)
     mujoco.mj_forward(m, d)
     return Scene(model, arm, m, d)
