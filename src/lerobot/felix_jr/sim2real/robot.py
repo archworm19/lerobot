@@ -20,12 +20,14 @@ jaws, drawn only (not collided with yet: the contact pads are the next step). On
 jaw tips, so with them the jaws' meshes (drawn and collided with) are cut off at the fingers' base. Placed from the
 calibration: the fixed finger's tip on the pinch point, tip to base back along the gripper (the pinch -z), its
 straight face toward the moving jaw (the pinch -x), its depth across the hinge toward the wrist camera's side; the
-moving finger the same part turned half a turn about the gripper's axis, the tips meeting with the jaws closed.
+moving finger the same part turned half a turn about the gripper's axis, the tips meeting with the jaws closed, and turned on its jaw about its
+tip by the arm's `GripperMap.finger_mount_deg`, and the fixed one about its tip by `fixed_finger_mount_deg`
+(`calibration.gripper_sweep` fits both).
 Against ruler2's frames both fingers sat on the real ones (within ~10 px; the gripper closed and ~55 deg open).
 
 The moving jaw: MuJoCo's gripper joint is the opening from where the tips meet (`GripperMap.opening_deg`), taking
-the SO-101's gripper zero as closed. Not calibrated (the stock jaw was visibly off; the fingers, placed closed at
-that zero, are not): confirm with a real wrist frame closed and open (`sim2real.view --robot`).
+the SO-101's gripper zero as closed (the fingers are placed closed there, so the stock jaw's own zero does not show).
+Whether the real moving finger is at the map's opening: `calibration.gripper_sweep`.
 """
 
 from collections.abc import Mapping
@@ -86,6 +88,11 @@ JAW_MESHES = {"gripper": "wrist_roll_follower_so101_v1", "moving_jaw_so101_v1": 
 # z to +y (across the hinge); the moving one turned half a turn about the gripper's axis
 FINGER_FIXED_AXES = np.array([[0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0]])
 FINGER_MOVING_AXES = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, -1.0], [-1.0, 0.0, 0.0]])
+# the moving finger's tip on the wrist camera's side (its flat side's corner), from the pinch point with the jaws closed,
+# in the pinch frame: 11 mm across the hinge and, the tip's edge leaning, 1.1 mm back (before its mount's turn)
+FINGER_MOVING_WRIST_TIP_M = (
+    FINGER_MOVING_AXES @ (np.array(FINGER_TIP_MM) - np.array(FINGER_TIP_FAR_MM)) / 1000.0
+)
 
 
 def _pos_quat(pose: np.ndarray) -> tuple[list[float], list[float]]:
@@ -163,19 +170,34 @@ def _add_fingers(spec: "mujoco.MjSpec", model: XleRobotModel, arm: str, q: np.nd
         raise FileNotFoundError(f"{stl} is a git LFS pointer, not the mesh: run `git lfs pull`")
     spec.add_mesh(name="finger", file=str(Path(stl).resolve()), scale=[0.001] * 3)
     pinch = model.frame_pose(pinch_frame(arm), q)
+    # each finger's mount: turned about its tip (the pinch point, the jaws closed) about the hinge's axis
+    gripper_map = model.gripper_maps.get(arm)
+
+    def mount(deg: float) -> np.ndarray:
+        turn = np.eye(4)
+        if deg:
+            turn[:3, :3] = model.moving_jaw(arm, deg)[:3, :3]
+        return turn
+
+    fixed_deg = gripper_map.fixed_finger_mount_deg if gripper_map is not None else 0.0
+    moving_deg = gripper_map.finger_mount_deg if gripper_map is not None else 0.0
     # the tip on the head's side goes on the pinch point: the moving finger is turned over, its other side there
-    for body, link, name, axes, point in (
-        ("gripper", "gripper_link", FINGER_FIXED, FINGER_FIXED_AXES, FINGER_TIP_MM),
+    for body, link, name, placed in (
+        (
+            "gripper",
+            "gripper_link",
+            FINGER_FIXED,
+            mount(fixed_deg) @ _finger_pose(FINGER_FIXED_AXES, FINGER_TIP_MM),
+        ),
         (
             "moving_jaw_so101_v1",
             "moving_jaw_so101_v1_link",
             FINGER_MOVING,
-            FINGER_MOVING_AXES,
-            FINGER_TIP_FAR_MM,
+            mount(moving_deg) @ _finger_pose(FINGER_MOVING_AXES, FINGER_TIP_FAR_MM),
         ),
     ):
         body_pose = model.frame_pose(f"{arm}_{link}", q)
-        body_from_finger = np.linalg.inv(body_pose) @ pinch @ _finger_pose(axes, point)
+        body_from_finger = np.linalg.inv(body_pose) @ pinch @ placed
         _cut_jaw(spec, body, body_from_finger)
         pos, quat = _pos_quat(body_from_finger)
         spec.body(body).add_geom(

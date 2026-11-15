@@ -106,6 +106,9 @@ SIGMAS = {
     "arm origin": 0.002,
     "tip": 0.008,  # where "the tip of the closed gripper" is, relative to the SO-101's tool center point
     "head axis": np.radians(2.0),  # the printed head: its pan and tilt axes a degree or two out of line
+    # the gripper's hinge (the moving jaw's joint origin): the SO-101's design until fitted from the moving tip's path
+    # (`calibration.gripper_sweep`: the left arm's 7 mm off, 2026-11-15)
+    "hinge": 0.010,
 }
 # the head joints' axes may tilt (`default_parameters(head_axes=True)`): the turns about the two axes square to each
 # joint's own (the pan turns about z, the tilt about y); a turn about its own axis is its zero
@@ -215,6 +218,14 @@ def default_parameters(
     return params
 
 
+def gripper_hinge_parameters(arm: str) -> list[Param]:
+    """`arm`'s gripper hinge's position (its joint's origin, in the gripper's frame), 3 parameters.
+
+    Off by default: the moving tip's path in the wrist camera finds it (`calibration.gripper_sweep`), the clicks do not.
+    """
+    return [Param(f"pos:{arm_joint(arm, 'gripper')}:{a}", SIGMAS["hinge"], "tip", arm=arm) for a in AXES]
+
+
 def head_axis_parameters() -> list[Param]:
     """The head joints' axes' tilts (`HEAD_AXIS_TILTS`), 4 parameters.
 
@@ -259,6 +270,10 @@ class GripperMap:
 
     The opening is the moving jaw's angle about the hinge from where the tips meet:
     `deg_per_unit * (gripper.pos - pos_closed)`, negative below `pos_closed` (the servo squeezes closed jaws).
+    `finger_mount_deg`: the moving finger's turn on its jaw, about its tip (the hinge's axis, positive as the jaws
+    open), from where it would lie along the fixed one with the tips together (`calibration.gripper_sweep`); the sim
+    places the finger by it (`sim2real.robot`), the model's points do not depend on it. `fixed_finger_mount_deg`: the
+    fixed finger's turn about its tip (the pinch point), likewise (left +4, right +2 deg, 2026-11-15).
     `gripper.pos` is LeRobot's 0-100 over the gripper's calibrated tick range, so the map holds only under the
     gripper's LeRobot calibration it was measured with (`calibration`, a `motor_record` as the robot reported it):
     recalibrating the arm with `lerobot-calibrate` invalidates it (`XleRobotModel.check_robot`). `measurements` are
@@ -271,6 +286,8 @@ class GripperMap:
     calibration: dict[str, int]
     measurements: tuple[tuple[float, float], ...] = ()
     radius_m: float | None = None
+    finger_mount_deg: float = 0.0
+    fixed_finger_mount_deg: float = 0.0
 
     def opening_deg(self, pos: float) -> float:
         """The jaws' opening angle (degrees) at `gripper.pos` `pos`."""
@@ -1210,6 +1227,28 @@ class XleRobotModel:
             self.arm_calibration,
             self.wrist_cameras,
             head_axes=True,
+        )
+        model.set_estimates(self.estimate_dict())
+        model.fit_info = dict(self.fit_info)
+        return model
+
+    def with_gripper_hinge(self, arm: str) -> "XleRobotModel":
+        """A copy with `arm`'s gripper hinge's position among its parameters (at 0 where new; `gripper_hinge_parameters`)."""
+        have = {p.name for p in self.parameters}
+        new = [p for p in gripper_hinge_parameters(arm) if p.name not in have]
+        if not new:
+            return self
+        model = type(self)(
+            self.urdf,
+            self.head_signs,
+            self.head_refs,
+            self.intrinsics,
+            self.parameters + new,
+            self.floor_z,
+            self.visible_side,
+            self.gripper_maps,
+            self.arm_calibration,
+            self.wrist_cameras,
         )
         model.set_estimates(self.estimate_dict())
         model.fit_info = dict(self.fit_info)

@@ -98,35 +98,65 @@ into a vision policy, there at a large scale; ours is a smaller problem, and GPU
   (the fixed tip on the pinch point, the straight face toward the other jaw; the moving finger the same part turned
   over, the tips meeting with the jaws closed), **both fingers sat on the real ones in ruler2's wrist frames** (the
   right gripper closed, the left ~55 deg open: within ~10 px). The moving jaw's error above was the stock jaw's: with
-  the fingers, the jaw's zero (next) is a small correction at most. Drawn only for now: they may serve as the contact
+  the fingers, the gripper map is to be checked, not the stock jaw (`gripper_sweep`, below). Drawn only for now: they may serve as the contact
   pads (their convex hull is close to their shape), or the pads go on their faces. The STL is in `sim2real/meshes/`
   (the XLeRobot's, Apache-2.0: `meshes/README.md`; git LFS).
 
-## The jaw's zero (plan, 2026-11-14)
+## The gripper map against the wrist camera (`calibration.gripper_sweep`, 2026-11-15)
 
-The sim opens the moving jaw by the gripper map's opening from the SO-101's gripper zero, taken as "the tips meet";
-ruler2's frames showed the stock jaw off (the right gripper at 1.9: closed on the robot, open in the sim), but with
-the fingers on (above) they sit within ~10 px: the zero is a small correction, to confirm with a closed and an open
-capture.
+The planned jaw's zero (an angle per arm for the SO-101's stock jaw) dropped out: with the fingers on, the stock jaw is
+out of sight and the moving finger is placed so the tips meet at the map's zero, so what the wrist camera can check is
+the gripper map itself: is the real moving finger at the opening `GripperMap.opening_deg` says? The map's slope is the
+servo's (its calibrated range); only `pos_closed`, where the tips meet, was fitted, from caliper gaps
+(`gripper_step`).
 
-- **What is calibrated: one angle per arm,** the SO-101 jaw joint's angle where our tips meet (`closed_joint_deg`). The
-  sim's jaw angle is then `closed_joint_deg + GripperMap.opening_deg(gripper.pos)`. No mesh: the jaw meshes are the
-  stock SO-101 fingers, as on the robot; only where the jaw turns from is off. Per arm: it depends on how the horn sits
-  on the servo's spline and on the gripper's LeRobot calibration.
-- **Where it is kept: the calibrated URDF,** a field of each arm's `GripperMap` in `<felix_calibration>`. The map is
-  already tied to the gripper's LeRobot calibration (`XleRobotModel.check_robot` refuses a robot whose calibration
-  changed), and the zero is invalid under the same change. A URDF without it loads with 0 (today's assumption).
-- **How it is measured: a script in `calibration/`** (as `gripper_step`): wrist frames at known `gripper.pos` (closed
-  first, then one or two openings), undistorted; the person clicks the real moving jaw's tip; the sim's tip at
-  candidate angles (`sim2real.robot`) is fitted to the clicks; the result written into a new URDF. Asks before each
-  gripper move (or the gripper is set by hand, torque off). Checked by `sim2real.view --robot`: the sim's jaws on the
-  real ones in both wrists.
+- **`gripper_sweep`:** moves the arm to its sweep pose (the wrist camera looking down at the table; ruler2's left
+  attack pose and its mirror), steps the gripper through a few positions, a wrist frame at each once settled, and sends
+  the arms home. Before anything moves, the sim checks the gripper clears the table (taken level with the arm's base
+  unless `--table-z`) at every position and on the way there, and that the wrist camera mostly sees table; then it
+  asks. At the pose, a live preview first (the gripper half open, the pixels taken for the fingers tinted, a pass or
+  a fail by the fit's limits): fix the scene until it passes, then Enter sweeps. `--stay`: only the gripper moves, the
+  arm where it is. The fingers are found by color (cool blue in the wrist
+  cameras; the wood warm), only where the sim says each can be; the moving finger's tip (the corner the wrist camera
+  sees) is the farthest detected point from the hinge; the opening that puts the calibrated model's tip there is the
+  fitted one. A live window shows each frame: the detected fingers and tip (green), the sim's fingers and the model's
+  tip at the fitted opening (orange) and at the map's (blue); a contact sheet and `results.json` at the end.
+  `--refit <folder>` fits a saved sweep again.
+- **The tip, not the outline:** only the fingers' lit faces have their color (their shaded sides and black bases are
+  dark), so scoring the sim's whole outline against the detected pixels drifted with the light (+8 deg on ruler2's
+  left frame, where the tip says -1). The fixed finger's outline still checks the fingers' placement (its
+  `agreement`: the finger pixels it covers less the wood it covers).
+- **No fit** with the jaws nearly closed (the tips cannot be told apart), the tip out of the frame, or too little of
+  the finger seen. Aim the wrist camera at the table: a bluish background (ruler2's window blinds) passes for the
+  fingers.
+- **The geometry** (`fit_geometry`): the hinge's position (a calibrated parameter, `pos:<arm>_gripper:*`) and the
+  opening's offset from the moving tip's circle, then the moving finger's mount on its jaw
+  (`GripperMap.finger_mount_deg`) from its outline; `--out` writes them into a new calibrated URDF.
+- **On ruler2's frames** (offline): the left at `gripper.pos` 43.7, the map's 55.1 deg, fitted 54.2 (-0.9; the model's
+  tip 5 px from the real one, the fixed finger's agreement 0.73); the right closed, no fit (and the blinds in view).
+- **The left arm's sweep on the robot** (2026-11-15, `gripper.pos` 0-50): the map's opening right to 0.1 deg
+  (slope 1.000), but the moving finger's base off in every frame. **The geometry fit** (from the same sweep): the
+  tips' circle puts the **hinge 3.9 mm** from the SO-101's design (-3.7, 0, -1.1 mm in the gripper's frame), the
+  opening's offset +0.2 deg, the tips 5.1 -> 1.5 px RMS; and the **moving finger turned -16.5 deg** on its jaw (closed,
+  the fingers touch at the tips only, a V toward their bases, as on the robot). With them the sim's fingers sit on the
+  real ones at every opening, bases and all. **A second sweep** (brighter light, the fingers near white): the fixed
+  color thresholds lost the fingers and a misread tip (the finger's base) took the hinge to 10 mm, silently; now the
+  colors are learned from each frame and misread tips are left out of a robust fit. Both sweeps then: the mount
+  -16.5 deg both times, the hinge 3.9 and 2.1 mm (the same way; it repeats to ~2 mm: average a few sweeps), the
+  opening within 0.4 deg. **Both arms** (`--arm both`, 2026-11-15): the moving fingers -15.5 (left) and -17.0 deg
+  (right), the hinges 1.2 and 4.6 mm, the openings -0.2 and -1.0 deg; and **the fixed fingers turned too**, +4.0
+  and +2.0 deg about their tips (`GripperMap.fixed_finger_mount_deg`; their outlines' agreement 0.74 -> 0.93, 0.79
+  -> 0.88). Only the turn about the hinge's axis is fitted: the wrist camera sees the fingers' outlines in that plane;
+  their offset along the hinge's axis and their tilt out of it are the SO-101's design (the head's views could find
+  them). The hinge also moves the harness's moving tip (`moving_tip`): its radius
+  about the hinge was 83 mm in the model, ~87 by the tips' circle (85.6 by `gripper_step`'s calipers).
 - **Not calibrated: the contact pads** (next step 2): design geometry, the same for both arms, constants in
   `sim2real/robot.py` on the jaw bodies, checked with `view --collision`.
 
 ## Next
 
-1. **The jaw's zero:** one angle per arm, in the calibrated URDF (the plan above).
+1. **The gripper sweep on both arms** (`gripper_sweep --arm both --out <urdf>`): the left arm's fitted twice, the
+   right's to run; a few sweeps per arm to average the hinge.
 2. **The jaws' contacts:** pads (boxes, capsules) where the real claw touches, the meshes' hulls left to the rest;
    `view --collision` shows them.
 3. **A grasp check before any RL:** open, approach a cylinder, close, lift: does it hold, as the real claw holds a
