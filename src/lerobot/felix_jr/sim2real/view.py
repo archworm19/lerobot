@@ -23,7 +23,7 @@ from lerobot.felix_jr.calibration.xle_robot_model import WristCamera, XleRobotMo
 from lerobot.felix_jr.harness import api
 from lerobot.utils.import_utils import _mujoco_available
 
-from .robot import FINGER_STL, HEAD_CAMERA, WRIST_CAMERA
+from .robot import FINGER_STL, HEAD_CAMERA, OWN_MODULE_GROUPS, WRIST_CAMERA
 from .scene import Box, Cylinder, Scene, build
 
 if TYPE_CHECKING or _mujoco_available:
@@ -46,11 +46,17 @@ VISUAL, COLLISION, SITES = 2, 3, 4  # the SO-101's geom groups; our pinch site's
 
 
 def render(scene: Scene, camera: str, collision: bool = False) -> np.ndarray:
-    """RGB (H, W, 3) from `camera` at its calibrated resolution: the visual meshes, or what collides."""
+    """RGB (H, W, 3) from `camera` at its calibrated resolution: the visual meshes, or what collides.
+
+    The wrist camera's module is left out of its own renders (the camera is inside it: `robot.OWN_MODULE_GROUPS`).
+    """
     width, height = (int(v) for v in scene.m.cam_resolution[scene.m.camera(camera).id])
     option = mujoco.MjvOption()
     option.geomgroup[VISUAL] = not collision
     option.geomgroup[COLLISION] = collision
+    own = camera == WRIST_CAMERA
+    option.geomgroup[OWN_MODULE_GROUPS[VISUAL]] = not collision and not own
+    option.geomgroup[OWN_MODULE_GROUPS[COLLISION]] = collision and not own
     option.flags[mujoco.mjtVisFlag.mjVIS_CONVEXHULL] = (
         collision  # what MuJoCo collides with: each mesh's hull
     )

@@ -97,13 +97,25 @@ def test_a_point_renders_where_the_lens_puts_it(model, camera):
     np.testing.assert_allclose([u.mean() + 0.5, v.mean() + 0.5], expected, atol=1.0)
 
 
-def test_their_camera_mount_is_gone_and_ours_collides(model):
-    m = build(model, "left").m
-    names = {m.body(i).name for i in range(m.nbody)}
-    assert robot.THEIR_CAMERA_MOUNT not in names and "wrist_camera" not in names
-    housing = m.geom(robot.CAMERA_HOUSING)
-    assert housing.bodyid[0] == m.body("gripper").id
-    assert housing.contype[0] and housing.conaffinity[0] and housing.group[0] == robot.COLLISION_GROUP
+def test_the_camera_mount_and_module_collide_and_the_module_is_not_in_its_own_view(model):
+    """TheRobotStudio's mount and module (the robot's), colliding; the module's geoms in their own groups, drawn from the
+    head and left out of the wrist camera's renders (the camera is inside it)."""
+    scene = build(model, "left")
+    m = scene.m
+    module = [m.geom(i) for i in range(m.ngeom) if m.geom(i).bodyid[0] == m.body(robot.CAMERA_MODULE).id]
+    assert {g.group[0] for g in module} == set(robot.OWN_MODULE_GROUPS.values())
+    mount = [m.geom(i) for i in range(m.ngeom) if m.geom(i).bodyid[0] == m.body(robot.CAMERA_MOUNT).id]
+    assert any(g.contype[0] and g.group[0] == robot.COLLISION_GROUP for g in mount)
+    assert any(g.contype[0] and g.group[0] == robot.OWN_MODULE_GROUPS[robot.COLLISION_GROUP] for g in module)
+    # the camera is inside its module (why its renders leave it out): within the module's mesh's bounds
+    for arm in ("left", "right"):
+        scene = build(model, arm)
+        visual = next(g for g in module if g.group[0] == robot.OWN_MODULE_GROUPS[robot.VISUAL_GROUP])
+        inside = _world_vertices(scene.m, scene.d, visual.name or visual.id)
+        lens = scene.d.geom(visual.id).xmat.reshape(3, 3)  # the module's axes
+        local = (inside - scene.d.geom(visual.id).xpos) @ lens
+        cam = (scene.d.camera(robot.WRIST_CAMERA).xpos - scene.d.geom(visual.id).xpos) @ lens
+        assert (local.min(0) < cam).all() and (cam < local.max(0)).all(), arm
 
 
 def test_the_scene_has_the_table_and_objects_rest_on_it(model):
@@ -168,7 +180,7 @@ def _stl(path, vertices, faces) -> None:
             )
 
 
-def _world_vertices(m, d, name: str) -> np.ndarray:
+def _world_vertices(m, d, name: str | int) -> np.ndarray:
     """A mesh geom's vertices in the world (N, 3)."""
     mesh = m.geom(name).dataid[0]
     verts = m.mesh_vert[m.mesh_vertadr[mesh] : m.mesh_vertadr[mesh] + m.mesh_vertnum[mesh]]

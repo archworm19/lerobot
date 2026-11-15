@@ -6,9 +6,11 @@ model adds them to the readings). MuJoCo's joint angles are then LeRobot's readi
 the calibrated model's (`tests/felix_jr/test_sim2real.py`). The world frame is the model's root frame; the arm's base
 is placed where the calibration puts it.
 
-TheRobotStudio's wrist camera mount and camera are removed (ours sits elsewhere on the gripper: our camera would
-look out from inside theirs); our camera's housing is a box behind its lens, for collisions only. Added to the
-SO-101: a `pinch` site (the pinch frame: the fixed jaw's tip, `pinch_frame`), the arm's wrist camera
+The wrist camera's mount and module are TheRobotStudio's (the hex-nut 32x32 UVC mount, the robot's), at their design
+pose: our calibrated optical frames are within 2 deg of its lens axis, their centers inside its lens barrel (both arms
+alike: the robot's mounts sit as designed). Our camera is inside its own module, so the module is drawn in groups of
+its own (`OWN_MODULE_GROUPS`) that the wrist camera's renders leave out (`view.render`). Added to the SO-101: a `pinch`
+site (the pinch frame: the fixed jaw's tip, `pinch_frame`), the arm's wrist camera
 (`wrist_camera`: its calibrated pose on the gripper and its lens, without the distortion: the renders are as our
 undistorted frames) and the head camera (`head_camera`, fixed in the world: the head is not simulated, only where it
 looks from at the given head ticks).
@@ -62,12 +64,14 @@ WRIST_CAMERA, HEAD_CAMERA, PINCH = "wrist_camera", "head_camera", "pinch"
 # an optical frame (x right, y down, z forward) to MuJoCo's camera frame (x right, y up, looking along -z)
 OPTICAL_TO_MUJOCO = np.diag([1.0, -1.0, -1.0])
 PIXEL_M = 1e-6  # a nominal pixel pitch for MuJoCo's sensor size
-# TheRobotStudio's wrist camera mount and camera (one body and its child): removed, ours is elsewhere on the gripper
-THEIR_CAMERA_MOUNT = "wrist_camera_mount"
-CAMERA_HOUSING = "wrist_camera_housing"
-CAMERA_HOUSING_M = (0.032, 0.032, 0.02)  # the UVC module (x, y across the lens, z along it)
+CAMERA_MOUNT, CAMERA_MODULE = (
+    "wrist_camera_mount",
+    "wrist_camera",
+)  # TheRobotStudio's bodies (the module: the camera)
 COLLISION_GROUP = 3  # the SO-101's group for what collides (drawn only in a collision view)
 VISUAL_GROUP = 2  # the SO-101's group for what is drawn
+# the camera module's drawn and collided geoms, moved out of those groups: the wrist camera's renders leave them out
+OWN_MODULE_GROUPS = {VISUAL_GROUP: 4, COLLISION_GROUP: 5}
 FINGER_FIXED, FINGER_MOVING = "finger_fixed", "finger_moving"
 FINGER_STL = Path(__file__).parent / "meshes" / "xlerobot_finger.stl"  # the XLeRobot's (`meshes/README.md`)
 LFS_POINTER = b"version https://git-lfs"  # what a git LFS file holds until `git lfs pull`
@@ -211,7 +215,8 @@ def arm_spec(
         parent = "gripper" if body == "moving_jaw_so101_v1" else parents[parents.index(body) - 1]
         spec.body(body).pos, spec.body(body).quat = _pos_quat(np.linalg.inv(poses[parent]) @ poses[body])
     gripper = spec.body("gripper")
-    spec.delete(spec.body(THEIR_CAMERA_MOUNT))  # not where ours is: our camera would look out from inside it
+    for geom in spec.body(CAMERA_MODULE).geoms:  # our camera is inside it (module docstring)
+        geom.group = OWN_MODULE_GROUPS[geom.group]
     pos, quat = _pos_quat(np.linalg.inv(poses["gripper"]) @ model.frame_pose(pinch_frame(arm), q))
     gripper.add_site(name=PINCH, pos=pos, quat=quat, size=[0.003, 0, 0], rgba=[1, 0, 1, 1], group=4)
     camera: WristCamera | None = model.wrist_cameras.get(arm)
@@ -226,22 +231,6 @@ def arm_spec(
             camera.fy,
             camera.ppx,
             camera.ppy,
-        )
-        # its housing, for collisions only (not drawn in the renders): behind the lens, square to its axis
-        housing = np.array(camera.gripper_from_camera) @ np.array(
-            [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, -CAMERA_HOUSING_M[2] / 2 - 0.002], [0, 0, 0, 1]]
-        )
-        pos, quat = _pos_quat(housing)
-        gripper.add_geom(
-            name=CAMERA_HOUSING,
-            type=mujoco.mjtGeom.mjGEOM_BOX,
-            size=[h / 2 for h in CAMERA_HOUSING_M],
-            pos=pos,
-            quat=quat,
-            group=COLLISION_GROUP,
-            rgba=[0.1, 0.1, 0.1, 1],
-            contype=1,
-            conaffinity=1,
         )
     if fingers is not None:
         _add_fingers(spec, model, arm, q, fingers)

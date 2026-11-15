@@ -72,11 +72,16 @@ into a vision policy, there at a large scale; ours is a smaller problem, and GPU
   at all-zero readings: the calibrated joint origins with the joints' zero corrections folded in, so MuJoCo's joint
   angles are LeRobot's readings in radians. World = the model's root frame; the arm's base where the calibration
   puts it. Added: a `pinch` site, the wrist camera on the gripper (its calibrated pose and lens: `focal_pixel`,
-  `principal_pixel`, no distortion, as our undistorted frames), the head camera fixed at the given head ticks. Their
-  wrist camera mount is removed (ours is elsewhere: our camera looked out from inside theirs); our camera's housing
-  is a box behind its lens, for collisions only.
-- **`scene.build`:** the arm over a table (top at 0.747 m, ruler2's), objects (`Cylinder`, `Box`) on it. One arm, no head or chassis meshes yet (the XLeRobot repository's MuJoCo model has them; its license to check
-  before copying).
+  `principal_pixel`, no distortion, as our undistorted frames), the head camera fixed at the given head ticks.
+- **The wrist camera's mount** is the SO-101's hex-nut mount for a 32x32 UVC module (`SO-ARM100/Optional/
+  SO101_Wrist_Cam_Hex-Nut_Mount_32x32_UVC_Module`: the same mesh, triangle for triangle, as TheRobotStudio's model
+  uses), kept with its module at the model's design pose. Our calibrated optical frames are within 2 deg (left) and
+  1.4 deg (right) of the design lens axis, their centers inside the lens barrel, 10-13 mm up from the board, the same
+  ~9 mm sideways on both arms (the module mesh's origin is off its lens): the robot's mounts sit as designed. The
+  camera is inside its own module, so the module's geoms are in groups of their own that the wrist camera's renders
+  leave out (they still cast shadows). From the head, mount and module sit on the real ones in ruler2's frame.
+- **`scene.build`:** the arm over a table (top at 0.747 m, ruler2's), objects (`Cylinder`, `Box`) on it. One arm, no head or chassis
+  meshes yet (the XLeRobot repository's MuJoCo model has them: Apache-2.0).
 - **`view`:** renders from the head and the wrist camera, the visual meshes and (`--collision`) the convex hulls
   MuJoCo collides with; with `--robot` the robot's frames next to the renders at the same joints (nothing moves).
 - **Tested** (`tests/felix_jr/test_sim2real.py`): every link, the pinch point and both cameras where the calibrated
@@ -86,7 +91,7 @@ into a vision policy, there at a large scale; ours is a smaller problem, and GPU
   few tens of pixels; the left wrist's fixed jaw on the real one and the bottle centered within ~10 px (its size was a
   guess). **The moving jaw is off:** opened by the gripper map from the SO-101's zero taken as closed, it is wider
   than the real one in both wrists (the right gripper at 1.9 is closed on the robot, open in the sim). The jaw's zero
-  needs calibrating. The wrist camera's raised mount is not modeled.
+  needs calibrating (but see the fingers, below).
 - **The fingers** (the default; `view --no-fingers` for the SO-101's own jaws): the robot's jaws are the XLeRobot's
   Fin Ray fingers (white, ribbed; 67 mm long, a wedge 11-23 mm deep), which replace the SO-101's jaw tips: the
   SO-101's jaw meshes are cut off at the fingers' base (drawn and collided with). Placed from the calibration alone
