@@ -151,22 +151,32 @@ def test_the_fit_finds_the_hinge_the_opening_offset_and_the_mount(model, tmp_pat
 
 
 def test_the_hinge_and_the_mount_are_saved_and_loaded(model, tmp_path):
+    """The corrections go on top of the model's own (it is left as it was), and survive a save and a load; a calibration
+    from before the gripper's fields loads them at 0."""
+    base = model.estimate_dict() if "pos:left_gripper:x" in {p.name for p in model.parameters} else {}
     corrected = sweep.corrected_model(model, "left", np.array([-0.0038, 0.0, -0.0008]), 0.5, -12.0, 4.0)
     assert {"pos:left_gripper:x", "pos:left_gripper:y", "pos:left_gripper:z"} <= {
         p.name for p in corrected.parameters
     }
-    assert "pos:left_gripper:x" not in {p.name for p in model.parameters}  # the model given is left as it was
+    assert (model.estimate_dict() if base else {}) == base  # the model given is left as it was
     corrected.save(tmp_path / "corrected.urdf")
     loaded = XleRobotModel.load(tmp_path / "corrected.urdf")
-    assert loaded.estimate_dict()["pos:left_gripper:x"] == pytest.approx(-0.0038)
+    assert loaded.estimate_dict()["pos:left_gripper:x"] == pytest.approx(
+        base.get("pos:left_gripper:x", 0.0) - 0.0038
+    )
     assert loaded.gripper_maps["left"].finger_mount_deg == pytest.approx(-12.0)
     assert loaded.gripper_maps["left"].fixed_finger_mount_deg == pytest.approx(4.0)
     q = loaded.joint_vector({"left": RULER2_POSE})
     np.testing.assert_allclose(
         loaded.moving_tip("left", q, 40.0), corrected.moving_tip("left", q, 40.0), atol=1e-9
     )
-    assert model.gripper_maps["left"].finger_mount_deg == 0.0  # (calibrations from before the fields: 0)
-    assert model.gripper_maps["left"].fixed_finger_mount_deg == 0.0
+    older = XleRobotModel.load(api.MODEL.parent / "xle_calib_1114_joint.urdf")  # before the gripper's fields
+    assert (
+        older.gripper_maps["left"].finger_mount_deg
+        == 0.0
+        == older.gripper_maps["left"].fixed_finger_mount_deg
+    )
+    assert "pos:left_gripper:x" not in {p.name for p in older.parameters}
 
 
 def test_the_colors_are_learned_from_the_frame(model, fingers):

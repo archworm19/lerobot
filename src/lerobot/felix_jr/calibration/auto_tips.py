@@ -1,0 +1,136 @@
+"""A joint session's wrist fingertip clicks replaced by the fingertip a gripper sweep measured. Runs on your computer.
+
+  uv run --extra felix_jr --extra felix_jr_sim python -m lerobot.felix_jr.calibration.auto_tips <session> \
+      --from-sweep <gripper_sweep folder> --out <new session folder> [--model <calibration.urdf>]
+
+then fit the new session as any other (`joint_fit <new session> --start-from ... --out ...`).
+
+The wrist camera and the fixed finger are both fixed to the gripper, so the fingertip is at one pixel in every wrist
+frame, whatever the arm does: a session's wrist clicks all measure that one point. By eye they did it poorly: with the
+jaws closed (as the session has them) the two fingers' tips lie side by side, and joint_right_full4's 27 clicks sat
+in the notch between them, 2-3 px apart and ~3 mm short of the fixed finger's end; the calibration fitted to them put
+the fixed finger off in the simulation, and the gripper sweep blamed the camera (7.5 px). Detecting the tip in the
+session's own pictures failed too (the jaws closed, it took the moving finger's tip in some; a white board behind
+them). A gripper sweep measures that pixel with the jaws open against the table, to ~1 px (`gripper_sweep.fixed_tip`,
+its open frames); every wrist click is put there. The calibration's point is the wrist face's tip (the pinch point one
+finger's thickness along the hinge, `XleRobotModel.wrist_face`), which on the XLeRobot's fingers is not quite the end
+the camera sees (the tip's edge leans, `sim2real.robot.FINGER_FIXED_WRIST_TIP_M`): the click goes where the model puts
+the wrist face's tip, offset from where it puts the end as the end was found from where the model puts it. The sweep
+has to show the camera as the session had it (the same day, the mount untouched between). The head's clicks are as
+they were.
+
+`--out` gets the session's copy (`joint_session.json`, its pictures) and `auto_tips/`, each wrist click's picture with
+the click as it was (magenta) and as measured (green). The session itself is left as it was.
+"""
+
+import argparse
+import shutil
+from collections.abc import Sequence
+from dataclasses import replace
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from lerobot.felix_jr.calibration.joint_fit import load_session, save_session
+from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, pinch_frame
+from lerobot.felix_jr.harness import api
+from lerobot.felix_jr.sim2real.view import undistort
+
+from .gripper_sweep import FingerRenderer, SweepFrame, _project, fit_frame, fixed_tip, load_frames
+
+MAGENTA, GREEN = (255, 0, 255), (0, 220, 0)
+
+
+def to_raw(model: XleRobotModel, arm: str, pixel: np.ndarray) -> np.ndarray:
+    """An undistorted wrist pixel (the calibrated pinhole) back through the lens: the picture's own pixel."""
+    camera = model.wrist_cameras[arm]
+    ray = np.linalg.solve(camera.matrix(), np.r_[pixel, 1.0])
+    return camera.project(ray[None])[0]
+
+
+def sweep_clicks(
+    model: XleRobotModel, arm: str, frames: Sequence[SweepFrame]
+) -> list[tuple[SweepFrame, np.ndarray, np.ndarray]]:
+    """Per open frame of a gripper sweep whose fixed fingertip was found: the frame, its click, the end found.
+
+    The click: the wrist picture's own pixel of the wrist face's tip (the module docstring); the end: px, undistorted.
+    """
+    fingers = FingerRenderer(model, arm)
+    out = []
+    for frame in frames:
+        image = undistort(frame.color, model.wrist_cameras[arm])
+        fit, seen = fit_frame(fingers, frame, image)
+        found = fixed_tip(model, arm, frame.pose, seen) if fit.fitted_deg is not None else None
+        if found is None:
+            continue
+        end, end_model = found
+        q = model.joint_vector({arm: frame.pose})
+        pinch = model.frame_pose(pinch_frame(arm), q)
+        face_model = _project(model, arm, q, (pinch @ np.r_[model.wrist_face(arm), 1.0])[:3])
+        out.append((frame, to_raw(model, arm, end - (end_model - face_model)), end))
+    fingers.close()
+    return out
+
+
+def sweep_tip(model: XleRobotModel, arm: str, folder: Path) -> tuple[np.ndarray, np.ndarray]:
+    """The click a gripper sweep's fingertip makes (a wrist picture's own pixel), and how far apart the ends were found.
+
+    Over the sweep's open frames (px, undistorted; the module docstring).
+    """
+    found = sweep_clicks(model, arm, load_frames(folder))
+    if not found:
+        raise SystemExit(f"{folder}: no open frame showed the fixed fingertip")
+    return np.mean([click for _, click, _ in found], axis=0), np.std([end for _, _, end in found], axis=0)
+
+
+def main() -> None:
+    """Command line entry point; see the module docstring."""
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("session", type=Path)
+    parser.add_argument(
+        "--from-sweep", type=Path, required=True, help="a gripper_sweep folder of the session's arm"
+    )
+    parser.add_argument("--out", type=Path, required=True, help="the new session's folder")
+    parser.add_argument(
+        "--model", type=Path, default=api.MODEL, help="the calibration to find the fingers with"
+    )
+    args = parser.parse_args()
+    if args.out.resolve() == args.session.resolve() or args.out.exists():
+        raise SystemExit(f"--out must be a new folder: {args.out}")
+
+    session = load_session(args.session)
+    model = XleRobotModel.load(args.model)
+    arm = session.arm
+    frames = load_frames(args.from_sweep)
+    if not frames or frames[0].arm != arm:
+        raise SystemExit(f"{args.from_sweep}: not a gripper sweep of the {arm} arm")
+    pixel, spread = sweep_tip(model, arm, args.from_sweep)
+    shutil.copytree(args.session / "images", args.out / "images")
+    (args.out / "auto_tips").mkdir()
+    clicks, moves = [], []
+    for i, click in enumerate(session.clicks):
+        if click.camera != arm:
+            clicks.append(click)
+            continue
+        clicks.append(replace(click, pixel=pixel))
+        moves.append(pixel - np.asarray(click.pixel, dtype=float))
+        shown = cv2.imread(str(args.session / click.image))
+        cv2.circle(shown, tuple(int(round(v)) for v in click.pixel), 5, MAGENTA[::-1], 2)
+        cv2.circle(shown, tuple(int(round(v)) for v in pixel), 5, GREEN[::-1], 2)
+        cv2.imwrite(str(args.out / "auto_tips" / f"{i:03d}.png"), shown)
+    save_session(replace(session, path=args.out, clicks=clicks))
+    moves_ = np.array(moves).reshape(-1, 2)
+    print(
+        f"the sweep's fingertip: {pixel.round(1)} px (a wrist picture's own pixel; the ends found over its open frames "
+        f"{spread.round(1)} px apart)"
+    )
+    print(
+        f"{len(moves)} wrist clicks put there: they moved by {moves_.mean(axis=0).round(1)} px on average; the "
+        f"clicks had been {np.std([c.pixel for c in session.clicks if c.camera == arm], axis=0).round(1)} px apart"
+    )
+    print(f"wrote {args.out} (the pictures with both: {args.out / 'auto_tips'})")
+
+
+if __name__ == "__main__":
+    main()

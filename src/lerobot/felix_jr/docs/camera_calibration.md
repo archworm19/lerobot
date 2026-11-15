@@ -302,18 +302,30 @@ session on the robot (`calibration/joint_collect.py`); below.
 **Run it** (one arm per session; the start must have the arm's wrist camera lens, `calibration.wrist_camera`):
 
 ```bash
-uv run python -m lerobot.felix_jr.calibration.joint_collect tcp://<pi>:5555 --arm right \
+uv run --extra felix_jr --extra felix_jr_sim --extra pyzmq-dep python -m lerobot.felix_jr.calibration.joint_collect tcp://<pi>:5555 --arm right \
     --start-from <calibration.urdf> --out-dir <scratch folder> --board charuco:9x7:0.025:0.018:DICT_4X4_50
 uv run python -m lerobot.felix_jr.calibration.joint_fit <session> [<session> ...] --start-from <calibration.urdf> \
     --out <new calibration.urdf>   # a refit, e.g. both arms' sessions together
 ```
+
+**The wrist fingertip from a gripper sweep, not by eye (2026-11-15).** The wrist camera and the fixed finger are both
+fixed to the gripper, so the fingertip is at one pixel in every wrist frame and a session's wrist clicks all measure
+that one point. With the jaws closed the two tips lie side by side, and joint_right_full4's 27 clicks sat in the notch
+between them (2-3 px apart, ~10 px from the fixed finger's end): the calibration fitted to them moved the camera 3.4 mm
+/ 2.6 deg on the gripper, put the fixed finger off in the simulation, and `gripper_sweep` read 7.5 px. Replaced by the
+fingertip a sweep measures with the jaws open (to 0.5 px; `calibration.auto_tips <session> --from-sweep <sweep> --out
+<session copy>`, then `joint_fit` on the copy): the camera moved 1.2 mm / 0.7 deg, the board residuals and the held-out
+check unchanged, the fixed finger then on the real one (`urdfs/xle_calib_1115_grippers4.urdf`, now `api.MODEL`, with
+both grippers' geometry from `gripper_sweep`). **`joint_collect` now does this itself** (`--wrist-tip sweep`, the
+default): the wrist pane takes no clicks, and after `q` a gripper sweep (the sim's checks, the person asked, the live
+preview) measures the wrist's fingertip into the session before the fit. `--wrist-tip click` keeps clicking by eye.
 
 The board is the printed ChArUco (9 x 7 squares of 25 mm, 18 mm markers, `DICT_4X4_50`; the PDF came from
 `CharucoBoard.image`, so its layout is the detector's by construction): partial views count. Per placement (2 by
 default; the board 26 cm ahead of the arm's base, where grasps are): the arms rest and the head looks where the board
 should go (an outline), its picture live with the found corners dotted green; lay the board there, `n`: the head
 looks at it from 6 directions. Then 10 arm views (`n` each, the arm moves slowly), the head looking at the board:
-click the fixed fingertip in the wrist's picture (the face toward it) and in the head's where it shows. Then 10 low
+click the fixed fingertip in the head's picture where it shows (the wrist's comes from the sweep after `q`). Then 10 low
 poses, the wrist rolled to show the head the fingertip's face it clicks and the head looking at it: click it in both
 (a picture showing the board is one more sighting). `q` fits and writes `calibration.urdf` and `calibration.md`.
 Each click is on one of the fingertip's two faces (`TipClick.face`). The window has three panes: the head's picture

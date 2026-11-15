@@ -1100,22 +1100,29 @@ def pooled(folders: Sequence[Path], out_dir: Path, stamp: str) -> list[tuple[str
     return out
 
 
-def run_on_robot(client, model: XleRobotModel, arm: str, fitter: "Fitter", args: argparse.Namespace) -> bool:
-    """One arm's sweep on the robot (the module docstring), its frames saved and fitted as they come.
+def check_pose(
+    client,
+    model: XleRobotModel,
+    arm: str,
+    fitter: "Fitter",
+    positions: Sequence[float],
+    table_z: float | None,
+    stay: bool,
+    repeats: int,
+    ask: Callable[[str], str] = input,
+) -> dict[str, float] | None:
+    """Before a sweep: the sim's checks of the pose (the module docstring) printed, then the person asked.
 
-    Checks the pose in the sim and asks first; False if refused or declined.
+    The arm's readings where it is now; None if the checks refuse it or the person declines.
     """
-    positions = [float(p) for p in args.positions.split(",")]
-    table = table_height(model, arm, args.table_z)
+    table = table_height(model, arm, table_z)
     start = {k: float(v) for k, v in client.get_state()[f"{arm}_arm"].items()}
-    target = dict(start) if args.stay else {**SWEEP_POSES[arm], "gripper.pos": start["gripper.pos"]}
-    at_start, on_the_way = (
-        (np.inf, np.inf) if args.stay else path_clearance(fitter.fingers, start, target, table)
-    )
+    target = dict(start) if stay else {**SWEEP_POSES[arm], "gripper.pos": start["gripper.pos"]}
+    at_start, on_the_way = (np.inf, np.inf) if stay else path_clearance(fitter.fingers, start, target, table)
     lowest = clearance(fitter.fingers, target, positions, table)
     view = table_view(fitter.fingers, target)
     print(f"{arm} arm: the table taken at {100 * table:.1f} cm (--table-z to set it)")
-    if not args.stay:
+    if not stay:
         print(
             f"  the gripper's lowest over the table: {100 * at_start:.1f} cm where it is, {100 * on_the_way:.1f} cm "
             "on the way to the sweep pose"
@@ -1125,74 +1132,112 @@ def run_on_robot(client, model: XleRobotModel, arm: str, fitter: "Fitter", args:
     print(f"  the wrist camera's view: {100 * view:.0f}% table")
     if min(lowest) < MIN_CLEARANCE_M or on_the_way < min(MIN_CLEARANCE_M, at_start):
         print(f"refused: the gripper would come within {100 * MIN_CLEARANCE_M:.0f} cm of the table")
-        return False
+        return None
     if view < MIN_TABLE_VIEW:
         print("refused: the wrist camera would see too little of the table (the fingers' color is ambiguous)")
-        return False
-    if args.stay:
-        print(f"The {arm} gripper will step through {positions} and come back; the arm stays where it is.")
+        return None
+    if stay:
+        print(
+            f"The {arm} gripper will step through {list(positions)} and come back; the arm stays where it is."
+        )
     else:
         print(
-            f"The {arm} arm will move to its sweep pose {SWEEP_POSES[arm]}, the gripper step through {positions}"
-            + (f" ({args.repeats} times, the arm back where it started between)" if args.repeats > 1 else "")
+            f"The {arm} arm will move to its sweep pose {SWEEP_POSES[arm]}, the gripper step through "
+            f"{list(positions)}"
+            + (f" ({repeats} times, the arm back where it started between)" if repeats > 1 else "")
             + ", and the arms go home at the end."
         )
     print("Keep the jaws clear.")
-    if input("Enter to start, q to skip: ").strip().lower() == "q":
-        return False
+    if ask("Enter to start, q to skip: ").strip().lower() == "q":
+        return None
+    return start
+
+
+def run_sweeps(
+    client,
+    arm: str,
+    fitter: "Fitter",
+    positions: Sequence[float],
+    repeats: int,
+    stay: bool,
+    start: dict[str, float],
+) -> bool:
+    """The sweeps (`check_pose` first), in the caller's session; False if stopped at the preview.
+
+    To the sweep pose (unless `stay`), the preview, then `repeats` sweeps, away and back between; each frame saved and
+    fitted as it comes.
+    """
 
     def on_frame(frame: SweepFrame) -> None:
         save_frame(fitter.folder, len(fitter.fits), frame)
         fitter(frame)
 
-    with client.session(on_disconnect="hold" if args.stay else "home"):
-        if args.stay:
-            client.keep_holding()  # the arm stays put when the run ends; only the gripper moved
-        else:
+    if not stay:
+        client.move_joints({f"{arm}_arm": SWEEP_POSES[arm]}, max_vel=30.0, max_accel=60.0, timeout=15.0)
+    if not preview(client, arm, fitter, fitter.window):
+        print(f"{arm}: stopped at the preview")
+        return False
+    back = {k: v for k, v in start.items() if k != "gripper.pos"}
+    for index in range(repeats):
+        if index and not stay:  # away and back: each sweep arrives at the pose anew, as the arm settles
+            print(f"{arm}: sweep {index + 1} of {repeats}: back where it started, then to the pose again")
+            client.move_joints({f"{arm}_arm": back}, max_vel=30.0, max_accel=60.0, timeout=15.0)
             client.move_joints({f"{arm}_arm": SWEEP_POSES[arm]}, max_vel=30.0, max_accel=60.0, timeout=15.0)
-        if not preview(client, arm, fitter, fitter.window):
-            print(f"{arm}: stopped at the preview")
-            return False
-        back = {k: v for k, v in start.items() if k != "gripper.pos"}
-        for index in range(args.repeats):
-            if (
-                index and not args.stay
-            ):  # away and back: each sweep arrives at the pose anew, as the arm settles
-                print(
-                    f"{arm}: sweep {index + 1} of {args.repeats}: back where it started, then to the pose again"
-                )
-                client.move_joints({f"{arm}_arm": back}, max_vel=30.0, max_accel=60.0, timeout=15.0)
-                client.move_joints(
-                    {f"{arm}_arm": SWEEP_POSES[arm]}, max_vel=30.0, max_accel=60.0, timeout=15.0
-                )
-            sweep(client, arm, positions, on_frame, index)
+        sweep(client, arm, positions, on_frame, index)
     return True
 
 
-def fixed_tips(
-    model: XleRobotModel, arm: str, seen: Sequence[tuple[SweepFrame, Detected, FingerFit]]
-) -> dict[int, tuple[np.ndarray, np.ndarray]]:
-    """Per sweep, the fixed finger's tip as detected and as the model puts it (px, the mean over its open frames).
+def run_on_robot(client, model: XleRobotModel, arm: str, fitter: "Fitter", args: argparse.Namespace) -> bool:
+    """One arm's sweep on the robot (the module docstring), in a session of its own.
+
+    Checks the pose in the sim and asks first (`check_pose`); False if refused or declined.
+    """
+    positions = [float(p) for p in args.positions.split(",")]
+    start = check_pose(client, model, arm, fitter, positions, args.table_z, args.stay, args.repeats)
+    if start is None:
+        return False
+    with client.session(on_disconnect="hold" if args.stay else "home"):
+        if args.stay:
+            client.keep_holding()  # the arm stays put when the run ends; only the gripper moved
+        return run_sweeps(client, arm, fitter, positions, args.repeats, args.stay, start)
+
+
+def fixed_tip(
+    model: XleRobotModel, arm: str, pose: dict[str, float], detected: Detected
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """The fixed finger's tip in one undistorted wrist frame, as detected and as the model puts it (px; None: unseen).
 
     Fixed to the gripper as the camera is, it stays put in the wrist frame unless the camera moves on its mount
     (`docs/hardware_risks.md`). Detected: the far end of the detected fixed finger, along the finger (from a point
-    `FIXED_BACK_M` back from its tip toward it), its corner the wrist camera sees (`FINGER_FIXED_WRIST_TIP_M`).
+    `FIXED_BACK_M` back from its tip toward it), its corner the wrist camera sees (`FINGER_FIXED_WRIST_TIP_M`). With the
+    jaws closed the moving finger's tip lies against it, at about the same place.
     """
     gripper_map = model.gripper_maps.get(arm)
     mount = model.moving_jaw(arm, gripper_map.fixed_finger_mount_deg if gripper_map else 0.0)[:3, :3]
     corner = mount @ robot.FINGER_FIXED_WRIST_TIP_M
     back = mount @ (corner + np.array([0.0, 0.0, -FIXED_BACK_M]))  # (the pinch z points to the tips)
+    q = model.joint_vector({arm: pose})
+    pinch = model.frame_pose(pinch_frame(arm), q)
+    expected = _project(model, arm, q, (pinch @ np.r_[corner, 1.0])[:3])
+    base = _project(model, arm, q, (pinch @ np.r_[back, 1.0])[:3])
+    found = detected_tip(detected.fixed, base, expected, detected.raw)
+    return None if found is None else (found, expected)
+
+
+def fixed_tips(
+    model: XleRobotModel, arm: str, seen: Sequence[tuple[SweepFrame, Detected, FingerFit]]
+) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    """Per sweep, the fixed finger's tip as detected and as the model puts it (`fixed_tip`).
+
+    The mean over the sweep's frames with the jaws open (closed, the moving finger lies against it).
+    """
     tips: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}
     for frame, detected, fit in seen:
-        if fit.fitted_deg is None:  # closed: the moving finger lies against it
+        if fit.fitted_deg is None:
             continue
-        q = model.joint_vector({arm: frame.pose})
-        pinch = model.frame_pose(pinch_frame(arm), q)
-        expected = _project(model, arm, q, (pinch @ np.r_[corner, 1.0])[:3])
-        base = _project(model, arm, q, (pinch @ np.r_[back, 1.0])[:3])
-        found = detected_tip(detected.fixed, base, expected, detected.raw)
+        found = fixed_tip(model, arm, frame.pose, detected)
         if found is not None:
-            tips.setdefault(frame.sweep, []).append((found, expected))
+            tips.setdefault(frame.sweep, []).append(found)
     return {
         k: (np.mean([f for f, _ in v], axis=0), np.mean([e for _, e in v], axis=0)) for k, v in tips.items()
     }

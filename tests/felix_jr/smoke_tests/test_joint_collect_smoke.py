@@ -120,6 +120,7 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup):
             arm_views=5,
             head_views=3,
             low_views=2,
+            wrist_tip="click",  # (clicked here: the fake robot's wrist frames have no fingers for a sweep to find)
         )
         assert session.phase == "place" and shown, session.message
 
@@ -185,3 +186,34 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup):
         error_after,
     )  # 9 mm -> 0.4 here
     assert {s.camera for s in saved.sightings} == {HEAD, ARM}
+
+
+def test_by_default_the_wrist_fingertip_is_not_clicked(setup):
+    """The default (`wrist_tip="sweep"`): a click in the wrist pane is declined, with a message (a gripper sweep measures
+    the wrist's fingertip after `q`); one in the head's pane is recorded as before."""
+    client, start, start_path, truth, true_q, tmp_path = setup
+    with client.session():
+        session = JointCollect(
+            client,
+            ARM,
+            tmp_path / "sweep_session",
+            lambda _: None,
+            start_path,
+            BOARD,
+            placements=1,
+            arm_views=2,
+        )
+        assert session.wrist_tip == "sweep"
+        for _ in range(8):
+            session.live_at = 0.0
+            session.refresh()
+            if session.live is not None:
+                break
+            session.nudge("down")
+        session.next()  # the board found, then seen from around it
+        session.next()  # the first arm view: a look to click in
+        assert session.phase == "arm" and session.look is not None, session.message
+        assert session.click("wrist", 320.0, 240.0) is None and "sweep" in session.message
+        assert not session.session.clicks
+        assert session.click(f"head:{session.head_face}", 320.0, 240.0) is not None
+        assert len(session.session.clicks) == 1

@@ -1,8 +1,9 @@
 """Collect a joint calibration of the head, an arm and its wrist camera (`joint_fit`): one arm per session.
 
-  uv run python -m lerobot.felix_jr.calibration.joint_collect tcp://<pi>:5555 --arm right --out-dir <scratch folder>
-      --start-from <calibration.urdf> [--board checkerboard:8x6:0.025] [--placements 2] [--arm-views 10]
-      [--head-views 6] [--low-views 10] [--max-vel 20] [--resume]
+  uv run --extra felix_jr --extra felix_jr_sim --extra pyzmq-dep python -m lerobot.felix_jr.calibration.joint_collect \
+      tcp://<pi>:5555 --arm right --out-dir <scratch folder> --start-from <calibration.urdf>
+      [--board checkerboard:8x6:0.025] [--placements 2] [--arm-views 10] [--head-views 6] [--low-views 10]
+      [--max-vel 20] [--wrist-tip sweep|click] [--resume]
 
 `docs/camera_calibration.md`, "The rework". Start the server on the Pi with the arm and the head. `--start-from` must
 have the arm's wrist camera (its lens, from `calibration.wrist_camera`, and a first pose on the gripper). The window
@@ -25,6 +26,14 @@ fingertip, the head's the distance along it. Leave the board where it is: a pict
 The head sees one face of the fingertip: click it in that face's head pane (the one marked "expected" is the face the
 model expects it to see; trust the picture over it).
 
+**The wrist camera's fingertip is not clicked** (`--wrist-tip sweep`, the default): it is at one pixel in every wrist
+frame (the camera and the finger both on the gripper), and by eye, with the jaws closed, it was clicked in the notch
+between the tips, ~10 px off (`calibration.auto_tips`). After `q`, before the fit, a gripper sweep measures it with
+the jaws open against the table (`gripper_sweep`: the sim's checks, the person asked, the sweep pose, the live
+preview, one sweep), and each open frame's fingertip goes into the session as a wrist click (`auto_tips.sweep_clicks`;
+its frames in `wrist_tip_sweep/`). Clicks in the wrist pane are declined; the head's are as before. `--wrist-tip
+click`: clicked by eye, as before.
+
 Keys: `n` next, arrows turn the head (if the board is cut off), `u` undo the last click, `q` stop and
 fit. Everything is saved as you go (`joint_session.json`, `images/`), `--resume` continues. At the end the session
 is fitted (`joint_fit.calibrate`) and `calibration.urdf` and `calibration.md` written to `--out-dir`. The script runs
@@ -32,6 +41,7 @@ in a client session: Ctrl+C or a crash sends the robot to rest.
 """
 
 import argparse
+import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -65,6 +75,8 @@ PANE = (480, 360)  # each picture is shown at this size (three side by side)
 # the window's panes: the head's picture twice, one per fingertip face, and the wrist camera's (which sees only its own
 # side). A click is on the face of the pane it is in.
 PANES = ("head:pinch", "head:wrist", "wrist")
+WRIST_TIPS = ("sweep", "click")  # how the wrist camera's fingertip is measured (the module docstring)
+WRIST_TIP_SWEEP = "wrist_tip_sweep"  # the sweep's folder in the session's, and its clicks' `image`
 PANE_TITLES = {
     "head:pinch": "head: pinch face",
     "head:wrist": "head: wrist-camera face",
@@ -199,6 +211,7 @@ class JointCollect:
         head_step_deg: float = 2.0,
         resume: bool = False,
         seed: int = 0,
+        wrist_tip: str = "sweep",
     ):
         """Load the start, check it against the robot, and send the arms to rest for the first placement."""
         self.client, self.arm, self.arm_id, self.out_dir, self.show = client, arm, f"{arm}_arm", out_dir, show
@@ -206,6 +219,9 @@ class JointCollect:
         self.n_head_views, self.n_low_views, self.max_vel = head_views, low_views, max_vel
         self.head_step_deg = head_step_deg
         self.rng = np.random.default_rng(seed)
+        if wrist_tip not in WRIST_TIPS:
+            raise ValueError(f"wrist_tip: one of {WRIST_TIPS}, not {wrist_tip!r}")
+        self.wrist_tip = wrist_tip
         (out_dir / "images").mkdir(parents=True, exist_ok=True)
         self.model = XleRobotModel.load(start_from)
         head = client.head_state()
@@ -531,10 +547,19 @@ class JointCollect:
             return None
         return self.click(region.pane, *region.to_picture(x, y))
 
-    def click(self, pane: str, u: float, v: float) -> TipClick:
-        """Record the fingertip at pixel (u, v) of `pane`'s picture (one of `PANES`), on the pane's face."""
+    def click(self, pane: str, u: float, v: float) -> TipClick | None:
+        """Record the fingertip at pixel (u, v) of `pane`'s picture (one of `PANES`), on the pane's face.
+
+        None (declined) in the wrist pane when a sweep measures the wrist's fingertip (`wrist_tip`, the module docstring).
+        """
         if pane not in PANES:
             raise ValueError(f"no pane {pane!r}: one of {PANES}")
+        if pane_camera(pane) != "head" and self.wrist_tip == "sweep":
+            self.message = (
+                "the wrist camera's fingertip is measured by a sweep after q: click only the head's panes"
+            )
+            self.render()
+            return None
         head = pane_camera(pane) == "head"
         capture = self.head if head else self.wrist
         assert capture is not None and self.look is not None
@@ -578,6 +603,42 @@ class JointCollect:
         if self.phase == "arm":
             self._sight(HEAD)
         self.render()
+
+    def measure_wrist_tip(self, window: bool = True, ask: Callable[[str], str] = input) -> int:
+        """The wrist camera's fingertip by a gripper sweep (the module docstring), into the session as wrist clicks.
+
+        Replaces the wrist clicks an earlier sweep made (`--resume`); the number added (0: refused, declined, stopped
+        at the preview, or no fingertip seen).
+        """
+        from .auto_tips import sweep_clicks
+        from .gripper_sweep import DEFAULT_POSITIONS, Fitter, check_pose, run_sweeps
+
+        folder = self.out_dir / WRIST_TIP_SWEEP
+        if folder.exists():
+            shutil.rmtree(folder)
+        folder.mkdir(parents=True)
+        fitter = Fitter(self.model, self.arm, folder, window=window)
+        positions = list(DEFAULT_POSITIONS)
+        start = check_pose(self.client, self.model, self.arm, fitter, positions, None, False, 1, ask)
+        done = start is not None and run_sweeps(self.client, self.arm, fitter, positions, 1, False, start)
+        fitter.fingers.close()
+        if not done:
+            return 0
+        found = sweep_clicks(self.model, self.arm, [frame for frame, _, _ in fitter.seen])
+        if not found:
+            return 0
+        ticks = self._ticks()
+        self.session.clicks = [
+            c
+            for c in self.session.clicks
+            if not (c.camera == self.arm and c.image.startswith(WRIST_TIP_SWEEP))
+        ]
+        for i, (frame, pixel, _) in enumerate(found):
+            look = Look({self.arm: dict(frame.pose)}, ticks)
+            image = f"{WRIST_TIP_SWEEP}/frame_{i:02d}.npz"
+            self.session.clicks.append(TipClick(self.arm, self.arm, look, pixel, image, "wrist"))
+        save_session(self.session)
+        return len(found)
 
     def finish(self, holdout_every: int = 5, head_axes: bool = False) -> Path | None:
         """Fit the session and write `calibration.urdf` and `calibration.md` (None if there is too little).
@@ -684,6 +745,12 @@ def main() -> None:
     parser.add_argument("--max-vel", type=float, default=20.0, help="arm speed limit, deg/s (20)")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
+        "--wrist-tip",
+        choices=WRIST_TIPS,
+        default="sweep",
+        help="the wrist camera's fingertip: measured by a gripper sweep after q (default), or clicked",
+    )
+    parser.add_argument(
         "--head-axes",
         action="store_true",
         help="fit the head's pan and tilt axes' tilts too (4 more parameters)",
@@ -715,6 +782,7 @@ def main() -> None:
             args.low_views,
             args.max_vel,
             resume=args.resume,
+            wrist_tip=args.wrist_tip,
         )
         cv2.setMouseCallback(window, on_mouse)
         try:
@@ -728,6 +796,13 @@ def main() -> None:
                     break
         finally:
             cv2.destroyAllWindows()
+        if args.wrist_tip == "sweep":
+            added = session.measure_wrist_tip()
+            print(
+                f"the wrist camera's fingertip: {added} frames of the sweep into the session"
+                if added
+                else "the wrist camera's fingertip was not measured: the fit has the head's clicks only for it"
+            )
         client.home(max_vel=args.max_vel)
     print(f"saved to {args.out_dir / SESSION_FILE}")
     path = session.finish(head_axes=args.head_axes)

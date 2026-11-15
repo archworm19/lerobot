@@ -74,8 +74,10 @@ if TYPE_CHECKING:
 # fingers' 1 cm thickness accounted for (`JAW_THICKNESS_M`: the wrist camera sees their other face). The 7.8 deg of
 # `xle_calib_1008_wrist.urdf` absorbed that thickness.
 # the joint calibration of the head, both arms and their wrist cameras (2026-11-14: joint_left_full4 + joint_right_full2;
-# docs/camera_calibration.md, "The rework")
-MODEL = Path(__file__).parents[1] / "urdfs" / "xle_calib_1114_joint.urdf"
+# docs/camera_calibration.md, "The rework"), the right arm's again after its camera's mount was tightened
+# (2026-11-15: joint_right_full4, its wrist fingertip from a gripper sweep, `calibration.auto_tips`), and both
+# grippers' geometry from three sweeps each (the hinges, the fingers' mounts, the maps: `calibration.gripper_sweep`)
+MODEL = Path(__file__).parents[1] / "urdfs" / "xle_calib_1115_grippers4.urdf"
 ENDPOINT = "tcp://ikeabot.local:5555"
 
 
