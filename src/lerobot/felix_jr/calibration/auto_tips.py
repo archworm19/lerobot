@@ -32,12 +32,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from lerobot.felix_jr.calibration.joint_fit import load_session, save_session
+from lerobot.felix_jr.calibration.joint_fit import MOVING, Look, TipClick, load_session, save_session
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, pinch_frame
 from lerobot.felix_jr.harness import api
 from lerobot.felix_jr.sim2real.view import undistort
 
-from .gripper_sweep import FingerRenderer, SweepFrame, _project, fit_frame, fixed_tip, load_frames
+from .gripper_sweep import FingerRenderer, SweepFrame, _project, fit_frame, fixed_tip, load_frames, tip_pixel
 
 MAGENTA, GREEN = (255, 0, 255), (0, 220, 0)
 
@@ -51,37 +51,52 @@ def to_raw(model: XleRobotModel, arm: str, pixel: np.ndarray) -> np.ndarray:
 
 def sweep_clicks(
     model: XleRobotModel, arm: str, frames: Sequence[SweepFrame]
-) -> list[tuple[SweepFrame, np.ndarray, np.ndarray]]:
-    """Per open frame of a gripper sweep whose fixed fingertip was found: the frame, its click, the end found.
+) -> list[tuple[SweepFrame, str, np.ndarray]]:
+    """A gripper sweep's open frames as clicks: (frame, face, the wrist picture's own pixel) each.
 
-    The click: the wrist picture's own pixel of the wrist face's tip (the module docstring); the end: px, undistorted.
+    Per frame, the fixed fingertip (face "wrist": the wrist face's tip) and the moving one (`MOVING`: the moving
+    finger's wrist face, the jaws open by the frame's `gripper.pos`), where found. Each moved from the end the camera
+    sees to the point the calibration fits, by the model's own offset between them (the module docstring).
     """
     fingers = FingerRenderer(model, arm)
-    out = []
+    face = model.wrist_face(arm)
+    out: list[tuple[SweepFrame, str, np.ndarray]] = []
     for frame in frames:
         image = undistort(frame.color, model.wrist_cameras[arm])
         fit, seen = fit_frame(fingers, frame, image)
-        found = fixed_tip(model, arm, frame.pose, seen) if fit.fitted_deg is not None else None
-        if found is None:
+        if fit.fitted_deg is None:  # closed: the tips lie together
             continue
-        end, end_model = found
         q = model.joint_vector({arm: frame.pose})
         pinch = model.frame_pose(pinch_frame(arm), q)
-        face_model = _project(model, arm, q, (pinch @ np.r_[model.wrist_face(arm), 1.0])[:3])
-        out.append((frame, to_raw(model, arm, end - (end_model - face_model)), end))
+        found = fixed_tip(model, arm, frame.pose, seen)
+        if found is not None:
+            end, end_model = found
+            face_model = _project(model, arm, q, (pinch @ np.r_[face, 1.0])[:3])
+            out.append((frame, "wrist", to_raw(model, arm, end - (end_model - face_model))))
+        if seen.tip is not None:
+            opening = model.opening_deg(arm, frame.pose["gripper.pos"])
+            turned = model.moving_jaw(arm, opening) @ np.r_[face, 1.0]  # (pinch frame)
+            face_model = _project(model, arm, q, (pinch @ turned)[:3])
+            out.append(
+                (
+                    frame,
+                    MOVING,
+                    to_raw(model, arm, seen.tip - (tip_pixel(model, arm, q, opening) - face_model)),
+                )
+            )
     fingers.close()
     return out
 
 
 def sweep_tip(model: XleRobotModel, arm: str, folder: Path) -> tuple[np.ndarray, np.ndarray]:
-    """The click a gripper sweep's fingertip makes (a wrist picture's own pixel), and how far apart the ends were found.
+    """The click a gripper sweep's fixed fingertip makes (a wrist picture's own pixel), and how far apart it was found.
 
-    Over the sweep's open frames (px, undistorted; the module docstring).
+    Over the sweep's open frames (px; the module docstring).
     """
-    found = sweep_clicks(model, arm, load_frames(folder))
-    if not found:
+    fixed = [pixel for _, face, pixel in sweep_clicks(model, arm, load_frames(folder)) if face == "wrist"]
+    if not fixed:
         raise SystemExit(f"{folder}: no open frame showed the fixed fingertip")
-    return np.mean([click for _, click, _ in found], axis=0), np.std([end for _, _, end in found], axis=0)
+    return np.mean(fixed, axis=0), np.std(fixed, axis=0)
 
 
 def main() -> None:
@@ -105,30 +120,45 @@ def main() -> None:
     frames = load_frames(args.from_sweep)
     if not frames or frames[0].arm != arm:
         raise SystemExit(f"{args.from_sweep}: not a gripper sweep of the {arm} arm")
-    pixel, spread = sweep_tip(model, arm, args.from_sweep)
+    found = sweep_clicks(model, arm, frames)
+    fixed = [pixel for _, face, pixel in found if face == "wrist"]
+    if not fixed:
+        raise SystemExit(f"{args.from_sweep}: no open frame showed the fixed fingertip")
+    pixel, spread = np.mean(fixed, axis=0), np.std(fixed, axis=0)
     shutil.copytree(args.session / "images", args.out / "images")
     (args.out / "auto_tips").mkdir()
     clicks, moves = [], []
     for i, click in enumerate(session.clicks):
-        if click.camera != arm:
-            clicks.append(click)
+        if click.camera != arm or click.on_face == MOVING:
+            if click.camera != arm:
+                clicks.append(click)
             continue
         clicks.append(replace(click, pixel=pixel))
         moves.append(pixel - np.asarray(click.pixel, dtype=float))
-        shown = cv2.imread(str(args.session / click.image))
-        cv2.circle(shown, tuple(int(round(v)) for v in click.pixel), 5, MAGENTA[::-1], 2)
-        cv2.circle(shown, tuple(int(round(v)) for v in pixel), 5, GREEN[::-1], 2)
-        cv2.imwrite(str(args.out / "auto_tips" / f"{i:03d}.png"), shown)
+        shown = cv2.imread(str(args.session / click.image)) if click.image.endswith(".png") else None
+        if shown is not None:  # (a sweep's click has no picture of its own)
+            cv2.circle(shown, tuple(int(round(v)) for v in click.pixel), 5, MAGENTA[::-1], 2)
+            cv2.circle(shown, tuple(int(round(v)) for v in pixel), 5, GREEN[::-1], 2)
+            cv2.imwrite(str(args.out / "auto_tips" / f"{i:03d}.png"), shown)
+    # the moving finger's tips: its arc sets the hinge and the camera's turn about the roll axis (`joint_fit.MOVING`)
+    ticks = next(
+        iter(session.sightings)
+    ).look.head_ticks  # (any: the wrist camera's picture does not depend on it)
+    moving = [(frame, p) for frame, face, p in found if face == MOVING]
+    for k, (frame, p) in enumerate(moving):
+        look = Look({arm: dict(frame.pose)}, dict(ticks))
+        clicks.append(TipClick(arm, arm, look, p, f"{args.from_sweep.name}/frame_{k:02d}", MOVING))
     save_session(replace(session, path=args.out, clicks=clicks))
     moves_ = np.array(moves).reshape(-1, 2)
     print(
-        f"the sweep's fingertip: {pixel.round(1)} px (a wrist picture's own pixel; the ends found over its open frames "
+        f"the sweep's fixed fingertip: {pixel.round(1)} px (a wrist picture's own pixel; found over its open frames "
         f"{spread.round(1)} px apart)"
     )
     print(
         f"{len(moves)} wrist clicks put there: they moved by {moves_.mean(axis=0).round(1)} px on average; the "
         f"clicks had been {np.std([c.pixel for c in session.clicks if c.camera == arm], axis=0).round(1)} px apart"
     )
+    print(f"{len(moving)} moving fingertips added (the hinge and the camera's turn about the roll axis)")
     print(f"wrote {args.out} (the pictures with both: {args.out / 'auto_tips'})")
 
 

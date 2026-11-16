@@ -57,6 +57,14 @@ HEAD = "head"
 SIGMA_BOARD_PX = 0.5  # a board point's noise, either camera
 SIGMA_CLICK_PX = 2.5  # a person's click on a fingertip
 THICKNESS_SIGMA_M = 0.001  # the fingers' thickness, measured (1.0 cm)
+MOVING = "moving"  # a click's face: the moving finger's tip (its wrist face), the jaws open (`TipClick`)
+MOVING_PINCH = "moving_pinch"  # the moving finger's tip on the pinch face (the head's side), the jaws open
+MOVING_FACES = (MOVING, MOVING_PINCH)
+ALONG_AXIS = (
+    0.99  # a hinge parameter this near the hinge's own axis (its cosine) is not fitted (`JointProblem`)
+)
+CORRELATED = 0.9  # `uncertainty`: two unknowns this correlated after the fit are flagged
+OPENING_SIGMA_DEG = 3.0  # the gripper map's opening, off by this much at most (`gripper_sweep`: within 2 deg)
 JOINT_SIGMA_DEG = 0.2  # a joint's reading against where it is (a servo tick is 0.09 deg; play)
 HUBER = 2.0  # in sigmas: beyond, a residual is down-weighted
 # a board's start (`JointProblem._first_board_pose`): its sightings' poses this near the most central one are averaged
@@ -92,7 +100,11 @@ class TipClick:
     """`arm`'s fixed fingertip clicked at `pixel` in `camera`'s picture, on one of its two faces.
 
     `face`: "pinch" (the pinch point, the face away from the wrist camera) or "wrist" (the face toward it, one thickness
-    along the hinge). Empty (sessions before 2026-11-11): by the camera, the head's clicks on "pinch", the wrist
+    along the hinge); or `MOVING`, the moving finger's tip on the wrist's side, the jaws open by the look's
+    `gripper.pos` (a gripper sweep's open frames: `auto_tips.sweep_clicks`), or `MOVING_PINCH`, its tip on the pinch
+    face (the head's clicks, the jaws open): its arc about the hinge sets the hinge and
+    the wrist camera's turn about the roll axis, which the board alone traded for the wrist roll's zero
+    (joint_left_full5: 2.7 deg one way, 1.9 the other). Empty (sessions before 2026-11-11): by the camera, the head's clicks on "pinch", the wrist
     camera's on "wrist" (it cannot see the other).
     """
 
@@ -121,6 +133,11 @@ class JointFit:
     nfev: int = 0
     message: str = ""
     cost: float = 0.0  # the solver's (Huber) cost at the end: comparable between fits of one problem
+    openings: dict[str, float] = field(
+        default_factory=dict
+    )  # per arm with moving clicks: its map's opening off (deg)
+    x: np.ndarray | None = None  # the solution vector (`JointProblem`'s layout), for `uncertainty`
+    median_px: dict[str, float] = field(default_factory=dict)  # each kind's median error (px): `fit_failed`
 
 
 def _pose(x: np.ndarray) -> np.ndarray:
@@ -157,10 +174,20 @@ class JointProblem:
         self.model, self.board, self.cameras = model, board, dict(cameras)
         self.sightings, self.clicks = list(sightings), list(clicks)
         self.arms = sorted(self.cameras)
+        self.moving_arms = sorted({c.arm for c in self.clicks if c.on_face in MOVING_FACES})
         self.placements = sorted({s.placement for s in self.sightings})
         self.free = np.array(
             [p.arm is None or (arms_free and p.arm in self.arms) for p in model.parameters], dtype=bool
         )
+        # a gripper hinge's position along its own axis moves nothing: held where it is (else only its prior holds it)
+        for arm in {p.arm for p in model.parameters if p.arm and p.name.startswith(f"pos:{p.arm}_gripper:")}:
+            axis = model.hinge_axis_in_gripper(arm)
+            for i, p in enumerate(model.parameters):
+                if (
+                    p.name.startswith(f"pos:{arm}_gripper:")
+                    and abs(axis["xyz".index(p.name[-1])]) > ALONG_AXIS
+                ):
+                    self.free[i] = False
         self.mean = np.array([p.mean for p in model.parameters])
         self.sigma = np.array([p.sigma for p in model.parameters])
         self.joint_sigma = np.radians(joint_sigma_deg)
@@ -182,6 +209,8 @@ class JointProblem:
             "thickness": slice(n_theta + n_gc + n_board, n_theta + n_gc + n_board + 1),
         }
         start = self.slices["thickness"].stop
+        self.slices["openings"] = slice(start, start + len(self.moving_arms))
+        start = self.slices["openings"].stop
         self.slices["joints"] = slice(start, start + len(self.looks) * len(self.joint_index))
         self.size = self.slices["joints"].stop
 
@@ -212,7 +241,12 @@ class JointProblem:
             for a in self.arms
         ]
         joints = np.zeros(self.slices["joints"].stop - self.slices["joints"].start)
-        return np.concatenate([theta[self.free], *gcs, *boards, [JAW_THICKNESS_M], joints])
+        openings = np.zeros(len(self.moving_arms))
+        return np.concatenate([theta[self.free], *gcs, *boards, [JAW_THICKNESS_M], openings, joints])
+
+    def openings(self, x: np.ndarray) -> dict[str, float]:
+        """Each arm with moving clicks: how far its gripper map's opening is off (deg; the real opening less the map's)."""
+        return {a: float(v) for a, v in zip(self.moving_arms, x[self.slices["openings"]], strict=True)}
 
     def unpack(
         self, x: np.ndarray, theta0: np.ndarray | None = None
@@ -262,21 +296,32 @@ class JointProblem:
         mine = [s for s in self.sightings if s.placement == placement]
         mine = [s for s in mine if s.camera == HEAD] or mine
         poses = [self._sighting_board_pose(s, theta) for s in mine]
-        center = self.board.points().mean(axis=0)
-        centers = np.array([p[:3, :3] @ center + p[:3, 3] for p in poses])
-        turns = np.array(
-            [[np.linalg.norm(cv2.Rodrigues(a[:3, :3].T @ b[:3, :3])[0]) for b in poses] for a in poses]
-        )
-        apart = np.linalg.norm(centers[:, None] - centers[None], axis=2)
-        spread = apart / BOARD_START_AGREE_M + turns / np.radians(BOARD_START_AGREE_DEG)
-        reference = int(np.argmin(spread.sum(axis=1)))  # the medoid
-        near = [
-            p
-            for i, p in enumerate(poses)
-            if apart[reference, i] <= BOARD_START_AGREE_M
-            and turns[reference, i] <= np.radians(BOARD_START_AGREE_DEG)
-        ]
-        return _mean_pose(near)
+        return _medoid_mean(poses, self.board.points().mean(axis=0))
+
+    def wrist_cameras_from_sightings(
+        self, theta: np.ndarray, boards: Mapping[str, np.ndarray]
+    ) -> dict[str, np.ndarray]:
+        """Each arm's wrist camera on its gripper, from its own board sightings against `boards` (the arm at `theta`).
+
+        Per sighting with `MIN_POSE_POINTS` or more: the camera's PnP pose of the board, taken back through the board's
+        pose and the arm's chain to the gripper; robustly averaged (`_medoid_mean`). An arm without one keeps its
+        camera's current pose. A start for when the camera's current pose is far off (`fit_staged`).
+        """
+        out = {}
+        for arm in self.arms:
+            camera = self.cameras[arm]
+            poses = []
+            for s in self.sightings:
+                if s.camera != arm or s.placement not in boards or len(s.detection) < MIN_POSE_POINTS:
+                    continue
+                camera_board = board_pose(
+                    self.board, s.detection, camera.matrix(), camera.coeffs, camera.model == "fisheye"
+                )
+                root_link = self.model.frame_pose(wrist_camera_link(arm), self._q[id(s)], theta)
+                poses.append(np.linalg.inv(root_link) @ boards[s.placement] @ np.linalg.inv(camera_board))
+            current = np.asarray(camera.gripper_from_camera, dtype=np.float64)
+            out[arm] = _medoid_mean(poses, np.zeros(3)) if poses else current
+        return out
 
     # ---- predictions and residuals ------------------------------------------------------------------------------
 
@@ -290,17 +335,36 @@ class JointProblem:
         in_camera = (points_root - root_camera[:3, 3]) @ root_camera[:3, :3]
         return self.cameras[camera].project(in_camera)
 
-    def tip(self, click: TipClick, q: np.ndarray, theta: np.ndarray, thickness: float) -> np.ndarray:
-        """The clicked fingertip in the root frame: the pinch point, or the other face's (`TipClick.on_face`)."""
+    def tip(
+        self,
+        click: TipClick,
+        q: np.ndarray,
+        theta: np.ndarray,
+        thickness: float,
+        openings: Mapping[str, float] | None = None,
+    ) -> np.ndarray:
+        """The clicked fingertip in the root frame: the pinch point, the other face's, or the moving finger's.
+
+        (`TipClick.on_face`.) The moving finger's: the fixed one's wrist face turned about the hinge by the jaws'
+        opening, the gripper map's at the look's `gripper.pos` plus `openings`' offset for the arm (deg).
+        """
         pinch = self.model.frame_pose(pinch_frame(click.arm), q, theta)
         if click.on_face == "pinch":
             return pinch[:3, 3]
         face = self.model.wrist_face(click.arm) * (thickness / JAW_THICKNESS_M)
+        if click.on_face == MOVING_PINCH:
+            face = np.zeros(3)
+        if click.on_face in MOVING_FACES:
+            opening = self.model.opening_deg(click.arm, float(click.look.arms[click.arm]["gripper.pos"]))
+            opening += (openings or {}).get(click.arm, 0.0)
+            turned = self.model.moving_jaw(click.arm, opening, theta)  # (pinch frame)
+            face = turned[:3, :3] @ face + turned[:3, 3]
         return pinch[:3, :3] @ face + pinch[:3, 3]
 
     def residual_parts(self, x: np.ndarray, theta0: np.ndarray | None = None) -> dict[str, np.ndarray]:
         """Each kind's residuals over its noise: "head board", "<arm> board", "head click", "<arm> click"."""
         theta, gcs, boards, thickness = self.unpack(x, theta0)
+        openings = self.openings(x)
         parts: dict[str, list[np.ndarray]] = {}
         for s in self.sightings:
             pose = boards[s.placement]
@@ -311,7 +375,7 @@ class JointProblem:
             )
         for c in self.clicks:
             q = self.q(c, x)
-            uv = self.project(c.camera, q, self.tip(c, q, theta, thickness)[None], theta, gcs)
+            uv = self.project(c.camera, q, self.tip(c, q, theta, thickness, openings)[None], theta, gcs)
             parts.setdefault(f"{c.camera} click", []).append(((uv[0] - c.pixel) / SIGMA_CLICK_PX).ravel())
         return {k: np.nan_to_num(np.concatenate(v), nan=BEHIND_CAMERA_PX) for k, v in parts.items()}
 
@@ -319,8 +383,9 @@ class JointProblem:
         """The estimates', the thickness' and the joints' errors' prior residuals."""
         theta = (x[self.slices["theta"]] - self.mean[self.free]) / self.sigma[self.free]
         thickness = (x[self.slices["thickness"]] - JAW_THICKNESS_M) / THICKNESS_SIGMA_M
+        openings = x[self.slices["openings"]] / OPENING_SIGMA_DEG
         joints = x[self.slices["joints"]] / self.joint_sigma if self.looks else np.zeros(0)
-        return np.concatenate([theta, thickness, joints])
+        return np.concatenate([theta, thickness, openings, joints])
 
     def residuals(self, x: np.ndarray, theta0: np.ndarray | None = None) -> np.ndarray:
         """Every residual (in `residual_parts`' order), then the priors."""
@@ -336,6 +401,7 @@ class JointProblem:
         dense = np.zeros(self.size, dtype=bool)
         dense[: self.slices["boards"].start] = True  # the estimates and the cameras' poses: everything
         dense[self.slices["thickness"]] = True
+        dense[self.slices["openings"]] = True
 
         def row(observation: BoardSighting | TipClick, board: str | None) -> np.ndarray:
             r = dense.copy()
@@ -358,6 +424,7 @@ class JointProblem:
             np.r_[
                 np.arange(self.slices["theta"].stop),
                 self.slices["thickness"].start,
+                np.arange(self.slices["openings"].start, self.slices["openings"].stop),
                 np.arange(self.slices["joints"].start, self.size) if self.looks else [],
             ].astype(int)
         ]
@@ -411,6 +478,7 @@ class JointProblem:
         scale = np.ones(self.size) * 0.01
         scale[self.slices["theta"]] = self.sigma[self.free]
         scale[self.slices["thickness"]] = THICKNESS_SIGMA_M
+        scale[self.slices["openings"]] = OPENING_SIGMA_DEG
         scale[self.slices["joints"]] = max(self.joint_sigma, 1e-4)
         result = least_squares(
             lambda x: self.residuals(x, theta0),
@@ -423,13 +491,58 @@ class JointProblem:
         )
         theta, gcs, boards, thickness = self.unpack(result.x, theta0)
         sigmas = {"board": SIGMA_BOARD_PX, "click": SIGMA_CLICK_PX}
+        parts = self.residual_parts(result.x, theta0)
         rms = {
             k: float(np.sqrt(np.mean(np.minimum(np.abs(v), BEHIND_CAMERA_PX) ** 2))) * sigmas[k.split()[-1]]
-            for k, v in self.residual_parts(result.x, theta0).items()
+            for k, v in parts.items()
+        }
+        median = {
+            k: float(np.median(np.linalg.norm(v.reshape(-1, 2), axis=1))) * sigmas[k.split()[-1]]
+            for k, v in parts.items()
         }
         return JointFit(
-            theta, gcs, boards, thickness, rms, int(result.nfev), str(result.message), float(result.cost)
+            theta,
+            gcs,
+            boards,
+            thickness,
+            rms,
+            int(result.nfev),
+            str(result.message),
+            float(result.cost),
+            self.openings(result.x),
+            result.x,
+            median,
         )
+
+
+def _medoid_mean(poses: Sequence[np.ndarray], point: np.ndarray) -> np.ndarray:
+    """Poses averaged robustly, around their medoid.
+
+    The one nearest the others (by where each puts `point`, and its turn) is the reference; those within
+    `BOARD_START_AGREE_M` and `BOARD_START_AGREE_DEG` of it are averaged (`_mean_pose`).
+    """
+    centers = np.array([p[:3, :3] @ point + p[:3, 3] for p in poses])
+    turns = np.array(
+        [[np.linalg.norm(cv2.Rodrigues(a[:3, :3].T @ b[:3, :3])[0]) for b in poses] for a in poses]
+    )
+    apart = np.linalg.norm(centers[:, None] - centers[None], axis=2)
+    spread = apart / BOARD_START_AGREE_M + turns / np.radians(BOARD_START_AGREE_DEG)
+    reference = int(np.argmin(spread.sum(axis=1)))
+    near = [
+        p
+        for i, p in enumerate(poses)
+        if apart[reference, i] <= BOARD_START_AGREE_M
+        and turns[reference, i] <= np.radians(BOARD_START_AGREE_DEG)
+    ]
+    return _mean_pose(near)
+
+
+def fit_failed(fit: JointFit) -> bool:
+    """Whether a fit is a wrong solution: some kind of residual's median error over `FIT_FAILED_PX`.
+
+    The median, not the RMS: a few mis-clicks (`MISCLICK_PX`) lift a kind's RMS, a wrong solution moves every point.
+    """
+    return any(v > FIT_FAILED_PX for v in fit.median_px.values())
 
 
 def _mean_pose(poses: Sequence[np.ndarray]) -> np.ndarray:
@@ -443,6 +556,11 @@ def _mean_pose(poses: Sequence[np.ndarray]) -> np.ndarray:
 
 
 STAGED_TRIAL_NFEV = 150  # each start's trial: the wrong solutions show by then (costs 100x+ the right one's)
+# the arm-held start's steps at most: only a start (its trial judges it), and a wrong one crept on for 1500 (579 s)
+HELD_START_NFEV = 300
+# a fit with some kind of residual's median error over this is a wrong solution (the noise is 0.3-2.5 px; joint_sim's failures,
+# 2026-11-15: 12-264 px), retried from more starts (`fit_staged`) and flagged (`calibrate`)
+FIT_FAILED_PX = 10.0
 
 
 def fit_staged(problem: "JointProblem", max_nfev: int = MAX_NFEV) -> JointFit:
@@ -458,23 +576,44 @@ def fit_staged(problem: "JointProblem", max_nfev: int = MAX_NFEV) -> JointFit:
       head's, the cameras' poses on their grippers, the boards): the arm anchors the root frame, so the head and the
       boards cannot swing together, as they did fitted alone (2026-11-13: the boards 3 cm and 7 deg sideways of the
       final fit's on both robot sessions, against 1.5-2.5 cm for the plain start). Then everything, from there.
+      Without the moving finger's clicks (`MOVING_FACES`): the hinge and the opening are the arm's, held, and the
+      head's clicks on the moving tip pulled the head off to explain them (joint_sim, the head clicking it: this start
+      at 34x the answer's cost, the plain one crawling 1500 steps unconverged; without them, converged in 107 s).
+
+    If the result is a wrong solution (`fit_failed`), each start is tried again with the wrist cameras re-estimated
+    from their own board sightings (`JointProblem.wrist_cameras_from_sightings`) and the lowest cost kept: a camera
+    far off its current pose put the board behind it, where the residual is flat and the fit stops (joint_sim,
+    2026-11-15: stopped in 20-30 steps at 1000x the truth's cost, its wrist board 134-264 px off).
     """
     starts: list[
         tuple[np.ndarray | None, Mapping[str, np.ndarray] | None, Mapping[str, np.ndarray] | None]
     ] = [(None, None, None)]
     if problem.arms:
+        fixed_tips = [c for c in problem.clicks if c.on_face not in MOVING_FACES]
         held = JointProblem(
-            problem.model, problem.board, problem.cameras, problem.sightings, problem.clicks, arms_free=False
-        ).fit(max_nfev=max_nfev)
+            problem.model, problem.board, problem.cameras, problem.sightings, fixed_tips, arms_free=False
+        ).fit(max_nfev=min(HELD_START_NFEV, max_nfev))
         starts.append((held.theta, held.gripper_from_camera, held.boards))
     trials = [
         problem.fit(theta0, min(STAGED_TRIAL_NFEV, max_nfev), gcs0, boards0)
         for theta0, gcs0, boards0 in starts
     ]
     best = min(trials, key=lambda t: t.cost)
-    if best.nfev < min(STAGED_TRIAL_NFEV, max_nfev):  # converged within its trial
+    if best.nfev >= min(STAGED_TRIAL_NFEV, max_nfev):  # not converged within its trial: on to the end
+        best = problem.fit(best.theta, max_nfev, best.gripper_from_camera, best.boards)
+    if not fit_failed(best) or not problem.arms:
         return best
-    return problem.fit(best.theta, max_nfev, best.gripper_from_camera, best.boards)
+    retries = [best]
+    for theta0, _, boards0 in starts:
+        theta = problem.model.estimates if theta0 is None else theta0
+        boards = (
+            dict(boards0)
+            if boards0 is not None
+            else {p: problem._first_board_pose(p, theta) for p in problem.placements}
+        )
+        gcs = problem.wrist_cameras_from_sightings(theta, boards)
+        retries.append(problem.fit(theta0, max_nfev, gcs, boards))
+    return min(retries, key=lambda t: t.cost)
 
 
 # ---- sessions ---------------------------------------------------------------------------------------------------
@@ -618,6 +757,8 @@ def split_holdout(
     )
 
 
+# a click this far from where the fit puts its fingertip is a mis-click (`calibrate`)
+MISCLICK_PX = 30.0
 # a camera's board pose from fewer of the board's points than this is not trusted for the held-out check (`agreement`;
 # joint_right_full4: from 6, 91 deg off; from 11, 1 deg)
 MIN_POSE_POINTS = 10
@@ -667,15 +808,183 @@ def agreement(
     return np.array(out, dtype=np.float64).reshape(-1, 2)
 
 
+def fitted_pixel(problem: "JointProblem", fit: JointFit, click: TipClick) -> np.ndarray:
+    """Where `fit` puts a click's fingertip in its camera's picture, at the joints as read (NaN behind the camera)."""
+    q = problem._q[id(click)]
+    tip = problem.tip(click, q, fit.theta, fit.thickness, fit.openings)[None]
+    return problem.project(click.camera, q, tip, fit.theta, fit.gripper_from_camera)[0]
+
+
+def click_misses(problem: "JointProblem", fit: JointFit) -> list[float]:
+    """Each click's distance (px) from where `fit` puts its fingertip, at the joints as read (inf behind the camera)."""
+    out = []
+    for c in problem.clicks:
+        uv = fitted_pixel(problem, fit, c)
+        out.append(float(np.linalg.norm(uv - c.pixel)) if np.isfinite(uv).all() else float("inf"))
+    return out
+
+
+def save_misclicks(numbers: Mapping[str, Any], folder: Path) -> None:
+    """Each mis-click's picture into `folder`'s `misclicks/`: the click magenta, the fitted fingertip green.
+
+    Each record gets its picture's name (`shown`), for the report.
+    """
+    for i, m in enumerate([*numbers.get("misclicks", []), *numbers.get("misclicks_kept", [])]):
+        picture = cv2.imread(str(Path(m["session"]) / m["image"])) if m["image"] else None
+        if picture is None:
+            continue
+        for uv, color in ((m["pixel"], (255, 0, 255)), (m["fitted"], (0, 220, 0))):
+            if np.isfinite(uv).all():
+                cv2.circle(picture, (int(round(uv[0])), int(round(uv[1]))), 10, color, 3)
+        (folder / "misclicks").mkdir(parents=True, exist_ok=True)
+        name = f"misclicks/{i:02d}.png"
+        cv2.imwrite(str(folder / name), picture)
+        m["shown"] = name
+
+
+def unknown_names(problem: JointProblem) -> list[tuple[str, slice | int, float, str]]:
+    """The unknowns worth reporting, (name, index in the vector, display factor, unit) each.
+
+    The model's free estimates, each wrist camera's pose on its gripper (its turn in the gripper's frame, its shift),
+    the thickness and the openings; not the boards' poses or the joints' errors (nuisance: marginalized, not shown).
+    """
+    out: list[tuple[str, slice | int, float, str]] = []
+    start = problem.slices["theta"].start
+    for p in (p for p, free in zip(problem.model.parameters, problem.free, strict=True) if free):
+        out.append((p.name, start, float(np.degrees(1.0)) if p.angular else 1000.0, p.unit))
+        start += 1
+    for i, arm in enumerate(problem.arms):
+        base = problem.slices["gc"].start + 6 * i
+        out += [
+            (f"{arm} camera turn {a}", base + k, float(np.degrees(1.0)), "deg") for k, a in enumerate("xyz")
+        ]
+        out += [(f"{arm} camera shift {a}", base + 3 + k, 1000.0, "mm") for k, a in enumerate("xyz")]
+    out.append(("thickness", problem.slices["thickness"].start, 1000.0, "mm"))
+    out += [
+        (f"{arm} opening", problem.slices["openings"].start + i, 1.0, "deg")
+        for i, arm in enumerate(problem.moving_arms)
+    ]
+    return out
+
+
+def uncertainty(problem: JointProblem, fit: JointFit, top: int = 3) -> dict[str, Any]:
+    """What the fit determined: each unknown's sd, the pairs it could not tell apart, its weakest directions.
+
+    From the Jacobian at the solution (the residuals are over their noise, the priors included): the covariance is
+    (J^T J)^-1, the boards' poses and the joints' errors marginalized out. The robust loss's down-weighting is not
+    in it (fine once the mis-clicks are out). `sd`: per unknown, in its unit, with `prior` its prior's (None for the
+    cameras' poses, which have none). `pairs`: the unknowns correlated past `CORRELATED`. `weak`: the `top`
+    directions least determined, each unknown scaled by its prior (a camera's turn by 1 deg, its shift by 1 mm),
+    with the share of each unknown in it (over 0.1) and how far the data narrowed it (`sd`, in those units: 1 is
+    the prior's, not narrowed at all).
+    """
+    if fit.x is None:
+        raise ValueError("the fit has no solution vector")
+    jac = problem.jacobian(fit.x)
+    cov = np.linalg.pinv(jac.T @ jac)
+    names = unknown_names(problem)
+    index = np.array([i for _, i, _, _ in names])
+    sub = cov[np.ix_(index, index)]
+    sd = np.sqrt(np.clip(np.diag(sub), 0.0, None))
+    corr = sub / np.maximum(np.outer(sd, sd), 1e-300)
+    theta_free = [p for p, free in zip(problem.model.parameters, problem.free, strict=True) if free]
+    priors: list[float | None] = [p.sigma for p in theta_free]
+    priors += [None] * (6 * len(problem.arms))
+    priors += [THICKNESS_SIGMA_M] + [OPENING_SIGMA_DEG] * len(problem.moving_arms)
+    # the scale each unknown's weak directions are measured in (`weak`)
+    ref = np.array(
+        [
+            pr if pr is not None else (np.radians(1.0) if "turn" in n else 0.001)
+            for (n, _, _, _), pr in zip(names, priors, strict=True)
+        ]
+    )
+    scaled = sub / np.outer(ref, ref)
+    values, vectors = np.linalg.eigh(scaled)
+    weak = []
+    for k in np.argsort(-values)[:top]:
+        v = vectors[:, k]
+        share = v**2
+        weak.append(
+            {
+                "sd": float(np.sqrt(max(values[k], 0.0))),
+                "parts": [
+                    (names[j][0], float(np.sign(v[j]) * share[j]))
+                    for j in np.argsort(-share)
+                    if share[j] > 0.1
+                ],
+            }
+        )
+    pairs = [
+        (names[i][0], names[j][0], float(corr[i, j]))
+        for i in range(len(names))
+        for j in range(i + 1, len(names))
+        if abs(corr[i, j]) > CORRELATED
+    ]
+    pairs.sort(key=lambda t: -abs(t[2]))
+    return {
+        "sd": {
+            n: {
+                "sd": float(sd[i] * f),
+                "prior": None if (prior := priors[i]) is None else float(prior * f),
+                "unit": u,
+            }
+            for i, (n, _, f, u) in enumerate(names)
+        },
+        "pairs": pairs,
+        "weak": weak,
+    }
+
+
+def _uncertainty_lines(u: Mapping[str, Any] | None) -> list[str]:
+    if not u:
+        return []
+    lines = [
+        "## What the fit determined (from the Jacobian at the solution)",
+        "",
+        f"Unknowns correlated past {CORRELATED:g} (the data cannot tell them apart; their priors settle them):",
+        "",
+    ]
+    lines += [f"- {a} / {b}: {c:+.2f}" for a, b, c in u["pairs"][:15]] or ["- none"]
+    lines += [
+        "",
+        "The least determined directions (each unknown over its prior; sd 1: not narrowed at all):",
+        "",
+    ]
+    for w in u["weak"]:
+        parts = ", ".join(f"{n} {'+' if s > 0 else '-'}{abs(s):.2f}" for n, s in w["parts"])
+        lines.append(f"- sd {w['sd']:.2f}: {parts}")
+    unlearned = [(n, v) for n, v in u["sd"].items() if v["prior"] is not None and v["sd"] > 0.5 * v["prior"]]
+    lines += ["", "Unknowns the data narrowed by less than half (sd over the prior's):", ""]
+    lines += [f"- {n}: {v['sd']:.2f} of {v['prior']:.2f} {v['unit']}" for n, v in unlearned] or ["- none"]
+    cams = [(n, v) for n, v in u["sd"].items() if v["prior"] is None]
+    if cams:
+        lines += [
+            "",
+            "The wrist cameras' poses: " + ", ".join(f"{n} {v['sd']:.2f} {v['unit']}" for n, v in cams),
+        ]
+    return [*lines, ""]
+
+
 def calibrate(
-    model: XleRobotModel, sessions: Sequence[JointSession], holdout_every: int = 5
+    model: XleRobotModel,
+    sessions: Sequence[JointSession],
+    holdout_every: int = 5,
+    drop_misclicks: bool = True,
 ) -> tuple[XleRobotModel, JointFit, dict[str, Any]]:
     """Fit `sessions` (one board kind) from `model`; the calibrated model, the fit, and a report's numbers.
 
     Every `holdout_every`-th moment at which the head and a wrist camera both saw the board is left out of the fit,
     and scored by how far apart the two cameras' chains put the board there (`agreement`), before and after.
+
+    `drop_misclicks`: a click more than `MISCLICK_PX` from where the fit puts its fingertip is a mis-click (the wrong
+    spot, the wrong pane: joint_left_full5's two head clicks 128 and 237 px off, the others 2-7; the robust loss kept
+    them from steering the fit, but they read as 65 px RMS): those are left out and the fit done again, and the report
+    names them (`numbers["misclicks"]`).
     """
     model = model.with_current_priors()  # its estimates the start, today's table the priors
+    # an arm with the moving finger's tip clicked: its hinge fitted too (the clicks' arc sets it)
+    for arm in sorted({c.arm for s in sessions for c in s.clicks if c.on_face in MOVING_FACES}):
+        model = model.with_gripper_hinge(arm)
     boards = {json.dumps(s.board.to_dict(), sort_keys=True) for s in sessions}
     if len(boards) != 1:
         raise ValueError("the sessions used different boards: fit them separately")
@@ -701,10 +1010,29 @@ def calibrate(
     ]
     sightings, held = split_holdout(every, holdout_every)
     clicks = [c for s in sessions for c in s.clicks]
+    folder_of = {id(c): s.path for s in sessions for c in s.clicks}
     problem = JointProblem(model, board, cameras, sightings, clicks)
     gc0 = {a: np.asarray(cameras[a].gripper_from_camera, dtype=np.float64) for a in arms}
     before = agreement(model, board, cameras, held, model.estimates, gc0)
     fit = fit_staged(problem)
+    misses = click_misses(problem, fit)
+    misclicks = [
+        {
+            "camera": c.camera,
+            "face": c.on_face,
+            "image": c.image,
+            "session": str(folder_of[id(c)]),
+            "px": miss,
+            "pixel": [float(v) for v in c.pixel],
+            "fitted": [float(v) for v in fitted_pixel(problem, fit, c)],
+        }
+        for c, miss in zip(clicks, misses, strict=True)
+        if miss > MISCLICK_PX
+    ]
+    if misclicks and drop_misclicks:
+        clicks = [c for c, miss in zip(clicks, misses, strict=True) if miss <= MISCLICK_PX]
+        problem = JointProblem(model, board, cameras, sightings, clicks)
+        fit = fit_staged(problem)
     after = agreement(model, board, cameras, held, fit.theta, fit.gripper_from_camera)
     calibrated = model
     for arm in arms:
@@ -713,6 +1041,11 @@ def calibrate(
             arm, replace(cameras[arm], gripper_from_camera=tuple(tuple(float(v) for v in row) for row in gc))
         )
     calibrated.set_estimates(fit.theta)
+    # the map's opening, off by the fitted offset: where the tips meet (`pos_closed`) moves by it
+    maps = dict(calibrated.gripper_maps)
+    for arm, offset in fit.openings.items():
+        maps[arm] = replace(maps[arm], pos_closed=maps[arm].pos_closed - offset / maps[arm].deg_per_unit)
+    calibrated.gripper_maps = maps
     calibrated.arm_calibration = {
         **model.arm_calibration,
         **{s.arm: arm_record(s.arm_calibration) for s in sessions if s.arm_calibration},
@@ -722,6 +1055,8 @@ def calibrate(
         "sightings": {k: sum(x.camera == k for x in sightings) for k in [HEAD, *arms]},
         "clicks": {k: sum(c.camera == k for c in clicks) for k in [HEAD, *arms]},
         "rms_px": fit.rms_px,
+        "misclicks": misclicks if drop_misclicks else [],
+        "misclicks_kept": [] if drop_misclicks else misclicks,
         "held_out": {
             "moments": len(after),
             "left_out": len({id(s.look) for s in held if s.camera == HEAD}) - len(after),
@@ -735,6 +1070,7 @@ def calibrate(
             },
         },
         "thickness_mm": 1000 * fit.thickness,
+        "openings_deg": dict(fit.openings),
         "camera_moved": {
             arm: {
                 "mm": float(1000 * np.linalg.norm(fit.gripper_from_camera[arm][:3, 3] - gc0[arm][:3, 3])),
@@ -750,6 +1086,8 @@ def calibrate(
         },
         "nfev": fit.nfev,
         "message": fit.message,
+        "uncertainty": uncertainty(problem, fit),
+        "fit_failed": fit_failed(fit),
     }
     calibrated.fit_info = {**model.fit_info, "joint_fit": numbers}
     return calibrated, fit, numbers
@@ -771,6 +1109,20 @@ def _held_out_lines(held: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def _misclick_lines(numbers: Mapping[str, Any]) -> list[str]:
+    left_out, kept = numbers.get("misclicks", []), numbers.get("misclicks_kept", [])
+    if not left_out and not kept:
+        return []
+    title = "left out, the fit done again without them" if left_out else "kept (--keep-misclicks)"
+    lines = [f"## Mis-clicks: more than {MISCLICK_PX:g} px from the fitted fingertip ({title})", ""]
+    lines += [
+        f"- {m['camera']}, the {m['face']} face, {m['image'] or '(no picture)'}: {m['px']:.0f} px"
+        + (f" (`{m['shown']}`: the click magenta, the fitted fingertip green)" if m.get("shown") else "")
+        for m in left_out or kept
+    ]
+    return [*lines, ""]
+
+
 def report(model: XleRobotModel, start: XleRobotModel, numbers: Mapping[str, Any]) -> str:
     """A markdown report of a `calibrate` run: what was fitted, how well, what moved."""
     lines = [
@@ -783,10 +1135,20 @@ def report(model: XleRobotModel, start: XleRobotModel, numbers: Mapping[str, Any
         *[f"| board sightings, {k} (fitted) | {v} |" for k, v in numbers["sightings"].items()],
         *[f"| fingertip clicks, {k} | {v} |" for k, v in numbers["clicks"].items() if v],
         "",
+        *(
+            [
+                f"**THE FIT FAILED: a wrong solution** (a kind of residual's median over {FIT_FAILED_PX:g} px, after every "
+                "start). Do not use this calibration: look at the residuals, the mis-clicks and the session's pictures.",
+                "",
+            ]
+            if numbers.get("fit_failed")
+            else []
+        ),
         "## Residuals (RMS, px)",
         "",
         *[f"- {k}: {v:.2f}" for k, v in numbers["rms_px"].items()],
         "",
+        *_misclick_lines(numbers),
         "## Held-out moments: the head and the arm on where the board is (RMS)",
         "",
         "The moments the fit did not see at which both cameras saw the board: how far apart the head's chain and the "
@@ -805,12 +1167,17 @@ def report(model: XleRobotModel, start: XleRobotModel, numbers: Mapping[str, Any
             else []
         ),
         f"The fingers' thickness: {numbers['thickness_mm']:.1f} mm ({1000 * JAW_THICKNESS_M:.1f} measured).",
+        *[
+            f"The {arm} gripper's opening: {offset:+.2f} deg off its map (`pos_closed` moved), from the moving finger's tip."
+            for arm, offset in numbers.get("openings_deg", {}).items()
+        ],
         "",
         *[
             f"The {arm} wrist camera moved {v['mm']:.1f} mm and {v['deg']:.2f} deg on its gripper."
             for arm, v in numbers["camera_moved"].items()
         ],
         "",
+        *_uncertainty_lines(numbers.get("uncertainty")),
         "## The estimates that moved most (in their prior's sigmas)",
         "",
         "| parameter | start | now | change |",
@@ -833,6 +1200,11 @@ def main() -> None:
     parser.add_argument("--start-from", type=Path, required=True, help="the calibration to start from")
     parser.add_argument("--out", type=Path, required=True, help="the calibrated URDF to write")
     parser.add_argument(
+        "--keep-misclicks",
+        action="store_true",
+        help=f"keep clicks more than {MISCLICK_PX:g} px from the fit (named in the report either way)",
+    )
+    parser.add_argument(
         "--head-axes",
         action="store_true",
         help="fit the head's pan and tilt axes' tilts too (4 more parameters)",
@@ -850,8 +1222,11 @@ def main() -> None:
     sessions = [load_session(path) for path in args.sessions]
     if sessions[0].intrinsics:
         start.intrinsics = dict(sessions[0].intrinsics)
-    calibrated, _, numbers = calibrate(start, sessions, args.holdout_every)
+    calibrated, _, numbers = calibrate(
+        start, sessions, args.holdout_every, drop_misclicks=not args.keep_misclicks
+    )
     calibrated.save(args.out)
+    save_misclicks(numbers, args.out.parent)
     text = report(calibrated, start, numbers)
     args.out.with_suffix(".md").write_text(text)
     print(text)

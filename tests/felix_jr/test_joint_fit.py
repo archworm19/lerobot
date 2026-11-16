@@ -5,6 +5,7 @@ each camera's face) is zero at the true robot and not at the model it was drawn 
 session: `smoke_tests/test_joint_fit_smoke.py`.
 """
 
+import cv2
 import numpy as np
 import pytest
 
@@ -203,3 +204,132 @@ def test_two_sessions_placements_are_two_boards(session, tmp_path):
     _, fit, _ = calibrate(model, sessions, holdout_every=0)
     names = {s.placement for s in problem.sightings}
     assert set(fit.boards) == {f"{i}:{p}" for i in (0, 1) for p in names}
+
+
+def test_a_misclick_is_named_and_left_out(session, tmp_path):
+    """One head click 200 px off (the wrong spot): the report names it and the fit is done again without it; kept, it is
+    named all the same."""
+    from dataclasses import replace
+
+    from lerobot.felix_jr.calibration.joint_fit import (
+        MISCLICK_PX,
+        JointSession,
+        calibrate,
+        report,
+        save_misclicks,
+    )
+
+    world, problem = session
+    model = world.model
+    k = next(i for i, c in enumerate(problem.clicks) if c.camera == HEAD)
+    clicks = list(problem.clicks)
+    clicks[k] = replace(clicks[k], pixel=np.asarray(clicks[k].pixel) + [200.0, 0.0], image="images/wrong.png")
+    one = JointSession(
+        tmp_path / "s",
+        ARM,
+        world.board,
+        model.head_signs,
+        model.head_refs,
+        model.intrinsics,
+        None,
+        problem.sightings,
+        clicks,
+    )
+    calibrated, fit, numbers = calibrate(model, [one], holdout_every=0)
+    assert [m["image"] for m in numbers["misclicks"]] == ["images/wrong.png"]
+    assert (
+        numbers["misclicks"][0]["px"] > MISCLICK_PX
+        and numbers["clicks"][HEAD] == sum(c.camera == HEAD for c in problem.clicks) - 1
+    )
+    assert "images/wrong.png" in report(calibrated, model, numbers)
+    (tmp_path / "s" / "images").mkdir(
+        parents=True
+    )  # its picture: saved with the click and the fitted fingertip
+    cv2.imwrite(str(tmp_path / "s" / "images" / "wrong.png"), np.zeros((480, 640, 3), np.uint8))
+    save_misclicks(numbers, tmp_path / "out")
+    assert (tmp_path / "out" / "misclicks" / "00.png").is_file() and numbers["misclicks"][0]["shown"]
+    assert "misclicks/00.png" in report(calibrated, model, numbers)
+    assert not numbers["fit_failed"] and "FIT FAILED" not in report(calibrated, model, numbers)
+    _, _, kept = calibrate(model, [one], holdout_every=0, drop_misclicks=False)
+    assert not kept["misclicks"] and [m["image"] for m in kept["misclicks_kept"]] == ["images/wrong.png"]
+
+
+def test_the_moving_fingertip_from_the_wrist_alone_leaves_the_hinge_to_a_few_mm(session):
+    """The moving finger's tip in the wrist camera at a few openings (a gripper sweep's: `MOVING` clicks), drawn with the
+    hinge 3 mm off and the map's opening 0.8 deg off: the fit matches every click and finds the opening; the hinge only
+    to a few mm. The wrist camera rides on the gripper and sees no depth: the camera turned a little about the roll
+    axis, the hinge moved and the opening nudged draw the same arc (here: 0.8 deg, 2 mm), and the fit settles where the
+    priors cost least. A second view (the head's clicks on the moving tip) is the TODO
+    (`docs/camera_calibration.md`, "Not done yet")."""
+    from lerobot.felix_jr.calibration.joint_fit import JAW_THICKNESS_M, MOVING, Look, TipClick, fit_staged
+    from lerobot.felix_jr.calibration.xle_robot_model import pinch_frame, wrist_camera_link
+
+    world, problem = session
+    model = world.model.with_gripper_hinge(ARM)
+    names = [p.name for p in model.parameters]
+    shift = np.array([-0.003, 0.0, 0.0015])
+    truth = np.r_[world.truth.theta, shift]  # (the hinge's parameters are appended)
+    assert names[-3:] == [f"pos:{ARM}_gripper:{a}" for a in "xyz"]
+    looks = [c.look for c in problem.clicks if c.camera == ARM][:3]
+    moving = []
+    for look in looks:
+        for pos in (15.0, 30.0, 45.0):
+            seen = Look({ARM: {**look.arms[ARM], "gripper.pos": pos}}, look.head_ticks)
+            q = model.joint_vector(seen.arms, seen.head_ticks)
+            pinch = model.frame_pose(pinch_frame(ARM), q, truth)
+            turned = model.moving_jaw(ARM, model.opening_deg(ARM, pos) + 0.8, truth)
+            face = model.wrist_face(ARM) * (world.truth.thickness / JAW_THICKNESS_M)
+            point = pinch @ turned @ np.r_[face, 1.0]
+            camera = model.frame_pose(wrist_camera_link(ARM), q, truth) @ world.truth.gripper_from_camera
+            pixel = world.camera.project(((point[:3] - camera[:3, 3]) @ camera[:3, :3])[None])[0]
+            moving.append(TipClick(ARM, ARM, seen, pixel, "", MOVING))
+    with_moving = JointProblem(
+        model, world.board, {ARM: world.camera}, problem.sightings, [*problem.clicks, *moving]
+    )
+    assert with_moving.moving_arms == [ARM]
+    fit = fit_staged(with_moving)
+    hinge = fit.theta[[names.index(f"pos:{ARM}_gripper:{a}") for a in "xz"]]
+    assert fit.rms_px[f"{ARM} click"] < 0.5  # every click matched
+    assert fit.openings[ARM] == pytest.approx(0.8, abs=0.3)
+    assert np.linalg.norm(hinge - shift[[0, 2]]) < 3e-3  # the hinge: within the ambiguity, not pinned
+
+
+def test_the_wrist_camera_is_found_from_its_own_sightings(session):
+    """The arm and the boards as they are: each wrist sighting's PnP, taken back to the gripper, gives the camera's pose
+    on it (`fit_staged`'s retry, for a camera far off)."""
+    world, problem = session
+    gc = problem.wrist_cameras_from_sightings(world.truth.theta, world.boards)[ARM]
+    true = world.truth.gripper_from_camera
+    assert np.linalg.norm(gc[:3, 3] - true[:3, 3]) < 1e-3
+    assert np.degrees(np.linalg.norm(cv2.Rodrigues(gc[:3, :3] @ true[:3, :3].T)[0])) < 0.2
+
+
+def test_a_fit_with_a_kind_of_residual_far_off_has_failed():
+    """A wrong solution: some kind of residual off at its median (`fit_failed`)."""
+    from lerobot.felix_jr.calibration.joint_fit import FIT_FAILED_PX, JointFit, fit_failed
+
+    fit = JointFit(np.zeros(1), {}, {}, 0.01, median_px={"head board": 0.3, f"{ARM} click": 1.0})
+    fit.rms_px["head click"] = 5 * FIT_FAILED_PX  # a mis-click lifts the RMS, not the median: not failed
+    assert not fit_failed(fit)
+    fit.median_px[f"{ARM} board"] = 2 * FIT_FAILED_PX
+    assert fit_failed(fit)
+
+
+def test_the_hinge_along_its_own_axis_is_not_fitted_and_the_fit_says_what_it_learned(session):
+    """Sliding the hinge along its axis moves nothing: held. The uncertainty: every reported unknown no less certain
+    than its prior, the hinge's across-axis position among them."""
+    from lerobot.felix_jr.calibration.joint_fit import JointFit, uncertainty
+
+    world, problem = session
+    model = world.model.with_gripper_hinge(ARM)
+    hinge = JointProblem(model, world.board, {ARM: world.camera}, problem.sightings, problem.clicks)
+    names = [p.name for p in model.parameters]
+    free = {n for n, f in zip(names, hinge.free, strict=True) if f}
+    assert f"pos:{ARM}_gripper:y" not in free and {f"pos:{ARM}_gripper:x", f"pos:{ARM}_gripper:z"} <= free
+    x = hinge.start()
+    theta, gcs, boards, thickness = hinge.unpack(x)
+    u = uncertainty(hinge, JointFit(theta, gcs, boards, thickness, x=x))
+    assert f"pos:{ARM}_gripper:x" in u["sd"] and f"pos:{ARM}_gripper:y" not in u["sd"]
+    for name, v in u["sd"].items():
+        if v["prior"] is not None:
+            assert v["sd"] <= v["prior"] * 1.001, name

@@ -63,6 +63,7 @@ from lerobot.felix_jr.calibration.joint_fit import (
     calibrate,
     load_session,
     report,
+    save_misclicks,
     save_session,
 )
 from lerobot.felix_jr.calibration.live_view import INTRINSICS_KEYS, decode_key, head_limits, move_head_to
@@ -633,10 +634,12 @@ class JointCollect:
             for c in self.session.clicks
             if not (c.camera == self.arm and c.image.startswith(WRIST_TIP_SWEEP))
         ]
-        for i, (frame, pixel, _) in enumerate(found):
+        for i, (frame, face, pixel) in enumerate(
+            found
+        ):  # the fixed tip and the moving one (`joint_fit.MOVING`)
             look = Look({self.arm: dict(frame.pose)}, ticks)
-            image = f"{WRIST_TIP_SWEEP}/frame_{i:02d}.npz"
-            self.session.clicks.append(TipClick(self.arm, self.arm, look, pixel, image, "wrist"))
+            image = f"{WRIST_TIP_SWEEP}/click_{i:02d}"
+            self.session.clicks.append(TipClick(self.arm, self.arm, look, pixel, image, face))
         save_session(self.session)
         return len(found)
 
@@ -652,6 +655,7 @@ class JointCollect:
         calibrated, _, numbers = calibrate(start, [self.session], holdout_every)
         path = self.out_dir / CALIBRATION_FILE
         calibrated.save(path)
+        save_misclicks(numbers, self.out_dir)
         path.with_suffix(".md").write_text(report(calibrated, start, numbers))
         return path
 

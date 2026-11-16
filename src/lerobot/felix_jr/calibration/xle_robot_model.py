@@ -852,6 +852,11 @@ class XleRobotModel:
         frame = self._pose(hinge.child)  # its origin is on the axis
         return frame[:3, 3], frame[:3, :3] @ (hinge.axis / np.linalg.norm(hinge.axis))
 
+    def hinge_axis_in_gripper(self, arm: str) -> np.ndarray:
+        """`arm`'s gripper hinge's axis (unit) in the gripper link's frame: the hinge's position along it moves nothing."""
+        gripper = self.frame_pose(f"{arm}_gripper_link", self.joint_vector())
+        return gripper[:3, :3].T @ self._hinge(arm)[1]
+
     def _moving_turn(self, arm: str, opening_deg: float | None) -> np.ndarray:
         """The rotation (3x3, root frame) that takes the pinch point to the moving tip, `opening_deg` open."""
         if opening_deg is None:

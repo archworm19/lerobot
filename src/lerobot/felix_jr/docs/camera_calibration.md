@@ -484,6 +484,33 @@ and deg). It replaced held-out clicks: a wrist click always lands on the same pi
 so holding one out checked nothing. That needed `XleRobotModel` to cache its applied estimates (90% of the time was rebuilding them
 on every call; the module docstring says what would make the cache stale).
 
+**Mis-clicks** (`MISCLICK_PX`, 30): a click more than 30 px from where the fit puts its fingertip is named in the
+report and the fit is run again without it (`--keep-misclicks` keeps them). Each one's picture is saved next to the
+calibration (`misclicks/NN.png`: the click magenta, the fitted fingertip green) so a person can see what was
+clicked. joint_left_full5 had two: a head click on the board's corner (247 px off) and a head click on the sleeve
+(132 px off).
+
+**A wrong solution is retried, then flagged** (`fit_failed`, `FIT_FAILED_PX` 10): a fit with some kind of residual's
+*median* error over 10 px (the median: a few mis-clicks lift the RMS, a wrong solution moves every point) is tried
+again from each start with the wrist camera re-estimated from its own board sightings
+(`JointProblem.wrist_cameras_from_sightings`), the lowest cost kept; if that fails too, the report says **THE FIT
+FAILED** at its top. In the simulator (2026-11-15, the true robot drawn from the full priors) 3 of 12 fits had
+stopped in 20-30 steps at ~1000x the truth's cost, the wrist's board 130-260 px off (the far-off camera put the board
+behind it, where the residual is flat); retried, all three came to the truth-started fit's cost or below. The
+arm-held start is capped at 300 steps (`HELD_START_NFEV`): only a start, a wrong one crept on for 1500.
+
+**What the fit determined** (`uncertainty`, in the report): from the Jacobian at the solution, (J^T J)^-1 with the
+boards' poses and the joints' errors marginalized out: each unknown's sd against its prior, the pairs correlated past
+0.9 (`CORRELATED`), and the three least determined directions (each unknown over its prior; a camera's turn over 1
+deg, its shift over 1 mm). Pairs at +-1.0 that only the priors split and that predict the same are expected: the head
+tilt's zero and the head camera's turn about the same axis; the wrist roll's zero and the wrist camera's turn about
+the roll axis (without the moving tip in the head's view, below). The robust loss's down-weighting is not in it.
+
+**The hinge along its own axis is not fitted:** `pos:<arm>_gripper:y` slides the hinge along the axis it turns about
+(the gripper frame's -y on both arms, `XleRobotModel.hinge_axis_in_gripper`), which moves nothing; only its prior held
+it (the uncertainty said the hinge was not narrowed at all). `JointProblem` holds every hinge parameter within
+`ALONG_AXIS` of the axis. (`gripper_sweep`'s hinge fit still has it.)
+
 ### Sizing a session: the simulator
 
 `calibration/joint_sim.py`: a true robot drawn from the priors (the head's zeros +-20 deg, the mounts +-1.5 cm, ...),
@@ -611,3 +638,43 @@ calibration it starts from (`XleRobotModel.with_current_priors`).
 - The right arm's rolls (86 to 106 deg now) and the wrist camera's cable; the view finder could penalize large rolls.
 - Backlash and gravity sag: if the held-out error stays well above the click noise, try an approach-direction
   convention for the views before adding parameters.
+- **The moving finger, seen from the wrist alone, leaves its hinge undetermined** (2026-11-15). The gripper sweep and
+  then the joint fit (`joint_fit.MOVING`, the sweep's moving tips via `auto_tips --from-sweep`) fit the moving
+  finger's hinge (`pos:<arm>_gripper:x/y/z`), with an opening offset per arm (`OPENING_SIGMA_DEG`, 3 deg) and the
+  camera's pose on the gripper. From the wrist camera the moving tip's arc is a curve in one picture: a hinge a few
+  millimeters off, the camera turned a little about the roll axis and the opening offset by a fraction of a degree
+  draw nearly the same curve. In the simulator (`test_the_moving_fingertip_from_the_wrist_alone_leaves_the_hinge_to_a_few_mm`)
+  the clicks fit to under 0.5 px with the hinge still ~2 mm and the opening 0.8 deg off. On the robot
+  (`joint_left_full5_moving`) the fit moved the left hinge (-5.7, 0, -3.7) mm and turned the wrist camera 1.66 deg
+  (from 2.66 deg without the moving tips) with the roll zero at -0.51 deg: a trade between them, not a measurement.
+  `xle_calib_1115_grippers5.urdf` (the left hinge 11 mm off) came from this and is not used; grippers4 stays the
+  default. Same day, the gripper sweep's fixed tip pins the camera to ~1 px, but the fixed tip sits on the roll axis
+  and says nothing of the turn about it.
+  - **The head clicking the moving tip, in the simulator** (`joint_sim --fingers --truth-scale 0.25`, 2026-11-15:
+    5 seeds each, the true robot off by a quarter of its priors as after a calibration, the hinge 3 mm and the
+    opening 1 deg off; 2 placements, 10 arm + 6 head views each). The jaws open at every view (`gripper.pos` 20, 35,
+    50 in turn) and the head's clicks on both tips (`MOVING_PINCH`) give the arc its depth: the hinge and the camera's
+    errors halve, and the wrist roll's zero no longer trades with the camera's turn (its -1.0 correlation gone from
+    the report).
+
+    | procedure | hinge mm (3.1) | opening deg (0.81) | wrist px | head px | camera mm / deg | fit |
+    | --- | --- | --- | --- | --- | --- | --- |
+    | today: closed, the wrist's tips from an end sweep | 1.72 | 0.49 | 0.95 | 1.88 | 1.61 / 0.93 | 4.2 min |
+    | open at the views, the head clicks both; the wrist's from the end sweep only, 10 low | 0.86 | 0.32 | 0.64 | 0.84 | 0.64 / 0.22 | 3.9 min |
+    | the same, 20 low poses | 1.00 | 0.27 | 0.36 | 0.75 | 0.53 / 0.13 | 2.0 min |
+    | the same, the wrist's tips found at every view, 10 low | 0.79 | 0.09 | 0.24 | 0.80 | 0.51 / 0.15 | 2.5 min |
+    | the same, 20 low poses | 0.76 | 0.10 | 0.22 | 0.70 | 0.69 / 0.31 | 5.4 min |
+
+    The hinge's z (along the finger, roughly) stays at ~2 mm sd in every procedure, its x at 0.7-0.9 mm with the
+    head's clicks (2.4 without). The wrist's tips found at the views help the opening most (0.3 -> 0.1 deg); that
+    needs the finger detection to work against the board, not tested (it learns its colors against the table). The
+    procedure to build is still to choose (`joint_collect`: the head's panes, the jaws opening at the views).
+  - **Later:** find the tips in the head's picture automatically (the fingers' colors, as the sweep learns them).
+- **The gripper sweep should say what it could not determine** too (`joint_fit` does: "What the fit determined"
+  above), and drop the hinge's along-axis component as `joint_fit` does.
+- **Some fits crawl near the answer:** one simulated session ran 1500 steps unconverged even from the truth (cost
+  within 1.5% of the best found). Each restart (`fit_staged`'s trial, then the full fit) also resets the openings and
+  the joints' errors to zero.
+- `docs/README.md`'s calibration sections (6-9) still describe the click calibration (`collect`, `xle_fit`),
+  `gripper_step` and `wrist_camera` as the way to calibrate; joint_collect / joint_fit and the gripper sweep are
+  the current way.
