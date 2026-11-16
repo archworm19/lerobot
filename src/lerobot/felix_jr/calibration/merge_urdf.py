@@ -1,4 +1,7 @@
-"""Build `xlerobot_so101.urdf`: the XLeRobot's head and base with two SO-101 arms, as one kinematic tree.
+"""Build `design_xlerobot_so101.urdf`: the XLeRobot's head and base with two SO-101 arms, as one kinematic tree.
+
+The design: the robot as drawn, before any calibration. It does not change once built (a calibration stores its
+corrections to it, `XleRobotModel`'s parameters: `docs/calibration_plan.md`, item 3).
 
 `XleRobotModel` (`xle_robot_model.py`) loads this one URDF. The arms come from the official SO-101 URDF rather than
 from `xlerobot.urdf`, whose arm is an older gripper (its wrist roll joint lacks the SO-101's 18 mm lateral offset,
@@ -21,7 +24,7 @@ The output is committed; a test checks it is what this script builds. Rebuild it
 
 import argparse
 import re
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET  # nosec B405: our own committed URDFs
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -35,7 +38,7 @@ if TYPE_CHECKING or _pinocchio_available:
 URDF_DIR = Path(__file__).resolve().parent.parent / "urdfs"
 XLEROBOT_URDF = URDF_DIR / "xlerobot.urdf"
 SO101_URDF = URDF_DIR / "so101_new_calib.urdf"
-MERGED_URDF = URDF_DIR / "xlerobot_so101.urdf"
+MERGED_URDF = URDF_DIR / "design_xlerobot_so101.urdf"
 
 ARMS = ("left", "right")
 ARM_BASES = {"left": "Base", "right": "Base_2"}
@@ -65,7 +68,7 @@ ALIGN_OFFSETS = {
 def build_merged_urdf() -> str:
     """The merged URDF as text (see the module docstring)."""
     require_package("pin", extra="kinematics", import_name="pinocchio")
-    xle = ET.fromstring(XLEROBOT_URDF.read_text())
+    xle = ET.fromstring(XLEROBOT_URDF.read_text())  # nosec B314: a committed URDF
     _joint(xle, "joint_0").set("type", "fixed")
     mounts = {arm: arm_mount(xle, arm) for arm in ARMS}
 
@@ -77,16 +80,16 @@ def build_merged_urdf() -> str:
     for link in xle.findall("link"):
         _strip_geometry(link)
 
-    so101 = ET.fromstring(SO101_URDF.read_text())
+    so101 = ET.fromstring(SO101_URDF.read_text())  # nosec B314: a committed URDF
     for arm in ARMS:
         prefix = f"{arm}_"
         for link in so101.findall("link"):
-            copy = ET.fromstring(ET.tostring(link))
+            copy = ET.fromstring(ET.tostring(link))  # nosec B314: a copy of a parsed element
             copy.set("name", prefix + attr(link, "name"))
             _strip_geometry(copy)
             xle.append(copy)
         for joint in so101.findall("joint"):
-            copy = ET.fromstring(ET.tostring(joint))
+            copy = ET.fromstring(ET.tostring(joint))  # nosec B314: a copy of a parsed element
             copy.set("name", prefix + attr(joint, "name"))
             for end in ("parent", "child"):
                 child_element(copy, end).set("link", prefix + link_of(joint, end))

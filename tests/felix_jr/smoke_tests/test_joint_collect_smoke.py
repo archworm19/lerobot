@@ -7,6 +7,7 @@ fit: the calibrated model is nearer the truth than the start.
 """
 
 import threading
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -21,14 +22,13 @@ from lerobot.felix_jr.calibration.joint_collect import JointCollect  # noqa: E40
 from lerobot.felix_jr.calibration.joint_fit import HEAD, load_session  # noqa: E402
 from lerobot.felix_jr.calibration.joint_sim import draw_truth  # noqa: E402
 from lerobot.felix_jr.calibration.xle_robot_model import HEAD_JOINTS, XleRobotModel  # noqa: E402
-from lerobot.felix_jr.harness import api  # noqa: E402
 from lerobot.felix_jr.server.client import FelixClient  # noqa: E402
 from lerobot.felix_jr.server.hardware import FakeHardware  # noqa: E402
 from lerobot.felix_jr.server.server import RobotServer  # noqa: E402
 
 # the simulations start from (and draw their true robots around) this calibration, not `api.MODEL`: a new default
 # calibration must not change what these tests check
-SIM_START = api.MODEL.parent / "xle_calib_1008_wrist2.urdf"
+SIM_START = Path(__file__).parents[1] / "reference" / "xle_calib_1008_wrist2.urdf"
 
 ARM = "right"
 BOARD = CharucoBoard(9, 7, 0.025, 0.018, "DICT_4X4_50")  # the one printed

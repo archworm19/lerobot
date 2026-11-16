@@ -5,6 +5,8 @@ each camera's face) is zero at the true robot and not at the model it was drawn 
 session: `smoke_tests/test_joint_fit_smoke.py`.
 """
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
@@ -16,11 +18,10 @@ from lerobot.felix_jr.calibration.boards import CharucoBoard  # noqa: E402
 from lerobot.felix_jr.calibration.joint_fit import HEAD, JointProblem, _vec  # noqa: E402
 from lerobot.felix_jr.calibration.joint_sim import ARM, Scenario, World, draw_truth  # noqa: E402
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel  # noqa: E402
-from lerobot.felix_jr.harness import api  # noqa: E402
 
 # the simulations start from (and draw their true robots around) this calibration, not `api.MODEL`: a new default
 # calibration must not change what these tests check
-SIM_START = api.MODEL.parent / "xle_calib_1008_wrist2.urdf"
+SIM_START = Path(__file__).parent / "reference" / "xle_calib_1008_wrist2.urdf"
 
 
 @pytest.fixture(scope="module")

@@ -26,7 +26,7 @@ arm mounts by millimeters to centimeters, the elbow zeros by -2 to -3.5 deg, and
 
 | File | What |
 |---|---|
-| `calibration/merge_urdf.py` | builds `xlerobot_so101.urdf` (committed): the XLeRobot's head and base with two SO-101 arms |
+| `calibration/merge_urdf.py` | builds `design_xlerobot_so101.urdf` (committed): the XLeRobot's head and base with two SO-101 arms |
 | `calibration/xle_robot_model.py` | `XleRobotModel`: kinematics, parameter table, estimates, gripper points (the pinch point, which the calibration uses, and the moving jaw's tip), derivatives, saving |
 | `calibration/xle_fit.py` | sessions of clicks, the fit, held-out validation, the report; CLI to refit sessions |
 | `calibration/views.py` | `find_view` (head and arm joints that show a pinch point), `plan_targets` |
@@ -53,7 +53,7 @@ point (`<arm>_gripper_frame_link`). The camera sees `T` at `p_CT = X_CW p_WT`, a
 
 ### The merged URDF
 
-`merge_urdf.py` builds `xlerobot_so101.urdf` once, offline:
+`merge_urdf.py` builds `design_xlerobot_so101.urdf` (`xlerobot_so101.urdf` until 2026-11-16) once, offline:
 
 - from `xlerobot.urdf`: the head, camera, base and wheels; its root `joint_0` made `fixed` (pinocchio and placo add
   their own free base, and a second floating joint scrambles placo's joint indexing: `set_joint` then moves
@@ -315,7 +315,7 @@ between them (2-3 px apart, ~10 px from the fixed finger's end): the calibration
 / 2.6 deg on the gripper, put the fixed finger off in the simulation, and `gripper_sweep` read 7.5 px. Replaced by the
 fingertip a sweep measures with the jaws open (to 0.5 px; `calibration.auto_tips <session> --from-sweep <sweep> --out
 <session copy>`, then `joint_fit` on the copy): the camera moved 1.2 mm / 0.7 deg, the board residuals and the held-out
-check unchanged, the fixed finger then on the real one (`urdfs/xle_calib_1115_grippers4.urdf`, now `api.MODEL`, with
+check unchanged, the fixed finger then on the real one (`urdfs/xle_calib_1115_grippers4.urdf`, now `api.MODEL` as `calib_20261115_grippers.urdf`, with
 both grippers' geometry from `gripper_sweep`). **`joint_collect` now does this itself** (`--wrist-tip sweep`, the
 default): the wrist pane takes no clicks, and after `q` a gripper sweep (the sim's checks, the person asked, the live
 preview) measures the wrist's fingertip into the session before the fit. `--wrist-tip click` keeps clicking by eye.

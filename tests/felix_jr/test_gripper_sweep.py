@@ -1,6 +1,8 @@
 """`calibration.gripper_sweep`: the moving finger's opening from its tip in a wrist frame (synthetic frames: the sim's
 fingers painted in the fingers' color on the wood's; skipped without mujoco, pinocchio or the meshes)."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -170,7 +172,9 @@ def test_the_hinge_and_the_mount_are_saved_and_loaded(model, tmp_path):
     np.testing.assert_allclose(
         loaded.moving_tip("left", q, 40.0), corrected.moving_tip("left", q, 40.0), atol=1e-9
     )
-    older = XleRobotModel.load(api.MODEL.parent / "xle_calib_1114_joint.urdf")  # before the gripper's fields
+    older = XleRobotModel.load(
+        Path(__file__).parent / "reference" / "xle_calib_1114_joint.urdf"
+    )  # before the gripper's fields
     assert (
         older.gripper_maps["left"].finger_mount_deg
         == 0.0

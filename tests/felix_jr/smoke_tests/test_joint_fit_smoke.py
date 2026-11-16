@@ -5,6 +5,8 @@ the head from 4 with the arms folded, 6 poses low over the table, the fingertips
 (`joint_sim`'s grid: two placements are what it takes).
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -15,11 +17,10 @@ from lerobot.felix_jr.calibration.boards import CharucoBoard  # noqa: E402
 from lerobot.felix_jr.calibration.joint_fit import JointProblem, fit_staged  # noqa: E402
 from lerobot.felix_jr.calibration.joint_sim import ARM, Scenario, World, draw_truth  # noqa: E402
 from lerobot.felix_jr.calibration.xle_robot_model import JAW_THICKNESS_M, XleRobotModel  # noqa: E402
-from lerobot.felix_jr.harness import api  # noqa: E402
 
 # the simulations start from (and draw their true robots around) this calibration, not `api.MODEL`: a new default
 # calibration must not change what these tests check
-SIM_START = api.MODEL.parent / "xle_calib_1008_wrist2.urdf"
+SIM_START = Path(__file__).parents[1] / "reference" / "xle_calib_1008_wrist2.urdf"
 
 
 def test_a_simulated_session_is_fitted():

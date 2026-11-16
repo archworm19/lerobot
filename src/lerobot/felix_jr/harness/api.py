@@ -70,14 +70,13 @@ from .wrist_scan import WristScan
 if TYPE_CHECKING:
     from lerobot.felix_jr.server.client import FelixClient
 
-# xle_calib_1008 with the right wrist camera turned 5.2 deg to fit its fingertips in a gripper sweep (bowl5), the
-# fingers' 1 cm thickness accounted for (`JAW_THICKNESS_M`: the wrist camera sees their other face). The 7.8 deg of
-# `xle_calib_1008_wrist.urdf` absorbed that thickness.
+# The current learned calibration (`urdfs/`: it and the design, `design_xlerobot_so101.urdf`, are the only URDFs kept
+# there; older calibrations are in git's history, the ones tests start from in `tests/felix_jr/reference/`):
 # the joint calibration of the head, both arms and their wrist cameras (2026-11-14: joint_left_full4 + joint_right_full2;
 # docs/camera_calibration.md, "The rework"), the right arm's again after its camera's mount was tightened
 # (2026-11-15: joint_right_full4, its wrist fingertip from a gripper sweep, `calibration.auto_tips`), and both
 # grippers' geometry from three sweeps each (the hinges, the fingers' mounts, the maps: `calibration.gripper_sweep`)
-MODEL = Path(__file__).parents[1] / "urdfs" / "xle_calib_1115_grippers4.urdf"
+MODEL = Path(__file__).parents[1] / "urdfs" / "calib_20261115_grippers.urdf"
 ENDPOINT = "tcp://ikeabot.local:5555"
 
 

@@ -4,6 +4,21 @@ What on the robot can change without anything saying so, and quietly spoil a cal
 simulation: what was seen, with the numbers, how to tell, and what to do. Newest first. Tuning findings (gains,
 limits) are in [tuning_notes.md](tuning_notes.md); a session's own story in [sessions.md](sessions.md).
 
+## The wrist cameras are not the module their mount is drawn for (2026-11-16)
+
+**Seen.** TheRobotStudio's wrist camera mount (`SO101_Wrist_Cam_Hex-Nut_Mount_32x32_UVC_Module`, the one in their
+MuJoCo model and so in `sim2real`) holds a 32 x 32 mm UVC module with its lens in the middle. Both calibrated wrist
+cameras (`calib_20261115_grippers.urdf`) look along that module's axis to within 1-3 deg, but their optical centers
+sit 8.4-9.3 mm off its lens axis (away from the mount's bracket, toward the side away from the gripper's body) and
+~3 mm toward the moving jaw. Measured on the robot (the right arm; the left alike): the camera is a **45 x 45 mm**
+board, its lens about centered on it (25 mm from one edge), its front 8-10 mm past the plastic (with the focus).
+A 45 mm board cannot put its lens where a 32 mm module's would be: (45 - 32) / 2 = 6.5 mm for a board seated against
+one side, the rest the mount's own make.
+
+**What it means.** The design's wrist camera pose (the 32 mm module's) is ~1 cm off the real one: a calibration's
+correction to it is that large, and its prior has to allow it (`calibration_plan.md`, item 3). If the cameras or their
+mounts are changed, recalibrate; a drawing of the mount actually used would let the design say where they are.
+
 ## The wrist camera's mount catches the arm going home with the wrist rolled (2026-11-15)
 
 **Seen.** At the end of `joint_right_full4` the arm went home from its last low pose (the wrist rolled ~140 deg to show

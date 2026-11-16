@@ -23,7 +23,7 @@ Each kind is written by one part of the code and lives in one place:
 | Kind | Written by | Lives | Used by |
 |---|---|---|---|
 | **Robot settings**: what the servos' readings mean, and where the robot may go | `lerobot-calibrate`, `setup/` | the robot's computer, next to each arm's LeRobot calibration (below) | the server and the local scripts |
-| **Calibration**: the robot's geometry as the camera sees it | `calibration/` | a calibrated URDF on your computer (`urdfs/xlerobot_calib<date>.urdf` once committed) | the harness, reach and the renders |
+| **Calibration**: the robot's geometry as the camera sees it | `calibration/` | a calibrated URDF on your computer (`urdfs/calib_<date>_<what>.urdf` once committed) | the harness, reach and the renders |
 | **Recordings**: captures, renders, logs, clicks | the harness, `collect`, the checks | a `scratch/` folder (gitignored) or a folder you name | you, later; write-ups in `sessions.md` |
 
 The robot settings, in `~/.cache/huggingface/lerobot/calibration/robots/so_follower/` on the robot's computer:
@@ -91,7 +91,7 @@ recording it.
 | `harness/` | The VLM harness: objects and the workspace DAG (`objects`, `workspace`), geometry (`scene`, `tools`, `reach`, `look`), drawing (`render`), the startup scan (`scan`), execution (`execute`), and every tool the VLM can call with the runner that asks a person before a move (`api`). | yours |
 | `sim2real/` | Our calibrated robot in MuJoCo, for sim-to-real grasping (`docs/sim2real_grasp.md`): TheRobotStudio's SO-101 model, downloaded once at a pinned commit (`assets`); one arm posed by the calibrated model, with its wrist camera and the head camera (`robot`), a table and objects in the root frame (`scene`), renders from either camera next to the robot's frames (`view`); `sim2real/meshes/` the XLeRobot's finger (git LFS); `sim2real/scratch/` (gitignored) holds the renders. | yours |
 | `harness/scratch/` | Gitignored: `session.py`, the CLI that drives the harness by hand, and `sessions/<name>/`, what each session recorded. | yours |
-| `urdfs/` | `xlerobot.urdf` (the XLeRobot) and `so101_new_calib.urdf` (the official SO-101, Apache 2.0), merged into `xlerobot_so101.urdf` (the head and base with two SO-101 arms); `xlerobot_calib<date>.urdf`, committed calibrations. | — |
+| `urdfs/` | `xlerobot.urdf` (the XLeRobot) and `so101_new_calib.urdf` (the official SO-101, Apache 2.0), merged into `design_xlerobot_so101.urdf` (the design: the head and base with two SO-101 arms, as drawn; static once built); `calib_<date>_<what>.urdf`, the current calibration (`harness.api.MODEL`). Only these are kept: older calibrations are in git's history (renamed or removed 2026-11-16; the ones tests start from in `tests/felix_jr/reference/`). | — |
 | `docs/` | The documents below. | — |
 
 Tests are in `tests/felix_jr/`, one file per module or flow, none needing hardware; end-to-end tests are in

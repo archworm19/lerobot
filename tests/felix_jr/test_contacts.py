@@ -17,7 +17,7 @@ pytest.importorskip("scipy")
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel  # noqa: E402
 from lerobot.felix_jr.harness.contacts import _jaw_axes, patches_from_points  # noqa: E402
 
-URDF = Path(__file__).parents[2] / "src" / "lerobot" / "felix_jr" / "urdfs" / "xle_calib_1008_wrist2.urdf"
+URDF = Path(__file__).parent / "reference" / "xle_calib_1008_wrist2.urdf"
 ARM = "right"
 RADIUS = 0.009
 TABLE = -0.03  # the table, along `up`, from the pinch point
