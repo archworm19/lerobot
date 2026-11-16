@@ -619,6 +619,10 @@ calibration it starts from (`XleRobotModel.with_current_priors`).
 (`urdfs/xle_calib_1008_wrist*.urdf`), and `checks/hil_wrist_sfm.py`'s `handeye-*`. The output stays one
 `calibration.urdf` (`XleRobotModel.save`), so the harness does not change.
 
+**Done 2026-11-16:** `wrist_camera`'s pose step, `fit_extrinsics` / `calibrate_extrinsics` / `orient_views` and their
+tests, and `checks/hil_wrist_sfm.py` (all of it: its findings stay in `object_grasping.md`) are removed; the lens step
+is ChArUco only (`calibration_plan.md`, item 1).
+
 ### Open questions
 
 - The weighting: each corner counts the same, so a view showing more of the board counts more. In the simulator
@@ -628,6 +632,8 @@ calibration it starts from (`XleRobotModel.with_current_priors`).
   item 16).
 
 ## Not done yet, and open questions
+
+The plan that follows from these (the procedure decided, the work in order): [calibration_plan.md](calibration_plan.md).
 
 - **Runtime:** projecting planned trajectories into the image with the calibration (`model.project`), and a
   `robot_kinematics(arm)` helper that builds LeRobot's `RobotKinematics` from `to_urdf()` (LeRobot's

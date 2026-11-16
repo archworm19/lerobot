@@ -1,23 +1,22 @@
-"""Calibration boards: what each kind looks like, where its points are on it, and finding them in a picture.
+"""Calibration boards: what the board looks like, where its points are on it, and finding them in a picture.
 
-`docs/camera_calibration.md`, "The rework" (2b). A board kind gives, per picture, the points it found as ids and
-pixels (`Detection`), and each id's position on the board (`points`). Fits take whatever each view found: a partial
-board, or a different number of points in each view and camera, needs nothing special.
+`docs/camera_calibration.md`, "The rework" (2b). A board gives, per picture, the points it found as ids and pixels
+(`Detection`), and each id's position on the board (`points`). Fits take whatever each view found: a partial board,
+or a different number of points in each view and camera, needs nothing special.
 
-- `Checkerboard`: the inner corners of a plain checkerboard, found whole or not at all (OpenCV's
-  `findChessboardCornersSB`). A symmetric one (both counts even, or both odd) looks the same turned around, so a
-  detection has two readings (`readings`): the fit, or the arm's motion, picks one.
-- `CharucoBoard`: a checkerboard with an ArUco marker in each white square (OpenCV's `cv2.aruco`). Every corner is
-  identified by the markers around it: a board half hidden (by the arm) still gives the corners it shows, with one
-  reading.
+Every calibration uses a `CharucoBoard`: a checkerboard with an ArUco marker in each white square (OpenCV's
+`cv2.aruco`). Every corner is identified by the markers around it, so a board half hidden (by the arm) or half out of
+the picture still gives the corners it shows. The plain checkerboard (found whole or not at all, and read two ways
+when symmetric) was dropped on 2026-11-16 (`docs/calibration_plan.md`, item 1): one kind of detection everywhere.
+Sessions recorded with it (before 2026-11-11) are no longer read.
 
-`parse_board` reads a board from text ("checkerboard:8x6:0.025", "charuco:12x9:0.02:0.015:DICT_5X5_100"), and
-`board_from_dict` / `Board.to_dict` save and load one.
+`parse_board` reads a board from text ("charuco:9x7:0.025:0.018:DICT_4X4_50"; `PRINTED_BOARD` is the one printed),
+and `board_from_dict` / `Board.to_dict` save and load one.
 """
 
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar
 
 import cv2
 import numpy as np
@@ -40,138 +39,6 @@ class Detection:
     def __len__(self) -> int:
         """The number of points found."""
         return len(self.ids)
-
-
-class Board(Protocol):
-    """What every board kind provides (the module docstring)."""
-
-    kind: ClassVar[str]
-    # the least part of its points a view must show to count (a checkerboard is found whole or not at all)
-    min_view_fraction: ClassVar[float]
-
-    def points(self, ids: Sequence[int] | np.ndarray | None = None) -> np.ndarray:
-        """The points of `ids` (all, by default) in the board's frame (N, 3), m, z = 0."""
-        ...
-
-    def detect(self, image: np.ndarray) -> Detection | None:
-        """The board's points in an RGB image, or None if fewer than `MIN_POINTS` are found."""
-        ...
-
-    def readings(self, detection: Detection) -> list[Detection]:
-        """Every assignment of ids the picture allows: one, or two for a symmetric board (turned around)."""
-        ...
-
-    def image(self, px_per_m: float, margin_px: int = 0) -> np.ndarray:
-        """The board to print (grayscale, uint8), and the pixel of its frame's origin: see each kind."""
-        ...
-
-    def to_dict(self) -> dict[str, Any]:
-        """The board as a JSON-able dict (`board_from_dict` reads it back)."""
-        ...
-
-
-# ---- a plain checkerboard -------------------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Checkerboard:
-    """A checkerboard: `cols` x `rows` inner corners, squares `square_m` wide.
-
-    The ids run row by row (OpenCV's order), from the corner whose outer square, diagonally past it, is dark; the
-    board's frame has its origin at id 0, x along the row, z = 0 on the board.
-    """
-
-    cols: int
-    rows: int
-    square_m: float
-    kind: ClassVar[str] = "checkerboard"
-    min_view_fraction: ClassVar[float] = 1.0
-
-    @property
-    def symmetric(self) -> bool:
-        """Whether the board looks the same turned around: both counts even, or both odd.
-
-        Then which end its corners start from cannot be told from the picture (`detect`), only from elsewhere (the
-        arm's motion, the fit): `readings` gives both.
-        """
-        return self.cols % 2 == self.rows % 2
-
-    def points(self, ids: Sequence[int] | np.ndarray | None = None) -> np.ndarray:
-        """The inner corners of `ids` (all, by default) in the board's frame (N, 3), z = 0."""
-        grid = np.mgrid[0 : self.cols, 0 : self.rows].T.reshape(-1, 2)
-        everything = np.c_[grid * self.square_m, np.zeros(len(grid))].astype(np.float64)
-        return everything if ids is None else everything[np.asarray(ids, dtype=int)]
-
-    def corners(self, image: np.ndarray) -> np.ndarray | None:
-        """The inner corners in an RGB image (N, 2) in id order, or None if the board is not found whole."""
-        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        # Plain first: normalizing (histogram equalization) lifts the table's wood grain and lost the board in 4 of
-        # 6 head views on the robot (2026-11-11). The wrist cameras' glare needs it, and 2 of their 6 views with
-        # the board whole needed the exhaustive search too (the same corners where both find them, ~50 ms).
-        for flags in (
-            0,
-            cv2.CALIB_CB_NORMALIZE_IMAGE,
-            cv2.CALIB_CB_NORMALIZE_IMAGE | cv2.CALIB_CB_EXHAUSTIVE,
-        ):
-            found, corners = cv2.findChessboardCornersSB(gray, (self.cols, self.rows), flags=flags)
-            if found:
-                break
-        else:
-            return None
-        corners = corners.reshape(-1, 2).astype(np.float64)
-        if self.symmetric:  # both ends alike: left as found (`readings` gives the other end)
-            return corners
-        first, last = self._outer_brightness(gray, corners, 0), self._outer_brightness(gray, corners, -1)
-        if first is not None and last is not None:
-            flip = first > last
-        elif first is not None:
-            flip = first > 127
-        elif last is not None:
-            flip = last < 127
-        else:
-            flip = False
-        return corners[::-1].copy() if flip else corners
-
-    def detect(self, image: np.ndarray) -> Detection | None:
-        """The board's inner corners, all of them (`corners`), or None."""
-        corners = self.corners(image)
-        return None if corners is None else Detection(np.arange(len(corners)), corners)
-
-    def readings(self, detection: Detection) -> list[Detection]:
-        """As found and, for a symmetric board, turned around (id k is then the last but k)."""
-        if not self.symmetric:
-            return [detection]
-        return [detection, Detection(self.cols * self.rows - 1 - detection.ids, detection.pixels)]
-
-    def image(self, px_per_m: float, margin_px: int = 0) -> np.ndarray:
-        """The board, (cols + 1) x (rows + 1) squares, the one diagonally past id 0 dark.
-
-        Id 0 is one square (and `margin_px`) from the top left, x to the right.
-        """
-        square = px_per_m * self.square_m
-        width = int(round((self.cols + 1) * square)) + 2 * margin_px
-        height = int(round((self.rows + 1) * square)) + 2 * margin_px
-        v, u = np.mgrid[0:height, 0:width].astype(np.float64)
-        i = np.floor((u - margin_px) / square)
-        j = np.floor((v - margin_px) / square)
-        inside = (i >= 0) & (i <= self.cols) & (j >= 0) & (j <= self.rows)
-        out = np.full((height, width), 255, np.uint8)
-        out[inside & ((i + j) % 2 == 0)] = 0
-        return out
-
-    def to_dict(self) -> dict[str, Any]:
-        """{"kind": "checkerboard", "cols", "rows", "square_m"}."""
-        return {"kind": self.kind, **asdict(self)}
-
-    def _outer_brightness(self, gray: np.ndarray, corners: np.ndarray, end: int) -> float | None:
-        """The brightness of the square diagonally outside the grid at its first (`end` 0) or last (-1) corner."""
-        grid = corners.reshape(self.rows, self.cols, 2)
-        corner, inner = (grid[0, 0], grid[1, 1]) if end == 0 else (grid[-1, -1], grid[-2, -2])
-        u, v = corner + 0.5 * (corner - inner)
-        height, width = gray.shape
-        if not (2 <= u < width - 2 and 2 <= v < height - 2):
-            return None
-        return float(gray[int(v) - 1 : int(v) + 2, int(u) - 1 : int(u) + 2].mean())
 
 
 # ---- ChArUco ------------------------------------------------------------------------------------------------------
@@ -235,10 +102,6 @@ class CharucoBoard:
         order = np.argsort(ids)
         return Detection(ids[order], np.asarray(corners, dtype=np.float64).reshape(-1, 2)[order])
 
-    def readings(self, detection: Detection) -> list[Detection]:
-        """One: the markers say which corner is which."""
-        return [detection]
-
     def image(self, px_per_m: float, margin_px: int = 0) -> np.ndarray:
         """The board; its frame's origin (the outer top-left corner) at (`margin_px`, `margin_px`), x to the right."""
         size = (
@@ -252,39 +115,37 @@ class CharucoBoard:
         return {"kind": self.kind, **asdict(self)}
 
 
+Board = CharucoBoard  # the one kind of board (the module docstring); the name the fits and the scripts use
+
+
 # ---- reading, saving, the pose --------------------------------------------------------------------------------
 
-KINDS: dict[str, type] = {"checkerboard": Checkerboard, "charuco": CharucoBoard}
+# the board printed for this robot (2026-11-11, on A4): 9 x 7 squares of 25 mm,
+# 18 mm markers; every script's default
+PRINTED_BOARD = "charuco:9x7:0.025:0.018:DICT_4X4_50"
 
 
 def board_from_dict(data: dict[str, Any]) -> Board:
-    """A board from `to_dict`'s dict (a dict without "kind" is a checkerboard: the older sessions')."""
+    """A board from `to_dict`'s dict. A checkerboard's (a dict without "kind": the older sessions') is refused."""
     data = dict(data)
     kind = data.pop("kind", "checkerboard")
-    if kind not in KINDS:
-        raise ValueError(f"unknown board kind {kind!r}; known: {', '.join(KINDS)}")
-    return KINDS[kind](**data)
+    if kind != CharucoBoard.kind:
+        raise ValueError(
+            f"a {kind} board: no longer read (ChArUco only since 2026-11-16, `boards`); record the session again"
+        )
+    return CharucoBoard(**data)
 
 
 def parse_board(text: str) -> Board:
-    """A board from text.
-
-    "checkerboard:COLSxROWS:SQUARE_M" (inner corners) or "charuco:COLSxROWS:SQUARE_M:MARKER_M[:DICTIONARY]" (squares).
-    """
+    """A board from text: "charuco:COLSxROWS:SQUARE_M:MARKER_M[:DICTIONARY]" (squares; `PRINTED_BOARD`)."""
     kind, *fields = text.strip().split(":")
     try:
         cols, rows = (int(v) for v in fields[0].lower().split("x"))
-        if kind == "checkerboard" and len(fields) == 2:
-            if cols < 3 or rows < 3:
-                raise ValueError("a checkerboard needs at least 3 x 3 inner corners")
-            return Checkerboard(cols, rows, float(fields[1]))
         if kind == "charuco" and len(fields) in (3, 4):
             return CharucoBoard(cols, rows, float(fields[1]), float(fields[2]), *fields[3:])
     except (IndexError, ValueError) as e:
         raise ValueError(f"cannot read the board {text!r}: {e}") from e
-    raise ValueError(
-        f"cannot read the board {text!r}: checkerboard:8x6:0.025 or charuco:12x9:0.02:0.015[:DICT_5X5_100]"
-    )
+    raise ValueError(f"cannot read the board {text!r}: e.g. {PRINTED_BOARD} (ChArUco only)")
 
 
 def board_pose(

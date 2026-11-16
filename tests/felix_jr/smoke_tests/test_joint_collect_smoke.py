@@ -1,7 +1,7 @@
 """A joint-calibration session (`calibration.joint_collect`) against the fake robot, its cameras showing a board.
 
-A true robot (the start's estimates moved by 30% of their priors, the wrist camera off on the gripper) renders a
-checkerboard on the table into the head's picture and the wrist camera's; the test drives the session as a person
+A true robot (the start's estimates moved by 30% of their priors, the wrist camera off on the gripper) renders the
+ChArUco board on the table into the head's picture and the wrist camera's; the test drives the session as a person
 would (`n`, the fingertips clicked where the truth shows them) and checks the sightings, the session file and the
 fit: the calibrated model is nearer the truth than the start.
 """

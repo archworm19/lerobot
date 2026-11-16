@@ -640,7 +640,7 @@ the referee.
 6. Repeat over scenarios: 3-4 attack poses (heights 12-20 cm, pitch -40 to -70), the sweep's size (roll +-15, +-30),
    lighting; the box and bottle moved.
 
-**First run, hil3 (2026-11-08;** `checks/hil_wrist_sfm.py`; the right arm's tip 16 cm over the board, 8 cm toward the
+**First run, hil3 (2026-11-08;** `checks/hil_wrist_sfm.py`, retired 2026-11-16 with the checkerboard: in git's history; the right arm's tip 16 cm over the board, 8 cm toward the
 robot from its center so the closed jaws do not cover it (hil1/hil2: they did, the board found in no frame); a sweep
 of 8 frames, the board found in 6; the bottle, chapstick, screwdriver and the table's edge in view):
 

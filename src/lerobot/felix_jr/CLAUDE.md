@@ -23,6 +23,7 @@ running anything on the robot, and update it when what you do changes what it sa
   - `docs/harness.md`: the VLM harness (research summary, design principles 1.A-1.K, experiment plan).
   - `docs/object_grasping.md`: the object-centric grasping experiment (phases A-C built; next, coarse to fine with the wrist cameras): plan, interfaces, flow, what it replaces and what is deprecated, open questions.
   - `docs/camera_calibration.md`: the click calibration and `XleRobotModel`.
+  - `docs/calibration_plan.md`: where the calibration is going (the procedure decided, the work in order).
   - `docs/sim2real_grasp.md`: the research branch for a grasp policy trained in simulation (MuJoCo, `sim2real/`): the idea, the simulator on this Mac, the robot model, next steps.
   - `docs/server_plan.md`: the Pi / laptop split and the protocol.
   - `docs/head.md`: the head servos.

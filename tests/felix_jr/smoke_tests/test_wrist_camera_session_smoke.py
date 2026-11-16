@@ -1,6 +1,6 @@
-"""`calibration.wrist_camera` end to end: a session against the fake robot whose wrist camera renders a checkerboard
-on the table from the arm's pose (the truth is known), driven by keys: the lens, the board put down, the views, the
-camera's pose on the gripper, the calibration written."""
+"""`calibration.wrist_camera` end to end: a session against the fake robot whose wrist camera renders the ChArUco board
+a person holds in front of it (the truth is known), driven by keys: the focus, the lens's views kept by themselves,
+the lens fitted, the calibration written with the camera's pose kept, resumed and refitted."""
 
 import threading
 
@@ -10,19 +10,18 @@ import pytest
 pytest.importorskip("pinocchio")
 pytest.importorskip("scipy")
 
-from test_wrist_camera import (
+from test_wrist_camera import (  # noqa: E402
     BOARD,
     GRIPPER_FROM_CAMERA,
     TRUE_CAMERA,
     URDF,
-    _pose,
     _with_pose,
-    board_under,
+    held,
     render_board,
-)  # noqa: E402
+)
 
 from lerobot.felix_jr.calibration.wrist_camera import (  # noqa: E402
-    POSE_VIEWS,
+    MIN_INTRINSIC_VIEWS,
     WristCameraSession,
     lens_coverage_missing,
     refit,
@@ -33,29 +32,23 @@ from lerobot.felix_jr.server.client import FelixClient  # noqa: E402
 from lerobot.felix_jr.server.hardware import FakeHardware  # noqa: E402
 from lerobot.felix_jr.server.server import RobotServer  # noqa: E402
 
+TABLE = np.full((480, 640, 3), 90, np.uint8)
+
 
 @pytest.fixture(scope="module")
 def model():
     return XleRobotModel.load(URDF)
 
 
-# ---- a session against the fake robot -------------------------------------------------------------------------
-
-
 @pytest.fixture
-def robot(tmp_path, model):
-    """The fake robot, its right wrist camera rendering the board. `held["camera_from_board"]` set: the person holds
-    the board there in front of the camera; None: it lies on the table (`root_from_board`)."""
-    root_from_board = board_under(model, "right")
-    truth = model.with_wrist_camera("right", _with_pose(TRUE_CAMERA))
-    held: dict[str, np.ndarray | None] = {"camera_from_board": None}
+def robot(tmp_path):
+    """The fake robot, its right wrist camera rendering the board where `holding["camera_from_board"]` puts it (None:
+    the board out of view, the table only)."""
+    holding: dict[str, np.ndarray | None] = {"camera_from_board": None}
 
     def render(arm: str, state: dict) -> np.ndarray:
-        camera_from_board = held["camera_from_board"]
-        if camera_from_board is None:
-            q = truth.joint_vector({arm: state[f"{arm}_arm"]})
-            camera_from_board = np.linalg.inv(truth.wrist_camera_pose(arm, q)) @ root_from_board
-        return render_board(TRUE_CAMERA, camera_from_board)
+        pose = holding["camera_from_board"]
+        return TABLE.copy() if pose is None else render_board(TRUE_CAMERA, pose)
 
     fake = FakeHardware(arm_time_scale=0.01, head_range_path=tmp_path / "range.json", wrist_renderer=render)
     server = RobotServer(fake)
@@ -63,94 +56,80 @@ def robot(tmp_path, model):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     with FelixClient(address, timeout_s=10.0) as client:
-        yield fake, client, held
+        yield fake, client, holding
     server.shutdown()
     thread.join(timeout=3.0)
     server.close()
 
 
-def test_a_session_calibrates_the_lens_and_the_pose_by_keys(robot, model, tmp_path):
-    fake, client, held = robot
-    start = model
+def test_a_session_calibrates_the_lens_by_keys_and_keeps_the_cameras_pose(robot, model, tmp_path):
+    fake, client, holding = robot
+    start = model.with_wrist_camera("right", _with_pose(TRUE_CAMERA))  # a pose on the gripper already (joint)
     start.arm_calibration["right"] = arm_record(client.arm_calibration()["right_arm"])
     out = tmp_path / "out"
     out.mkdir()
     shown: list[np.ndarray] = []
+    said: list[str] = []
     with client.session():
-        session = WristCameraSession(client, start, "right", BOARD, out, shown.append, step_m=0.01)
-        left = WristCameraSession(client, start, "left", BOARD, out, shown.append)
-        assert (
-            left.go_to_start() and session.go_to_start()
-        )  # both arms out of the way first, as the script does
-        moved = len(fake.arm_backend.trajectories)
-        assert session.start() and session.corners is not None  # the board under the start pose
-        assert len(fake.arm_backend.trajectories) - moved <= 1  # already there: at most a tiny move
-        assert session.phase == "focus" and session.best_sharpness > 0
+        session = WristCameraSession(client, start, "right", BOARD, out, shown.append, say=said.append)
+        holding["camera_from_board"] = held([0.0, 0.0, 0.0], [0.0, 0.0, 0.25])
+        assert session.start() and session.phase == "focus" and session.best_sharpness > 0
+        assert said and said[0].startswith("right FOCUS")
         session.handle("take")  # nothing is kept while focusing
         assert session.record.intrinsic_views == []
         session.handle("accept")  # Enter: the lens as it is
         assert session.phase == "intrinsics" and session.record.focus_sharpness is not None
-        # intrinsics: the person holds the board in front of the camera, tilted, turned and moved about; each new
-        # pose found is kept by itself
+        assert said[-1].startswith("right LENS")
+        # the person holds the board still at a pose (a few frames), then another: varied, some off the edge
         rng = np.random.default_rng(3)
-        for _ in range(150):
-            turn = rng.uniform([-0.6, -0.6, -0.8], [0.6, 0.6, 0.8])
-            center = rng.uniform([-0.06, -0.04, 0.22], [0.06, 0.04, 0.38])
-            pose = _pose(turn, center)
-            pose[:3, 3] -= pose[:3, :3] @ [4 * BOARD.square_m, 2.5 * BOARD.square_m, 0.0]  # centered there
-            held["camera_from_board"] = pose
-            session.refresh()
-            if len(session.record.intrinsic_views) >= 12 and not lens_coverage_missing(session.signatures):
+        for _ in range(60):
+            pose = held(
+                rng.uniform([-0.6, -0.6, -0.8], [0.6, 0.6, 0.8]),
+                rng.uniform([-0.14, -0.1, 0.24], [0.14, 0.1, 0.42]),
+            )
+            holding["camera_from_board"] = pose
+            for _ in range(3):
+                session.refresh()
+            n = len(session.record.intrinsic_views)
+            if n >= 2 * MIN_INTRINSIC_VIEWS and not lens_coverage_missing(session.views.signatures):
                 break
-        held["camera_from_board"] = None  # put down flat on the table
-        assert len(session.record.intrinsic_views) >= 12
+        n = len(session.record.intrinsic_views)
+        assert MIN_INTRINSIC_VIEWS <= n <= 60  # one per pose at most
+        assert any(len(v) < 48 for v in session.record.intrinsic_views)  # partial boards kept too
+        holding["camera_from_board"] = None
+        session.refresh()
+        assert "NOT found" in session.seen
+        session.handle("undo")
+        assert len(session.record.intrinsic_views) == n - 1
         session.handle("calibrate")
-        assert session.phase == "extrinsics" and session.camera is not None
+        assert session.done and session.camera is not None, session.message
         assert session.camera.fx == pytest.approx(400.0, rel=0.02)
-        session.handle("next")  # before the board is down: nothing moves
-        assert session.record.extrinsic_views == [] and "once the board lies" in session.message
-        session.handle("calibrate")  # the board is down
-        for _ in POSE_VIEWS:  # n: the suggested views, each taken where the board is found
-            session.handle("next")
-            if session.pose_fit is not None and session.pose_fit.settled:
-                break
-        fit = session.pose_fit
-        assert fit is not None and fit.settled, (len(session.record.extrinsic_views), fit and fit.describe())
-        assert "SETTLED" in session.status()[0] and session.status()[1].startswith("c: accept")
-        assert session.next_view <= len(POSE_VIEWS)  # the suggested views were enough
-        session.handle("calibrate")  # settled: one c ends the arm
-        assert session.done and session.camera.gripper_from_camera is not None
-    fitted = np.array(session.camera.gripper_from_camera)
-    np.testing.assert_allclose(fitted[:3, 3], GRIPPER_FROM_CAMERA[:3, 3], atol=0.004)
     path = write(start, [session.record], out)
     written = XleRobotModel.load(path).wrist_cameras["right"]
-    assert written.gripper_from_camera is not None and (out / "wrist_cameras.md").is_file()
+    assert written.fx == pytest.approx(400.0, rel=0.02)
+    np.testing.assert_allclose(np.array(written.gripper_from_camera), GRIPPER_FROM_CAMERA)  # the pose kept
+    report = (out / "wrist_cameras.md").read_text()
+    assert "kept from the start" in report and "corners each" in report
     assert (out / "right_views.json").is_file() and any((out / "images").iterdir())
     assert shown and shown[-1].shape == (480, 640, 3)
     # --resume keeps the saved views
     resumed = WristCameraSession(client, start, "right", BOARD, out, shown.append, resume=True)
-    assert len(resumed.record.intrinsic_views) == len(session.record.intrinsic_views)
-    assert len(resumed.signatures) == len(resumed.record.intrinsic_views) and "resumed" in resumed.message
-    # the saved views refit with no robot to the same camera
+    assert len(resumed.record.intrinsic_views) == n - 1 and "resumed" in resumed.message
+    assert resumed.views is not None and len(resumed.views.signatures) == n - 1
+    # the saved views refit with no robot to the same lens
     start_path = tmp_path / "start.urdf"
     start.save(start_path)
     again = XleRobotModel.load(refit(start_path, out)).wrist_cameras["right"]
-    assert again.extrinsics_views == written.extrinsics_views
-    np.testing.assert_allclose(
-        np.array(again.gripper_from_camera), np.array(written.gripper_from_camera), atol=1e-6
-    )
+    assert again.fx == pytest.approx(written.fx, rel=1e-6) and again.coeffs == pytest.approx(written.coeffs)
 
 
-def test_a_pose_not_settled_takes_a_second_c_and_a_skip_a_second_x(robot, model, tmp_path, monkeypatch):
-    """calib1008_full3 (2026-11-08): the left camera skipped by mistake (x read as "on to the right camera"). An
-    unsettled pose is accepted on a second c, a skip needs a second x, and the picture says what comes next."""
-    fake, client, held = robot
-    monkeypatch.setattr("lerobot.felix_jr.calibration.wrist_camera.POSE_SETTLED_M", 1e-9)  # never settled
-    start = model.with_wrist_camera("right", TRUE_CAMERA)  # the lens known: the pose step only
+def test_a_skip_takes_a_second_x(robot, model, tmp_path):
+    """calib1008_full3 (2026-11-08): the left camera skipped by mistake (x read as "on to the right camera")."""
+    _, client, _ = robot
+    start = model
     start.arm_calibration["right"] = arm_record(client.arm_calibration()["right_arm"])
     out = tmp_path / "out"
     out.mkdir()
-    said: list[str] = []
     with client.session():
         session = WristCameraSession(
             client,
@@ -159,33 +138,18 @@ def test_a_pose_not_settled_takes_a_second_c_and_a_skip_a_second_x(robot, model,
             BOARD,
             out,
             lambda image: None,
-            only="extrinsics",
             focus=False,
             next_arm="left",
-            say=said.append,
+            say=lambda s: None,
         )
-        assert session.start()
-        assert said and said[0].startswith("right CAMERA POSE")  # the step's keys, in the terminal
-        session.handle("calibrate")  # the board is down
-        for _ in POSE_VIEWS:
-            session.handle("next")
-            if session.pose_fit is not None:
-                break
-        assert session.pose_fit is not None and not session.pose_fit.settled
-        assert len(session.status()) <= 3 and "c: accept anyway" in session.status()[1]
         session.handle("skip")  # one x only asks
-        assert not session.done and "x again" in session.message
-        session.handle("calibrate")  # not the skip's second key: it is dropped; the pose asks for a second c
-        assert not session.done and "c again" in session.message and "next the left" in session.message
-        session.handle("next")  # anything else in between: the c is asked for again
-        session.handle("calibrate")
+        assert not session.done and "x again" in session.message and "next the left" in session.message
+        session.handle("undo")  # anything else in between: the x is asked for again
+        session.handle("skip")
         assert not session.done
-        session.handle("calibrate")
-        assert session.done and not session.skipped and "NOT settled" in said[-1]
-        last = WristCameraSession(
-            client, start, "right", BOARD, out, lambda image: None, focus=False, say=said.append
-        )
+        session.handle("skip")
+        assert session.done and session.skipped
+        session.handle("calibrate")  # (nothing to fit: done already)
+        last = WristCameraSession(client, start, "right", BOARD, out, lambda image: None, focus=False)
         last.handle("skip")
         assert "then the calibration is written" in last.message
-        last.handle("skip")
-        assert last.done and last.skipped

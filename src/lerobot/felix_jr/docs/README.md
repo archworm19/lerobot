@@ -233,11 +233,13 @@ radius r. It needs a calibrated URDF from section 6 (the model's radius is the s
    stored measurements with no robot. A camera calibration started from this file (`collect` /
    `xle_fit --start-from`) keeps the maps.
 
-### 8. Calibrate the wrist cameras (a checkerboard, needs the server)
+### 8. Calibrate the wrist cameras' lenses (a ChArUco board, needs the server)
 
 The wrist cameras (plain USB / UVC boards, one per arm, plugged into the Pi) are read by the server. Their lens
-(intrinsics) and their pose on the gripper (extrinsics) go into the calibration, so a wrist picture can be measured in
-the jaws' frame (`object_grasping.md`, section 6).
+(intrinsics) goes into the calibration here, once per lens: redo it when a lens is refocused or a camera replaced, not
+when a mount moves. Their pose on the gripper is the joint session's (`calibration.joint_collect`, which ties it to
+the head's view of the fingers): this step keeps `--start-from`'s. (The camera-pose step, and the checkerboard, were
+retired on 2026-11-16: `calibration_plan.md`.)
 
 0. **Let your user read the cameras** (once per Pi): `groups` must list `video`; if not,
    `sudo usermod -aG video $USER`, then log in again (or reboot, if the server runs as a service). Without it a
@@ -251,57 +253,44 @@ the jaws' frame (`object_grasping.md`, section 6).
 2. **Server:** started as usual, it opens the saved wrist cameras (640 x 480 MJPG at 30 fps); a saved camera that is
    unplugged is left out with a warning. `--left-wrist-camera` / `--right-wrist-camera <device>` override,
    `--no-wrist-cameras` skips them.
-3. **The board:** a printed checkerboard, taped flat on something stiff. Count its inner corners, the corners where
-   four squares meet: one fewer each way than the squares (9 x 7 squares are 8 x 6), and measure one square
-   (printers scale). Asked for a wrong count, the detector can still "find" the board with a row on the paper's edge,
-   so the status line warns when the board looks like another count. Any count works; with one odd and one even
-   (e.g. 9 x 6) the board's two ends look different, otherwise the script tells them apart from the arm's motion.
-4. **On your computer, with the workspace clear:**
+3. **The board:** the printed ChArUco (`boards.PRINTED_BOARD`: 9 x 7 squares of 25 mm, 18 mm markers,
+   `DICT_4X4_50`), taped flat on something stiff; measure a square (printers scale) and pass `--board
+   charuco:9x7:<square m>:<marker m>:DICT_4X4_50` if it is not 25 mm. Its markers name every corner, so a board
+   partly out of the picture or partly hidden still counts: that is how the picture's corners get covered.
+4. **On your computer:**
    `uv run python -m lerobot.felix_jr.calibration.wrist_camera tcp://<pi>:5555 --start-from <calibration.urdf>
-   --out-dir <a scratch folder>` (`--arms right` for one arm; `--pattern 9x6 --square-mm 25` to skip the
-   questions; `--lens fisheye` for a lens wider than about 120 deg). For each arm in turn, after a `y` in the terminal,
-   the arm goes to a start pose (the gripper tilted 70 deg down, about 18 cm over the table) and a window shows its
-   wrist camera. Keys: arrows, `w` / `s` move the arm; `[` / `]` tilt it; `,` / `.` turn it about its axis;
-   space takes a view; `u` drops the last one; `c` goes on; `x x` skips the arm's camera; `q` stops. The picture
-   shows three lines: the arm and step (1/3 focus, 2/3 lens, 3/3 camera pose) with how far along, the key to press
-   next, and the last message; the terminal prints each step's keys as it starts.
+   --out-dir <a scratch folder>` (`--arms right` for one arm; `--lens fisheye` for a lens wider than about 120 deg).
+   After a `y` in the terminal both arms go to a start pose (the gripper tilted down, about 18 cm over the table),
+   and for each arm in turn a window shows its wrist camera. Keys: arrows, `w` / `s` move the arm; `[` / `]` tilt
+   it; `,` / `.` turn it about its axis; space keeps this view; `u` drops the last one; `c` fits; `x x` skips the
+   arm's camera; `q` stops. The picture shows the arm and step (1/2 focus, 2/2 lens) with how far along, the key to
+   press next and the last message; the terminal prints each step's keys as it starts.
    - **The focus:** the window streams the camera with a sharpness score and the best so far. Hold the board about
      20 cm in front of the camera and turn the lens (it screws in and out of its holder) until the score peaks:
-     "in focus" from about 100 (out-of-focus lenses read ~2), and the board's corners are drawn once it is found.
-     Enter or a click in the window accepts (`--no-focus` skips this, once the lenses are focused).
-   - **The lens:** pick the board up and hold it in front of the camera, at 20-40 cm, tilted 20-45 deg every way
-     (toward each side, top and bottom), turned, and into each part of the picture. A view is kept by itself when the
-     board is found in a pose unlike the kept ones (moved, resized, tilted or turned); space keeps one anyway. Views
-     of the board flat on the table differ only in where it is: they leave the focal length trading off with the
-     distance (wrist_cams5: anywhere from 314 to 3700 px). The status line suggests what would help. `c` once there are
-     12: the lens is fitted on random halves of the views first and accepted when they agree within 3% (they did at
-     1.9% for views held up in a cramped workspace); if not, it says so and wants more views.
-   - **Resuming:** the views are saved as they are taken; `--resume` (same `--out-dir`) keeps them and adds to them.
-   - **The camera's pose:** lay the board flat on the table under the camera (its corners drawn), where it stays
-     from now on, and press `c`. Then `n`, again and again: each moves the arm to the next of 15 suggested views
-     around the start pose (tilted both ways, turned about the gripper's axis, shifted) and takes it if the board is
-     in view (if not, move the arm by the keys and press space, or `n` to skip); add views of your own as long as you
-     like. From 8 views the pose is fitted after every new one: the status line shows where the camera is and how
-     well that is known (each view left out in turn: it carries the arm's own error, which the pixel fit does not),
-     and the drawn fingertips follow it. `c` once it says SETTLED (under 5 mm and 1 deg, the views turned 15 deg
-     about two axes); until then it says what would help. Turns about one axis only (moving the arm about, which
-     only pans it) leave the camera's offset along that axis free: tilt (`[ ]`) and turn (`, .`) the gripper too.
-     The start pose keeps every joint 15 deg from its bounds, so both turns are in reach.
-   - **Ending the arm:** the model's fingertips are drawn on the live picture from the pose so far (cyan the fixed
-     tip, magenta the moving one): they should sit on the real ones. `c` accepts the pose and goes on to the other
-     arm's camera (or writes the calibration): at once when SETTLED, else on a second `c` (the report says it was
-     not settled). `x` twice skips the arm's camera instead (once only asks: calib1008_full3 lost the left camera
-     to a single `x`); its views are kept, and `--refit` fits them later.
-5. It writes `calibration.urdf` (the start with the wrist cameras) and `wrist_cameras.md` (the lens, the pose, the
-   errors) in the folder, and keeps the views: `wrist_camera --refit --start-from <urdf> --out-dir <folder>` fits
-   them again with no robot.
+     "in focus" from about 100 (out-of-focus lenses read ~2). Enter or a click in the window accepts (`--no-focus`
+     skips this, once the lenses are focused).
+   - **The lens:** hold the board in front of the camera at 20-40 cm and move it slowly from pose to pose, holding
+     each a moment: tilted 20-45 deg every way (toward each side, top and bottom), turned, near and far, and pushed
+     into each corner of the picture (it may run off the edges). The corners found are dotted green; the picture's
+     cells some kept view covers are framed. A view is kept by itself when the board is **held still** (a moving
+     board's corners blur), shows at least 30% of its corners, and is a new pose or covers a cell no kept view
+     does: about one view per pose held, at most 100 (simulated, 2026-11-16: 60 poses over two minutes, 3600 frames,
+     kept 63). The status line says why a frame was not kept. Views of the board flat at one distance leave the
+     focal length trading off with the distance (wrist_cams5: anywhere from 314 to 3700 px): the status line suggests
+     what would help. `c` once there are 12: the lens is fitted on random halves of the views first and accepted
+     when they agree within 3%; if not, it says so and wants more views. That ends the arm's camera.
+   - **Resuming:** the views are saved as they are kept; `--resume` (same `--out-dir`) keeps them and adds to them.
+5. It writes `calibration.urdf` (the start with the new lenses, each camera's pose on the gripper kept) and
+   `wrist_cameras.md` (the lens, the errors) in the folder, and keeps the views: `wrist_camera --refit --start-from
+   <urdf> --out-dir <folder>` fits them again with no robot. Views recorded with the checkerboard (before 2026-11-16)
+   are no longer read.
 
 ### 9. Check the calibration on the robot (no clicks, needs the server)
 
 Draws where the calibrated URDF puts both fingertips over the head camera, view after view, with the gripper at
 different openings: the pinch point (cyan, placed by the camera calibration) and the moving jaw's tip (magenta,
-placed by the gripper map from section 7 as well). When the URDF has the arm's wrist camera (section 8) and the
-server streams it, the wrist camera's picture is shown beside the head camera's with the same two circles, placed
+placed by the gripper map from section 7 as well). When the URDF has the arm's wrist camera (section 8, and its pose from a joint
+session) and the server streams it, the wrist camera's picture is shown beside the head camera's with the same two circles, placed
 by its lens and its pose on the gripper. It needs a URDF with the arm's gripper map, made for this robot (the same
 check as the harness's: a recalibrated arm or flipped head directions are refused).
 
@@ -315,8 +304,8 @@ check as the harness's: a recalibrated arm or flipped head directions are refuse
 3. Read the result: both circles should sit on the fingertips everywhere. An offset of the pinch point that changes
    with the pose or the head is the camera calibration (recalibrate, section 6); a pinch point on target with the
    moving tip off, growing with the opening, is the gripper map (re-measure, section 7). In the wrist picture the
-   fingertips stay in about the same place: circles off them there are the wrist camera's calibration (section 8),
-   whatever the head camera shows. With `--out-dir`, every frame is saved as drawn and raw (the wrist picture too),
+   fingertips stay in about the same place: circles off them there are the wrist camera's (its lens, section 8, or its
+   pose, the joint session), whatever the head camera shows. With `--out-dir`, every frame is saved as drawn and raw (the wrist picture too),
    with `frames.json` (the measured state and both predictions per frame, and their wrist pixels).
 
 ## Checks and teleop (after either setup)

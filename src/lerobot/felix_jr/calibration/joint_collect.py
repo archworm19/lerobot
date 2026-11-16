@@ -2,7 +2,7 @@
 
   uv run --extra felix_jr --extra felix_jr_sim --extra pyzmq-dep python -m lerobot.felix_jr.calibration.joint_collect \
       tcp://<pi>:5555 --arm right --out-dir <scratch folder> --start-from <calibration.urdf>
-      [--board checkerboard:8x6:0.025] [--placements 2] [--arm-views 10] [--head-views 6] [--low-views 10]
+      [--board charuco:9x7:0.025:0.018:DICT_4X4_50] [--placements 2] [--arm-views 10] [--head-views 6] [--low-views 10]
       [--max-vel 20] [--wrist-tip sweep|click] [--resume]
 
 `docs/camera_calibration.md`, "The rework". Start the server on the Pi with the arm and the head. `--start-from` must
@@ -52,7 +52,7 @@ import cv2
 import numpy as np
 
 from lerobot.felix_jr.calibration import joint_views as jv
-from lerobot.felix_jr.calibration.boards import Board, Detection, board_pose, parse_board
+from lerobot.felix_jr.calibration.boards import PRINTED_BOARD, Board, Detection, board_pose, parse_board
 from lerobot.felix_jr.calibration.joint_fit import (
     HEAD,
     SESSION_FILE,
@@ -355,19 +355,12 @@ class JointCollect:
         return path
 
     def _sight(self, camera: str) -> Detection | None:
-        """Find the board in `camera`'s current picture ("head" or the arm) and save the sighting.
-
-        A symmetric board reads two ways (`Board.readings`): once the placement is known (`board_known`), the reading
-        whose pose, through the model, agrees with it is kept (the other is turned ~180 deg).
-        """
+        """Find the board in `camera`'s current picture ("head" or the arm) and save the sighting."""
         capture = self.head if camera == HEAD else self.wrist
         assert capture is not None and self.look is not None
         found = self.board.detect(capture.color)
         if found is None:
             return None
-        readings = self.board.readings(found)
-        if len(readings) > 1 and self.board_known and self.root_board is not None:
-            found = min(readings, key=lambda r: self._turn_from_placement(camera, r))
         name = (
             f"p{self.placement - (self.phase == 'low')}"  # low poses: the board still at the last placement
         )
@@ -401,12 +394,6 @@ class JointCollect:
         lens = self.model.wrist_cameras[self.arm]
         camera_board = board_pose(self.board, reading, lens.matrix(), lens.coeffs, lens.model == "fisheye")
         return jv.wrist_pose(self.model, self.arm, q) @ camera_board
-
-    def _turn_from_placement(self, camera: str, reading: Detection) -> float:
-        """How far (rad) a reading's board is turned from the placement's."""
-        assert self.root_board is not None
-        r = self._root_from_board(camera, reading)[:3, :3] @ self.root_board[:3, :3].T
-        return float(np.arccos(np.clip((np.trace(r) - 1) / 2, -1.0, 1.0)))
 
     # ---- the phases --------------------------------------------------------------------------------------------
 
@@ -741,7 +728,7 @@ def main() -> None:
     parser.add_argument(
         "--start-from", type=Path, required=True, help="a calibration.urdf with the arm's wrist camera"
     )
-    parser.add_argument("--board", default="checkerboard:8x6:0.025", help="the board (boards.parse_board)")
+    parser.add_argument("--board", default=PRINTED_BOARD, help="the board (boards.parse_board)")
     parser.add_argument("--placements", type=int, default=2)
     parser.add_argument("--arm-views", type=int, default=10, help="arm views per placement")
     parser.add_argument("--head-views", type=int, default=6, help="head views per placement, the arms folded")

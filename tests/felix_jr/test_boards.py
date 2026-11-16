@@ -1,4 +1,4 @@
-"""`calibration.boards`: each board kind found in a synthetic view, its points where the truth projects them.
+"""`calibration.boards`: the ChArUco board found in a synthetic view, its points where the truth projects them.
 
 A board's printable image, rendered finely (10 px per mm, so the pixel conventions of the printout do not matter), is
 warped into a 640 x 480 pinhole camera looking at it from 30 cm, tilted; the points found are compared with the board's
@@ -11,8 +11,8 @@ import pytest
 
 from lerobot.felix_jr.calibration.boards import (
     MIN_POINTS,
+    PRINTED_BOARD,
     CharucoBoard,
-    Checkerboard,
     Detection,
     board_from_dict,
     board_pose,
@@ -38,10 +38,9 @@ def camera_from_board(board, distance=0.30, tilt_deg=(20.0, -15.0, 10.0)):
 def image_from_board_frame(board):
     """The printable image's pixel of a board-frame point (x, y): a similarity, found from the image itself.
 
-    The checkerboard's id 0 is one square in from the margin; ChArUco's frame starts at the board's corner.
+    ChArUco's frame starts at the board's outer corner, at the margin.
     """
-    offset = MARGIN_PX + (PX_PER_M * board.square_m if isinstance(board, Checkerboard) else 0.0)
-    return np.array([[PX_PER_M, 0.0, offset], [0.0, PX_PER_M, offset], [0.0, 0.0, 1.0]])
+    return np.array([[PX_PER_M, 0.0, MARGIN_PX], [0.0, PX_PER_M, MARGIN_PX], [0.0, 0.0, 1.0]])
 
 
 def render(board, pose, occlude=None):
@@ -71,34 +70,12 @@ def projected(board, pose, ids):
 @pytest.fixture(autouse=True)
 def blur_printouts(monkeypatch):
     """Blur the fine printout before the warp so its edges come out anti-aliased (as a real camera's would)."""
-    for cls in (Checkerboard, CharucoBoard):
-        original = cls.image
+    original = CharucoBoard.image
 
-        def blurred(self, px_per_m, margin_px=0, _original=original):
-            return cv2.GaussianBlur(_original(self, px_per_m, margin_px), (0, 0), PX_PER_M / 2000.0)
+    def blurred(self, px_per_m, margin_px=0):
+        return cv2.GaussianBlur(original(self, px_per_m, margin_px), (0, 0), PX_PER_M / 2000.0)
 
-        monkeypatch.setattr(cls, "image", blurred)
-
-
-def test_a_checkerboard_is_found_whole_and_in_order():
-    board = Checkerboard(9, 6, 0.025)  # one odd, one even count: its two ends differ
-    pose = camera_from_board(board)
-    found = board.detect(render(board, pose))
-    assert found is not None and len(found) == 54
-    np.testing.assert_array_equal(found.ids, np.arange(54))
-    errors = np.linalg.norm(found.pixels - projected(board, pose, found.ids), axis=1)
-    assert errors.max() < 0.3, errors.max()
-    assert board.readings(found) == [found]
-
-
-def test_a_symmetric_checkerboard_has_two_readings_one_of_them_true():
-    board = Checkerboard(8, 6, 0.025)
-    pose = camera_from_board(board)
-    found = board.detect(render(board, pose))
-    readings = board.readings(found)
-    assert len(readings) == 2
-    errors = [np.linalg.norm(r.pixels - projected(board, pose, r.ids), axis=1).max() for r in readings]
-    assert min(errors) < 0.3 and max(errors) > 50, errors  # the other is the board turned around
+    monkeypatch.setattr(CharucoBoard, "image", blurred)
 
 
 def test_a_charuco_board_half_hidden_gives_the_corners_it_shows():
@@ -112,22 +89,19 @@ def test_a_charuco_board_half_hidden_gives_the_corners_it_shows():
     errors = np.linalg.norm(half.pixels - projected(board, pose, half.ids), axis=1)
     assert errors.max() < 0.3, errors.max()
     assert (half.pixels[:, 0] < 330).all()  # only what shows
-    assert board.readings(half) == [half]
 
 
 def test_too_little_of_a_board_is_no_detection():
     board = CharucoBoard(12, 9, 0.02, 0.015)
     pose = camera_from_board(board)
     assert board.detect(render(board, pose, occlude=(0, 0, 600, 480))) is None
-    assert Checkerboard(9, 6, 0.025).detect(np.full((480, 640, 3), 128, np.uint8)) is None
+    assert board.detect(np.full((480, 640, 3), 128, np.uint8)) is None
 
 
-@pytest.mark.parametrize(
-    "board", [Checkerboard(9, 6, 0.025), CharucoBoard(12, 9, 0.02, 0.015)], ids=["checkerboard", "charuco"]
-)
-def test_the_pose_from_a_detection(board):
+def test_the_pose_from_a_detection():
+    board = CharucoBoard(12, 9, 0.02, 0.015)
     pose = camera_from_board(board)
-    found = board.detect(render(board, pose, occlude=(400, 0, 640, 480) if board.kind == "charuco" else None))
+    found = board.detect(render(board, pose, occlude=(400, 0, 640, 480)))
     solved = board_pose(board, found, K)
     assert np.linalg.norm(solved[:3, 3] - pose[:3, 3]) < 0.001
     turn = cv2.Rodrigues(solved[:3, :3] @ pose[:3, :3].T)[0]
@@ -135,15 +109,20 @@ def test_the_pose_from_a_detection(board):
 
 
 def test_boards_are_read_from_text_and_saved():
-    assert parse_board("checkerboard:8x6:0.025") == Checkerboard(8, 6, 0.025)
     assert parse_board("charuco:12x9:0.02:0.015") == CharucoBoard(12, 9, 0.02, 0.015)
     assert parse_board("charuco:5x4:0.03:0.02:DICT_4X4_50") == CharucoBoard(5, 4, 0.03, 0.02, "DICT_4X4_50")
-    for board in (Checkerboard(8, 6, 0.025), CharucoBoard(12, 9, 0.02, 0.015)):
-        assert board_from_dict(board.to_dict()) == board
-    assert board_from_dict({"cols": 8, "rows": 6, "square_m": 0.025}) == Checkerboard(
-        8, 6, 0.025
-    )  # old sessions
-    for bad in ("checkerboard:8x6", "charuco:12x9:0.02", "hexagons:3x3:0.1", "checkerboard:2x6:0.025"):
+    assert parse_board(PRINTED_BOARD) == CharucoBoard(9, 7, 0.025, 0.018, "DICT_4X4_50")
+    board = CharucoBoard(12, 9, 0.02, 0.015)
+    assert board_from_dict(board.to_dict()) == board
+    for old in (
+        {"cols": 8, "rows": 6, "square_m": 0.025},
+        {"kind": "checkerboard", "cols": 8, "rows": 6, "square_m": 0.025},
+    ):
+        with pytest.raises(
+            ValueError, match="no longer read"
+        ):  # the checkerboard's sessions (before 2026-11-16)
+            board_from_dict(old)
+    for bad in ("checkerboard:8x6:0.025", "charuco:12x9:0.02", "hexagons:3x3:0.1"):
         with pytest.raises(ValueError, match="cannot read the board"):
             parse_board(bad)
     with pytest.raises(ValueError, match="smaller than the squares"):
@@ -155,4 +134,5 @@ def test_boards_are_read_from_text_and_saved():
 def test_a_detection_is_its_points():
     found = Detection(np.array([3, 7]), np.array([[1.0, 2.0], [3.0, 4.0]]))
     assert len(found) == 2
-    np.testing.assert_allclose(Checkerboard(4, 3, 0.01).points(found.ids)[:, :2], [[0.03, 0.0], [0.03, 0.01]])
+    board = CharucoBoard(5, 4, 0.01, 0.007, "DICT_4X4_50")  # 4 x 3 inner corners, from (0.01, 0.01)
+    np.testing.assert_allclose(board.points(found.ids)[:, :2], [[0.04, 0.01], [0.04, 0.02]])
