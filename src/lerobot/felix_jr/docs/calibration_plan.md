@@ -140,8 +140,9 @@ older map's into the parameters (left -16.5 / +3.0 deg, right -18.0 / +0.5 deg, 
   (`test_joint_views`). The arm views do not (the board's views come first; their head clicks are optional).
 - Rehearsed against the fake robot (`server.server --fake`) and the smoke test (`test_joint_collect_smoke`). **The
   smoke tests done (2026-11-17)**: a session clicking both tips (4+ moving-tip clicks, the fit as near the truth), the
-  sweep first (declined, gone on), the drift check's three answers. Not yet rehearsed by hand on the fake server, nor
-  run on the robot.
+  sweep first (declined, gone on), the drift check's three answers. **Rehearsed by hand on the fake (2026-11-17)**
+  (the board rendered, no fingers): the sweep first is right (the board not yet down); a misread sweep went into the
+  fit (fixed: `SWEEP_FAILED_PX`), the planning's 35 s looked frozen (fixed: its message). Not yet run on the robot.
 
 ### 5. The gripper map without the calipers
 
@@ -169,8 +170,14 @@ Newest first. Each commit that changes the calibration adds its entry here, titl
 name its own hash, so the next one fills it in. Before the plan (2026-11-16) the work is in `camera_calibration.md`
 and git's log.
 
-- **The joint session's head clicks both fingertips; the sweep first, with its drift check** (2026-11-17, hash in the
-  next entry). Item 4's last two points. `joint_collect`: `PANES` `head:fixed` / `head:moving` / `wrist`, the face
+- **A misread sweep's tips left out; the sweep's pictures saved; the planning said** (2026-11-17, hash in the next
+  entry). From the rehearsal on the fake robot. `joint_collect`: the sweep's fixed tip more than `SWEEP_FAILED_PX`
+  (30) from the start's is a misread (the fake's board taken for fingers: 70 px), its tips dropped and the person
+  asked to go on without them; each sweep frame saved (`wrist_tip_sweep/frame_NN.png`) for its tips' mis-click
+  pictures; "PLANNING the arm views (about 30 s)" before the 30 s of planning, the window painted at once, and keys
+  and clicks made during a step dropped (a second `n` no longer moves the arm on). Tests: the drift test's misread
+  case.
+- **`c4ea9160a`: The joint session's head clicks both fingertips; the sweep first, with its drift check** (2026-11-17). Item 4's last two points. `joint_collect`: `PANES` `head:fixed` / `head:moving` / `wrist`, the face
   from the model (`face_of`), the moving pane only with the jaws open; `sweep_first` before the window (the fixed
   tip's drift from the start's, `SWEEP_DRIFT_PX`; asked to go on past it, or with no tips), the sweep after `q`
   gone. `joint_views.moving_fingertips` (`joint_sim` uses it). `joint_fit.report` compares estimates by name (it

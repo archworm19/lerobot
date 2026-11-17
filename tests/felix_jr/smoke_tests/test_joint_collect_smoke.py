@@ -19,7 +19,14 @@ pytest.importorskip("scipy")
 from lerobot.felix_jr.calibration import joint_views as jv  # noqa: E402
 from lerobot.felix_jr.calibration.boards import CharucoBoard  # noqa: E402
 from lerobot.felix_jr.calibration.joint_collect import JointCollect  # noqa: E402
-from lerobot.felix_jr.calibration.joint_fit import HEAD, MOVING, MOVING_PINCH, load_session  # noqa: E402
+from lerobot.felix_jr.calibration.joint_fit import (  # noqa: E402
+    HEAD,
+    MOVING,
+    MOVING_PINCH,
+    Look,
+    TipClick,
+    load_session,
+)
 from lerobot.felix_jr.calibration.joint_sim import draw_truth  # noqa: E402
 from lerobot.felix_jr.calibration.xle_robot_model import HEAD_JOINTS, XleRobotModel  # noqa: E402
 from lerobot.felix_jr.server.client import FelixClient  # noqa: E402
@@ -254,12 +261,22 @@ def test_a_fixed_fingertip_moved_since_the_start_stops_the_session_unless_told_t
     def measured(session, drift):
         def measure(window=True, ask=input):
             session.sweep_drift_px = drift
-            return 12  # the sweep's clicks (none added here)
+            look = Look({ARM: {}}, {})  # (never evaluated here)
+            session.session.clicks.append(
+                TipClick(ARM, ARM, look, np.zeros(2), "wrist_tip_sweep/frame_00.png", "wrist")
+            )
+            return 1  # the sweep's one tip
 
         return measure
 
     with client.session():
-        for drift, answer, goes_on in ((2.0, None, True), (9.0, "n", False), (9.0, "y", True)):
+        # (a misread, 70 px as on the fake robot's board: its tips dropped, and asked to go on without them)
+        for drift, answer, goes_on in (
+            (2.0, None, True),
+            (9.0, "n", False),
+            (9.0, "y", True),
+            (70.0, "y", True),
+        ):
             session = JointCollect(
                 client,
                 ARM,
@@ -279,3 +296,4 @@ def test_a_fixed_fingertip_moved_since_the_start_stops_the_session_unless_told_t
             assert session.sweep_first(ask=ask) is goes_on
             assert len(asked) == (answer is not None)
             assert session.phase == ("place" if goes_on else "sweep")
+            assert len(session.session.clicks) == (drift < 30.0)  # a misread's tips dropped

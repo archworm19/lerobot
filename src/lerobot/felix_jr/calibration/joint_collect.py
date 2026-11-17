@@ -16,7 +16,7 @@ closed).
    session as wrist clicks (`auto_tips.sweep_clicks`; its frames in `wrist_tip_sweep/`): by eye, in the notch between
    closed tips, they were ~10 px off. Then the **drift check**: the fixed fingertip found against where the start has
    it; more than `SWEEP_DRIFT_PX`, the wrist camera moved on its mount since (`docs/hardware_risks.md`), and you are
-   asked whether to go on. `--wrist-tip click`: no sweep, the wrist's tip clicked by eye at the views.
+   asked whether to go on; more than `SWEEP_FAILED_PX`, the sweep misread the fingers: its tips are left out. `--wrist-tip click`: no sweep, the wrist's tip clicked by eye at the views.
 
 The window shows three panes, the pictures of one moment: the head's twice, for the **fixed fingertip** (magenta) and
 the **moving fingertip** (yellow), and the wrist camera's (cyan), each with its tip as the model predicts it circled.
@@ -102,6 +102,9 @@ MIN_MOVING_OPENING_DEG = (
 # the fixed fingertip in the sweep's wrist frames this far (median) from where the start has it: the wrist camera moved
 # on its mount since (`docs/hardware_risks.md`: 6 px over an hour, loose; within a sweep ~1 px)
 SWEEP_DRIFT_PX = 5.0
+# ... and this far: not a mount that moved (a knock that big would show) but the sweep's fingers misread (the fake
+# robot's board taken for them: 70 px): its tips are dropped, not fitted
+SWEEP_FAILED_PX = 30.0
 STATUS_HEIGHT = 90
 LIVE_PERIOD_S = 0.2  # the head picture's refresh while placing the board
 CALIBRATION_FILE = "calibration.urdf"
@@ -472,6 +475,9 @@ class JointCollect:
         for target in jv.head_aims(points.mean(axis=0), self.n_head_views):
             self._capture(self._aim(target))
             seen += self._sight(HEAD) is not None
+        # the planning takes half a minute (`low_poses`' region, then `arm_views`: ~2800 solves): say so first
+        self.message = f"the head saw the board {seen} times; PLANNING the arm views (about 30 s): wait"
+        self.render()
         region = jv.low_poses(self.model, self.arm, self.rest, 40, self.table_z, self.rng)
         self.views = jv.with_openings(
             self.model,
@@ -669,7 +675,21 @@ class JointCollect:
         session). Likewise with no fingertip found (the fit then has the head's clicks only). False: stop here.
         """
         added = self.measure_wrist_tip(window, ask)
-        if not added:
+        if added and self.sweep_drift_px is not None and self.sweep_drift_px > SWEEP_FAILED_PX:
+            print(
+                f"the fixed fingertip was found {self.sweep_drift_px:.0f} px from where the start has it: the sweep "
+                f"misread the fingers (its frames: {self.out_dir / WRIST_TIP_SWEEP}), its tips left out"
+            )
+            self._drop_sweep_clicks()
+            save_session(self.session)
+            if (
+                not ask("Go on without the sweep's tips (the head's clicks only for them)? [y/N] ")
+                .strip()
+                .lower()
+                .startswith("y")
+            ):
+                return False
+        elif not added:
             print("the sweep found no fingertips: the fit would have the head's clicks only for them")
             if not ask("Go on without them? [y/N] ").strip().lower().startswith("y"):
                 return False
@@ -722,19 +742,28 @@ class JointCollect:
         if not found:
             return 0
         ticks = self._ticks()
+        self._drop_sweep_clicks()
+        pictures: dict[int, str] = {}  # each frame's picture, once (a frame gives both tips)
+        for frame, face, pixel in found:  # the fixed tip and the moving one (`joint_fit.MOVING`)
+            look = Look({self.arm: dict(frame.pose)}, ticks)
+            if (
+                id(frame) not in pictures
+            ):  # the raw frame, whose pixels the tips are in (for the mis-clicks' pictures)
+                pictures[id(frame)] = f"{WRIST_TIP_SWEEP}/frame_{len(pictures):02d}.png"
+                cv2.imwrite(
+                    str(self.out_dir / pictures[id(frame)]), cv2.cvtColor(frame.color, cv2.COLOR_RGB2BGR)
+                )
+            self.session.clicks.append(TipClick(self.arm, self.arm, look, pixel, pictures[id(frame)], face))
+        save_session(self.session)
+        return len(found)
+
+    def _drop_sweep_clicks(self) -> None:
+        """Take the sweep's tips out of the session (an earlier sweep's, or a misread one's)."""
         self.session.clicks = [
             c
             for c in self.session.clicks
             if not (c.camera == self.arm and c.image.startswith(WRIST_TIP_SWEEP))
         ]
-        for i, (frame, face, pixel) in enumerate(
-            found
-        ):  # the fixed tip and the moving one (`joint_fit.MOVING`)
-            look = Look({self.arm: dict(frame.pose)}, ticks)
-            image = f"{WRIST_TIP_SWEEP}/click_{i:02d}"
-            self.session.clicks.append(TipClick(self.arm, self.arm, look, pixel, image, face))
-        save_session(self.session)
-        return len(found)
 
     def finish(self, holdout_every: int = 5, head_axes: bool = False) -> Path | None:
         """Fit the session and write `calibration.urdf` and `calibration.md` (None if there is too little).
@@ -876,6 +905,7 @@ def main() -> None:
 
     def show(image: np.ndarray) -> None:
         cv2.imshow(window, cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+        cv2.waitKey(1)  # painted now, also in the middle of a long step (the planning's message)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     with FelixClient(args.endpoint, timeout_s=20.0) as client, client.session():
@@ -909,6 +939,12 @@ def main() -> None:
                 action = decode_key(key, KEYS)
                 if action is not None and not session.handle(action):
                     break
+                if (
+                    action is not None
+                ):  # what was pressed or clicked while it ran is dropped: a second `n` made
+                    while cv2.pollKey() != -1:  # while planning would otherwise move the arm on at once
+                        pass
+                    pending.clear()
         finally:
             cv2.destroyAllWindows()
         client.home(max_vel=args.max_vel)
