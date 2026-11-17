@@ -5,41 +5,43 @@
       [--board charuco:9x7:0.025:0.018:DICT_4X4_50] [--placements 2] [--arm-views 10] [--head-views 6] [--low-views 10]
       [--max-vel 20] [--wrist-tip sweep|click] [--openings 20 35 50] [--resume]
 
-`docs/camera_calibration.md`, "The rework". Start the server on the Pi with the arm and the head. `--start-from` must
+`docs/calibration_plan.md` (the procedure). Start the server on the Pi with the arm and the head. `--start-from` must
 have the arm's wrist camera's lens (`calibration.wrist_camera`; its pose on the gripper starts at the design's, or a
-calibration's). The window
-shows three panes: the head's picture twice, once per fingertip face (the pinch face, magenta; the wrist camera's
-side, a finger's thickness away, cyan), and the wrist camera's (cyan: it sees only its own side), each with that
-face's tip as the model predicts it circled. A click is on the face of the pane it is in. Per board placement:
+calibration's) and, for the jaws to open, the arm's gripper map (`calibration.gripper_step`; without, they stay
+closed).
+
+0. **The gripper sweep first** (`--wrist-tip sweep`, the default), the table clear, before the window opens
+   (`sweep_first`): the arm to its sweep pose over the table, the jaws opened in steps (`gripper_sweep`: the sim's
+   checks, the person asked, the live preview, one sweep). Both fingertips are found in each open frame and go into the
+   session as wrist clicks (`auto_tips.sweep_clicks`; its frames in `wrist_tip_sweep/`): by eye, in the notch between
+   closed tips, they were ~10 px off. Then the **drift check**: the fixed fingertip found against where the start has
+   it; more than `SWEEP_DRIFT_PX`, the wrist camera moved on its mount since (`docs/hardware_risks.md`), and you are
+   asked whether to go on. `--wrist-tip click`: no sweep, the wrist's tip clicked by eye at the views.
+
+The window shows three panes, the pictures of one moment: the head's twice, for the **fixed fingertip** (magenta) and
+the **moving fingertip** (yellow), and the wrist camera's (cyan), each with its tip as the model predicts it circled.
+Both head clicks are on the face the model says the head sees (named in the pane's title: almost always the pinch
+face, the one away from the wrist camera); the moving tip's pane takes clicks only with the jaws open. With the sweep,
+the wrist pane takes none. Per board placement:
 
 1. **Place the board.** The arms go to rest and the head looks where the board should go: lay it flat on the table
    on the drawn outline (roughly: anywhere the head sees it works). The head's picture is live, the board's corners
    dotted green where it finds them. `n`: the head finds it, then looks at it from `--head-views` directions around
    it (the arms stay folded).
 2. **Arm views.** Each `n` moves the arm (slowly: watch it) to the next planned view of the board, the head looking at
-   the board: a moment both cameras see it at ties the head to the arm. Click the fixed fingertip in the wrist
-   camera's picture (the face toward it), and in the head's if it shows (the face the head sees).
+   the board: a moment both cameras see it at ties the head to the arm. Click both fingertips in the head's panes if
+   they show.
 
 **The jaws open** at the arm views and the low poses, `gripper.pos` 20, 35, 50 in turn (`--openings`;
 `joint_views.VIEW_OPENINGS`; `--openings` alone keeps them closed): the moving tip's arc about the hinge is what fixes the
 hinge and the opening's offset (`joint_sim`). Both tips are kept 2 cm over the table at every opening
-(`joint_views.tips_clear`). They open only with the arm's gripper map in `--start-from` (`calibration.gripper_step`):
-without, closed. Click the **fixed** fingertip, as before (the moving tip's panes: `docs/calibration_plan.md`, item 4).
+(`joint_views.tips_clear`).
 
 Then **low poses**: each `n` moves the gripper low over the table, as for a grasp, and the head looks at the fingertip:
-click it in both pictures. The head's clicks matter: a wrist click fixes only the direction from its camera to the
-fingertip, the head's the distance along it. Leave the board where it is: a picture that shows it is one more sighting.
-
-The head sees one face of the fingertip: click it in that face's head pane (the one marked "expected" is the face the
-model expects it to see; trust the picture over it).
-
-**The wrist camera's fingertip is not clicked** (`--wrist-tip sweep`, the default): it is at one pixel in every wrist
-frame (the camera and the finger both on the gripper), and by eye, with the jaws closed, it was clicked in the notch
-between the tips, ~10 px off (`calibration.auto_tips`). After `q`, before the fit, a gripper sweep measures it with
-the jaws open against the table (`gripper_sweep`: the sim's checks, the person asked, the sweep pose, the live
-preview, one sweep), and each open frame's fingertip goes into the session as a wrist click (`auto_tips.sweep_clicks`;
-its frames in `wrist_tip_sweep/`). Clicks in the wrist pane are declined; the head's are as before. `--wrist-tip
-click`: clicked by eye, as before.
+click both tips. The head's clicks matter: a wrist click fixes only the direction from its camera to the fingertip, the
+head's the distance along it. Leave the board where it is: a picture that shows it is one more sighting. The planner
+keeps the fingers short of edge-on to the head here; at an arm view the status line says when they are nearly
+edge-on (click only if you can see the tips).
 
 Keys: `n` next, arrows turn the head (if the board is cut off), `u` undo the last click, `q` stop and
 fit. Everything is saved as you go (`joint_session.json`, `images/`), `--resume` continues. At the end the session
@@ -62,6 +64,9 @@ from lerobot.felix_jr.calibration import joint_views as jv
 from lerobot.felix_jr.calibration.boards import PRINTED_BOARD, Board, Detection, board_pose, parse_board
 from lerobot.felix_jr.calibration.joint_fit import (
     HEAD,
+    MOVING,
+    MOVING_FACES,
+    MOVING_PINCH,
     SESSION_FILE,
     BoardSighting,
     JointSession,
@@ -80,17 +85,23 @@ from lerobot.felix_jr.server.client import Capture, FelixClient, WristCapture
 from lerobot.felix_jr.server.protocol import DEFAULT_PORT
 
 PANE = (480, 360)  # each picture is shown at this size (three side by side)
-# the window's panes: the head's picture twice, one per fingertip face, and the wrist camera's (which sees only its own
-# side). A click is on the face of the pane it is in.
-PANES = ("head:pinch", "head:wrist", "wrist")
+# the window's panes: the head's picture twice, one per fingertip (the fixed one, the moving one: both on the face the
+# model says the head sees, `JointCollect.face_of`), and the wrist camera's
+PANES = ("head:fixed", "head:moving", "wrist")
 WRIST_TIPS = ("sweep", "click")  # how the wrist camera's fingertip is measured (the module docstring)
 WRIST_TIP_SWEEP = "wrist_tip_sweep"  # the sweep's folder in the session's, and its clicks' `image`
 PANE_TITLES = {
-    "head:pinch": "head: pinch face",
-    "head:wrist": "head: wrist-camera face",
+    "head:fixed": "head: FIXED fingertip",
+    "head:moving": "head: MOVING fingertip",
     "wrist": "wrist camera",
 }
-FACE_COLORS = {"pinch": (255, 64, 255), "wrist": (0, 255, 255)}  # RGB: magenta, cyan
+PANE_COLORS = {"head:fixed": (255, 64, 255), "head:moving": (255, 255, 0), "wrist": (0, 255, 255)}  # RGB
+MIN_MOVING_OPENING_DEG = (
+    5.0  # the moving tip is clicked only with the jaws this far open (closed, it is the fixed one)
+)
+# the fixed fingertip in the sweep's wrist frames this far (median) from where the start has it: the wrist camera moved
+# on its mount since (`docs/hardware_risks.md`: 6 px over an hour, loose; within a sweep ~1 px)
+SWEEP_DRIFT_PX = 5.0
 STATUS_HEIGHT = 90
 LIVE_PERIOD_S = 0.2  # the head picture's refresh while placing the board
 CALIBRATION_FILE = "calibration.urdf"
@@ -138,11 +149,6 @@ def pane_camera(pane: str) -> str:
     return pane.split(":")[0]
 
 
-def pane_face(pane: str) -> str:
-    """The fingertip face a pane's clicks are on: "pinch" or "wrist"."""
-    return pane.split(":")[1] if ":" in pane else "wrist"
-
-
 def compose(
     pictures: dict[str, np.ndarray],
     predicted: dict[str, np.ndarray | None],
@@ -153,7 +159,7 @@ def compose(
     titles: dict[str, str] | None = None,
     expected: dict[str, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, list[Region]]:
-    """The window: `PANES` side by side, each with its face's predicted tip circled in the face's color.
+    """The window: `PANES` side by side, each with its predicted tip circled in the pane's color (`PANE_COLORS`).
 
     `pictures`, `outlines` (the board's, while placing it) and `found` (board corners detected, green dots) are per
     camera ("head", "wrist"); `predicted` and `clicks` per pane. `titles`: each pane's (default `PANE_TITLES`).
@@ -189,11 +195,9 @@ def compose(
             cv2.drawMarker(shown, at(np.array(p)), (0, 255, 0), cv2.MARKER_CROSS, 14, 2, cv2.LINE_AA)
         tip = predicted.get(pane)
         if tip is not None and np.isfinite(tip).all():
-            cv2.circle(shown, at(tip), 12, FACE_COLORS[pane_face(pane)], 2, cv2.LINE_AA)
+            cv2.circle(shown, at(tip), 12, PANE_COLORS[pane], 2, cv2.LINE_AA)
         _draw_text(shown, [(titles or PANE_TITLES)[pane]], (8, 20))
-        cv2.rectangle(
-            shown, (0, 0), (shown.shape[1] - 1, shown.shape[0] - 1), FACE_COLORS[pane_face(pane)], 1
-        )
+        cv2.rectangle(shown, (0, 0), (shown.shape[1] - 1, shown.shape[0] - 1), PANE_COLORS[pane], 1)
         window[: shown.shape[0], x0 : x0 + shown.shape[1]] = shown
         regions.append(Region(pane, x0, 0, shown.shape[1], shown.shape[0], scale, (0.0, 0.0)))
     _draw_text(window, lines, (8, PANE[1] + 18))
@@ -291,7 +295,18 @@ class JointCollect:
         self.board_warning = ""
         self.live_at = 0.0
         self.message = ""
-        if self.phase == "place":
+        self.sweep_drift_px: float | None = (
+            None  # the sweep's fixed fingertip from the start's (`sweep_first`)
+        )
+        # the gripper sweep comes first (`sweep_first`), once per session: a resumed one keeps its sweep
+        self.sweep_pending = wrist_tip == "sweep" and not any(
+            c.camera == arm and c.image.startswith(WRIST_TIP_SWEEP) for c in self.session.clicks
+        )
+        if self.sweep_pending:
+            self.message = "the gripper sweep first (sweep_first)"
+            if self.phase == "place":
+                self.phase = "sweep"
+        elif self.phase == "place":
             self._start_placement()
         else:
             self._start_low()
@@ -542,7 +557,9 @@ class JointCollect:
 
     def next(self) -> None:
         """`n`: the next step of the current phase."""
-        if self.phase == "place":
+        if self.phase == "sweep":
+            self.message = "the gripper sweep comes first (sweep_first)"
+        elif self.phase == "place":
             self._confirm_placement()
         elif self.phase == "arm":
             self._next_arm_view()
@@ -559,17 +576,41 @@ class JointCollect:
             return None
         return self.click(region.pane, *region.to_picture(x, y))
 
-    def click(self, pane: str, u: float, v: float) -> TipClick | None:
-        """Record the fingertip at pixel (u, v) of `pane`'s picture (one of `PANES`), on the pane's face.
+    def face_of(self, pane: str) -> str:
+        """The face a click in `pane` is on (`TipClick.face`): the head's, from the model (`head_face`).
 
-        None (declined) in the wrist pane when a sweep measures the wrist's fingertip (`wrist_tip`, the module docstring).
+        The fixed tip's "pinch" (or "wrist" with the fingers' back to the head), the moving tip's `MOVING_PINCH` (or
+        `MOVING`); the wrist camera's pane "wrist", the face toward it.
+        """
+        if pane == "wrist":
+            return "wrist"
+        if pane == "head:fixed":
+            return self.head_face
+        return MOVING_PINCH if self.head_face == "pinch" else MOVING
+
+    def opening(self) -> float | None:
+        """The jaws' opening (deg) at the current look; None without the arm's gripper map."""
+        if self.look is None or self.arm not in self.model.gripper_maps:
+            return None
+        return self.model.opening_deg(self.arm, self.look.arms[self.arm].get("gripper.pos", 0.0))
+
+    def click(self, pane: str, u: float, v: float) -> TipClick | None:
+        """Record the fingertip at pixel (u, v) of `pane`'s picture (one of `PANES`), on its face (`face_of`).
+
+        None (declined) in the wrist pane when a sweep measures the wrist's fingertip (`wrist_tip`, the module
+        docstring), and in the moving tip's with the jaws closed (`MIN_MOVING_OPENING_DEG`).
         """
         if pane not in PANES:
             raise ValueError(f"no pane {pane!r}: one of {PANES}")
         if pane_camera(pane) != "head" and self.wrist_tip == "sweep":
             self.message = (
-                "the wrist camera's fingertip is measured by a sweep after q: click only the head's panes"
+                "the wrist camera's fingertips were measured by the sweep: click only the head's panes"
             )
+            self.render()
+            return None
+        opening = self.opening()
+        if pane == "head:moving" and (opening is None or opening < MIN_MOVING_OPENING_DEG):
+            self.message = "the jaws are closed here: click the fixed fingertip only"
             self.render()
             return None
         head = pane_camera(pane) == "head"
@@ -582,7 +623,7 @@ class JointCollect:
             self.look,
             np.array([u, v]),
             self._image(capture, pane_camera(pane)),
-            pane_face(pane),
+            self.face_of(pane),
         )
         self.session.clicks.append(click)
         self.frame_clicks[pane].append((u, v))
@@ -595,7 +636,10 @@ class JointCollect:
         """`u`: drop the last click."""
         if self.session.clicks:
             last = self.session.clicks.pop()
-            pane = f"head:{last.on_face}" if last.camera == HEAD else "wrist"
+            if last.camera != HEAD:
+                pane = "wrist"
+            else:
+                pane = "head:moving" if last.on_face in MOVING_FACES else "head:fixed"
             if self.frame_clicks[pane]:
                 self.frame_clicks[pane].pop()
             save_session(self.session)
@@ -616,14 +660,46 @@ class JointCollect:
             self._sight(HEAD)
         self.render()
 
-    def measure_wrist_tip(self, window: bool = True, ask: Callable[[str], str] = input) -> int:
-        """The wrist camera's fingertip by a gripper sweep (the module docstring), into the session as wrist clicks.
+    def sweep_first(self, window: bool = True, ask: Callable[[str], str] = input) -> bool:
+        """The session's first step: the gripper sweep (`measure_wrist_tip`), its drift check, then the board.
 
-        Replaces the wrist clicks an earlier sweep made (`--resume`); the number added (0: refused, declined, stopped
-        at the preview, or no fingertip seen).
+        The fixed fingertip found in the sweep's frames against where the start has it (`sweep_drift_px`): more than
+        `SWEEP_DRIFT_PX`, the wrist camera has moved on its mount since that calibration (`docs/hardware_risks.md`),
+        and the person is asked whether to go on (tighten it first, if it is loose: it may move again during the
+        session). Likewise with no fingertip found (the fit then has the head's clicks only). False: stop here.
+        """
+        added = self.measure_wrist_tip(window, ask)
+        if not added:
+            print("the sweep found no fingertips: the fit would have the head's clicks only for them")
+            if not ask("Go on without them? [y/N] ").strip().lower().startswith("y"):
+                return False
+        elif self.sweep_drift_px is not None:
+            print(
+                f"the fixed fingertip is {self.sweep_drift_px:.1f} px from where the start has it in the wrist picture"
+            )
+            if self.sweep_drift_px > SWEEP_DRIFT_PX:
+                print(
+                    "  the wrist camera has moved on its mount since that calibration (docs/hardware_risks.md): "
+                    "if it is loose, tighten it and start again (it may move during the session too)"
+                )
+                if not ask("Go on with this session? [y/N] ").strip().lower().startswith("y"):
+                    return False
+        self.sweep_pending = False
+        if self.phase == "sweep":
+            self._start_placement()
+        elif self.phase == "low":
+            self._start_low()
+        return True
+
+    def measure_wrist_tip(self, window: bool = True, ask: Callable[[str], str] = input) -> int:
+        """The wrist camera's fingertips by a gripper sweep (the module docstring), into the session as wrist clicks.
+
+        Replaces the wrist clicks an earlier sweep made; the number added (0: refused, declined, stopped at the
+        preview, or no fingertip seen). Also `sweep_drift_px`: the fixed fingertip found against the model's, the
+        median over the frames (None: never found).
         """
         from .auto_tips import sweep_clicks
-        from .gripper_sweep import DEFAULT_POSITIONS, Fitter, check_pose, run_sweeps
+        from .gripper_sweep import DEFAULT_POSITIONS, Fitter, check_pose, fixed_tip, run_sweeps
 
         folder = self.out_dir / WRIST_TIP_SWEEP
         if folder.exists():
@@ -636,6 +712,12 @@ class JointCollect:
         fitter.fingers.close()
         if not done:
             return 0
+        misses = [
+            float(np.linalg.norm(tips[0] - tips[1]))
+            for frame, detected, _ in fitter.seen
+            if (tips := fixed_tip(self.model, self.arm, frame.pose, detected)) is not None
+        ]
+        self.sweep_drift_px = float(np.median(misses)) if misses else None
         found = sweep_clicks(self.model, self.arm, [frame for frame, _, _ in fitter.seen])
         if not found:
             return 0
@@ -678,17 +760,23 @@ class JointCollect:
             return
         q = self.model.joint_vector(self.look.arms, self.look.head_ticks)
         head_tip, wrist_tip = jv.fingertips(self.model, self.arm, q)
-        in_head = self.model.project(np.array([head_tip, wrist_tip]), q)[
-            0
-        ]  # both faces, in the head's picture
-        predicted = {
-            "head:pinch": in_head[0],
-            "head:wrist": in_head[1],
+        side = 0 if self.head_face == "pinch" else 1  # the face the model has the head see
+        predicted: dict[str, np.ndarray | None] = {
+            "head:fixed": self.model.project((head_tip, wrist_tip)[side][None], q)[0][0],
+            "head:moving": None,
             "wrist": jv.wrist_pixels(self.model, self.arm, q, wrist_tip[None])[0],
         }
-        expected_face = f"head:{self.head_face}"  # the face the model expects the head to see
+        opening = self.opening()
+        if opening is not None and opening >= MIN_MOVING_OPENING_DEG:
+            moving = jv.moving_fingertips(self.model, self.arm, q, opening)[side]
+            predicted["head:moving"] = self.model.project(moving[None], q)[0][0]
+        face = "pinch face" if self.head_face == "pinch" else "the wrist camera's side"
         titles = {
-            pane: PANE_TITLES[pane] + (" (expected)" if pane == expected_face else "") for pane in PANES
+            "head:fixed": f"{PANE_TITLES['head:fixed']} ({face})",
+            "head:moving": PANE_TITLES["head:moving"]
+            + (f" ({face})" if predicted["head:moving"] is not None else " (jaws closed: none)"),
+            "wrist": PANE_TITLES["wrist"]
+            + (" (the sweep's: no clicks)" if self.wrist_tip == "sweep" else ""),
         }
         # the board where the model has it: its outline (the suggested placement, then the measured one), and once
         # measured its corners, in every pane: their gap to the corners found is the model's error
@@ -711,10 +799,10 @@ class JointCollect:
         lines = [
             f"{self.arm} arm | {self.phase} | placement {min(self.placement + 1, self.n_placements)}/{self.n_placements} | "
             f"{len(self.session.sightings)} board sightings, {len(self.session.clicks)} clicks"
-            + (" | NEARLY EDGE-ON: click the head only if you can tell the face" if edge_on else ""),
+            + (" | NEARLY EDGE-ON: click the head only if you can see the tips" if edge_on else ""),
             "orange: the board where the model has it, green: the corners found"
             + (f" | {self.board_warning.upper()}" if self.board_warning else ""),
-            "n next | a fingertip in the pane of its face: magenta the pinch face, cyan the wrist camera's side | "
+            "n next | click the fixed fingertip in the magenta pane, the moving one in the yellow, on the face named | "
             "arrows head | u undo | q fit",
             self.message,
         ]
@@ -807,6 +895,10 @@ def main() -> None:
             wrist_tip=args.wrist_tip,
             openings=tuple(args.openings),
         )
+        if session.sweep_pending and not session.sweep_first():
+            client.home(max_vel=args.max_vel)
+            print(f"stopped after the sweep; saved to {args.out_dir / SESSION_FILE} (--resume sweeps again)")
+            return
         cv2.setMouseCallback(window, on_mouse)
         try:
             while True:
@@ -819,13 +911,6 @@ def main() -> None:
                     break
         finally:
             cv2.destroyAllWindows()
-        if args.wrist_tip == "sweep":
-            added = session.measure_wrist_tip()
-            print(
-                f"the wrist camera's fingertip: {added} frames of the sweep into the session"
-                if added
-                else "the wrist camera's fingertip was not measured: the fit has the head's clicks only for it"
-            )
         client.home(max_vel=args.max_vel)
     print(f"saved to {args.out_dir / SESSION_FILE}")
     path = session.finish(head_axes=args.head_axes)

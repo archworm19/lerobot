@@ -198,14 +198,8 @@ class World:
         theta = self.truth.theta if true else None
         thickness = self.truth.thickness if true else JAW_THICKNESS_M
         opening = self.model.opening_deg(ARM, pos) + (self.truth.opening_off_deg if true else 0.0)
-        point = (
-            np.zeros(3)
-            if face == MOVING_PINCH
-            else self.model.wrist_face(ARM) * (thickness / JAW_THICKNESS_M)
-        )
-        pinch = self.model.frame_pose(pinch_frame(ARM), q, theta)
-        turned = self.model.moving_jaw(ARM, opening, theta)
-        return pinch[:3, :3] @ (turned[:3, :3] @ point + turned[:3, 3]) + pinch[:3, 3]
+        on_pinch, on_wrist = jv.moving_fingertips(self.model, ARM, q, opening, theta, thickness)
+        return on_pinch if face == MOVING_PINCH else on_wrist
 
     def arm_hides(self, q: np.ndarray, points: np.ndarray) -> np.ndarray:
         """Per point: whether the true arm's links (capsules) cut the line of sight from the head camera to it."""

@@ -1151,11 +1151,14 @@ def report(model: XleRobotModel, start: XleRobotModel, numbers: Mapping[str, Any
         "| parameter | start | now | change |",
         "| --- | --- | --- | --- |",
     ]
-    change = (model.estimates - start.estimates) / np.array([p.sigma for p in model.parameters])
+    # by name: the fit may have added parameters the start lacked (the hinge, for the moving tip): from 0 there
+    before = start.estimate_dict()
+    started = np.array([before.get(p.name, 0.0) for p in model.parameters])
+    change = (model.estimates - started) / np.array([p.sigma for p in model.parameters])
     for i in np.argsort(-np.abs(change))[:12]:
         p = model.parameters[i]
         lines.append(
-            f"| {p.name} | {p.display(start.estimates[i]):+.2f} {p.unit} | {p.display(model.estimates[i]):+.2f} "
+            f"| {p.name} | {p.display(started[i]):+.2f} {p.unit} | {p.display(model.estimates[i]):+.2f} "
             f"{p.unit} | {change[i]:+.2f} sigma |"
         )
     return "\n".join(lines) + "\n"

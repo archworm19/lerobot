@@ -19,7 +19,7 @@ pytest.importorskip("scipy")
 from lerobot.felix_jr.calibration import joint_views as jv  # noqa: E402
 from lerobot.felix_jr.calibration.boards import CharucoBoard  # noqa: E402
 from lerobot.felix_jr.calibration.joint_collect import JointCollect  # noqa: E402
-from lerobot.felix_jr.calibration.joint_fit import HEAD, load_session  # noqa: E402
+from lerobot.felix_jr.calibration.joint_fit import HEAD, MOVING, MOVING_PINCH, load_session  # noqa: E402
 from lerobot.felix_jr.calibration.joint_sim import draw_truth  # noqa: E402
 from lerobot.felix_jr.calibration.xle_robot_model import HEAD_JOINTS, XleRobotModel  # noqa: E402
 from lerobot.felix_jr.server.client import FelixClient  # noqa: E402
@@ -125,18 +125,24 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup):
         assert session.phase == "place" and shown, session.message
 
         def click_truth():
-            """Click the fingertips where the true robot shows them: the wrist its own face, the head the face the
-            session expects (a person clicks the face the picture shows, in that face's pane)."""
+            """Click the fingertips where the true robot shows them: the wrist its own face, the head both tips on
+            the face the session names (the jaws open: the moving one at the true opening)."""
             state = client.get_state()
             q = true_q(state)
-            head_tip, wrist_tip = jv.fingertips(start, ARM, q, truth.theta, truth.thickness)
-            seen = head_tip if session.head_face == "pinch" else wrist_tip
-            uv_head = start.project(seen[None], q, truth.theta)[0][0]
-            uv_wrist = jv.wrist_pixels(start, ARM, q, wrist_tip[None], truth.theta)[0]
+            side = 0 if session.head_face == "pinch" else 1
+            fixed = jv.fingertips(start, ARM, q, truth.theta, truth.thickness)
+            uv_head = start.project(fixed[side][None], q, truth.theta)[0][0]
+            uv_wrist = jv.wrist_pixels(start, ARM, q, fixed[1][None], truth.theta)[0]
             if jv.in_picture(uv_head[None], HEAD_SIZE):
-                session.click(f"head:{session.head_face}", *uv_head)  # the pane of the face it shows
+                session.click("head:fixed", *uv_head)
             if jv.in_picture(uv_wrist[None], (640, 480)):
                 session.click("wrist", *uv_wrist)
+            pos = state[f"{ARM}_arm"]["gripper.pos"]
+            opening = start.opening_deg(ARM, pos) + truth.opening_off_deg
+            moving = jv.moving_fingertips(start, ARM, q, opening, truth.theta, truth.thickness)[side]
+            uv_moving = start.project(moving[None], q, truth.theta)[0][0]
+            if jv.in_picture(uv_moving[None], HEAD_SIZE):
+                session.click("head:moving", *uv_moving)
 
         # the live view while placing the board; the arrows if it is cut off, as a person would
         for _ in range(8):
@@ -168,6 +174,10 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup):
     # the jaws opened at the views in turn (the start has the arm's gripper map), the opening read with each look
     openings = {round(c.look.arms[ARM]["gripper.pos"]) for c in saved.clicks}
     assert openings <= {round(pos) for pos in jv.VIEW_OPENINGS} and len(openings) >= 2, openings
+    # the moving tip clicked by the head, on the face it sees: the wrist camera's side at the arm views (the head looks
+    # down on it), the pinch face low
+    moving = [c.on_face for c in saved.clicks if c.camera == HEAD and c.on_face in (MOVING, MOVING_PINCH)]
+    assert len(moving) >= 4 and MOVING_PINCH in moving, moving
     calibrated = XleRobotModel.load(path)
     assert (out / "calibration.md").is_file()
     # nearer the truth: the wrist camera's pose relative to the pinch frame, at a pose like the views'
@@ -189,9 +199,10 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup):
     assert {s.camera for s in saved.sightings} == {HEAD, ARM}
 
 
-def test_by_default_the_wrist_fingertip_is_not_clicked(setup):
-    """The default (`wrist_tip="sweep"`): a click in the wrist pane is declined, with a message (a gripper sweep measures
-    the wrist's fingertip after `q`); one in the head's pane is recorded as before."""
+def test_by_default_the_sweep_comes_first_and_the_wrist_fingertip_is_not_clicked(setup):
+    """The default (`wrist_tip="sweep"`): the session waits on the sweep (here declined, and the session told to go on
+    without its tips); then a click in the wrist pane is declined, with a message, and the head's two are recorded,
+    the moving tip on its own face."""
     client, start, start_path, truth, true_q, tmp_path = setup
     with client.session():
         session = JointCollect(
@@ -204,7 +215,17 @@ def test_by_default_the_wrist_fingertip_is_not_clicked(setup):
             placements=1,
             arm_views=2,
         )
-        assert session.wrist_tip == "sweep"
+        assert session.wrist_tip == "sweep" and session.phase == "sweep" and session.sweep_pending
+        session.next()
+        assert session.phase == "sweep"  # `n` does not skip it
+        asked = []
+
+        def ask(prompt):
+            asked.append(prompt)
+            return "q" if "skip" in prompt else "y"  # the sweep skipped, then go on without its tips
+
+        assert session.sweep_first(window=False, ask=ask)
+        assert len(asked) == 2 and session.phase == "place" and not session.sweep_pending
         for _ in range(8):
             session.live_at = 0.0
             session.refresh()
@@ -216,5 +237,45 @@ def test_by_default_the_wrist_fingertip_is_not_clicked(setup):
         assert session.phase == "arm" and session.look is not None, session.message
         assert session.click("wrist", 320.0, 240.0) is None and "sweep" in session.message
         assert not session.session.clicks
-        assert session.click(f"head:{session.head_face}", 320.0, 240.0) is not None
-        assert len(session.session.clicks) == 1
+        assert session.click("head:fixed", 320.0, 240.0).on_face == session.head_face
+        assert session.opening() > 5.0  # the first view's jaws: open (20)
+        moving_face = (
+            MOVING_PINCH if session.head_face == "pinch" else MOVING
+        )  # the head's face, the moving tip's
+        assert session.click("head:moving", 330.0, 240.0).on_face == moving_face
+        assert len(session.session.clicks) == 2
+
+
+def test_a_fixed_fingertip_moved_since_the_start_stops_the_session_unless_told_to_go_on(setup):
+    """The sweep's drift check (`sweep_first`): its fixed fingertip `SWEEP_DRIFT_PX` or less from the start's goes on
+    unasked; farther, the person is asked, and no stops before the board."""
+    client, start, start_path, truth, true_q, tmp_path = setup
+
+    def measured(session, drift):
+        def measure(window=True, ask=input):
+            session.sweep_drift_px = drift
+            return 12  # the sweep's clicks (none added here)
+
+        return measure
+
+    with client.session():
+        for drift, answer, goes_on in ((2.0, None, True), (9.0, "n", False), (9.0, "y", True)):
+            session = JointCollect(
+                client,
+                ARM,
+                tmp_path / f"drift_{drift}_{answer}",
+                lambda _: None,
+                start_path,
+                BOARD,
+                placements=1,
+            )
+            session.measure_wrist_tip = measured(session, drift)
+            asked: list[str] = []
+
+            def ask(prompt, asked=asked, answer=answer):
+                asked.append(prompt)
+                return answer
+
+            assert session.sweep_first(ask=ask) is goes_on
+            assert len(asked) == (answer is not None)
+            assert session.phase == ("place" if goes_on else "sweep")

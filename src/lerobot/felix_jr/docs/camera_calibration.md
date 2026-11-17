@@ -317,22 +317,25 @@ fingertip a sweep measures with the jaws open (to 0.5 px; `calibration.auto_tips
 <session copy>`, then `joint_fit` on the copy): the camera moved 1.2 mm / 0.7 deg, the board residuals and the held-out
 check unchanged, the fixed finger then on the real one (`urdfs/xle_calib_1115_grippers4.urdf`, now `api.MODEL` as `calib_20261115_grippers.urdf`, with
 both grippers' geometry from `gripper_sweep`). **`joint_collect` now does this itself** (`--wrist-tip sweep`, the
-default): the wrist pane takes no clicks, and after `q` a gripper sweep (the sim's checks, the person asked, the live
-preview) measures the wrist's fingertip into the session before the fit. `--wrist-tip click` keeps clicking by eye.
+default): the wrist pane takes no clicks, and a gripper sweep (the sim's checks, the person asked, the live preview)
+measures the wrist's fingertips into the session, since 2026-11-17 **first**, before the board, with a drift check (the
+fixed tip against the start's: the mount moved?). `--wrist-tip click` keeps clicking by eye.
 
 The board is the printed ChArUco (9 x 7 squares of 25 mm, 18 mm markers, `DICT_4X4_50`; the PDF came from
 `CharucoBoard.image`, so its layout is the detector's by construction): partial views count. Per placement (2 by
 default; the board 26 cm ahead of the arm's base, where grasps are): the arms rest and the head looks where the board
 should go (an outline), its picture live with the found corners dotted green; lay the board there, `n`: the head
 looks at it from 6 directions. Then 10 arm views (`n` each, the arm moves slowly), the head looking at the board:
-click the fixed fingertip in the head's picture where it shows (the wrist's comes from the sweep after `q`). Then 10 low
-poses, the wrist rolled to show the head the fingertip's face it clicks and the head looking at it: click it in both
-(a picture showing the board is one more sighting). `q` fits and writes `calibration.urdf` and `calibration.md`.
-Each click is on one of the fingertip's two faces (`TipClick.face`). The window has three panes: the head's picture
-twice, one per face (the pinch face, magenta; the wrist camera's side, a finger's thickness away, cyan), and the
-wrist camera's (cyan: it sees only its own side), each with that face's predicted tip circled; a click is on the face
-of the pane it is in, and the head pane the model expects to show the fingertip is marked (the 1 cm between the faces
-is ~10 px at 60 cm, about the model's error before a fit: the eye tells them apart, the model cannot). Once a
+click both fingertips in the head's picture where they show, the jaws open at `gripper.pos` 20, 35, 50 in turn (the
+wrist's tips come from the sweep). Then 10 low poses, the wrist rolled to show the head the fingertips' face it clicks
+and the head looking at them: click both (a picture showing the board is one more sighting). `q` fits and writes `calibration.urdf` and `calibration.md`.
+Each click is on one of the fingertips' two faces (`TipClick.face`). The window has three panes (since 2026-11-17):
+the head's picture twice, for the fixed fingertip (magenta) and the moving one (yellow, clicks only with the jaws
+open), and the wrist camera's (cyan), each with its tip predicted and circled. Both head clicks are on the face the
+model says the head sees (`head_face_angle`: the wrist camera's side at the arm views, which look down on it; the
+pinch face at the low poses, rolled to show it), named in the pane's title. Before, the head's two panes were the
+fixed tip's two faces and the person chose (the 1 cm between them is ~10 px at 60 cm, about the model's error before
+a fit); the low poses now keep the fingers short of edge-on, where the face is clear. Once a
 placement is measured, every pane also draws the board where the starting model has it (orange: its outline and
 corners) beside the corners found (green): the gap is that model's error, in the wrist's pane the arm chain's; a head
 sighting more than 2 cm from the placement's board raises a "was it moved?" warning (`BOARD_MOVED_M`). `--head-axes` (session and refit) also fits

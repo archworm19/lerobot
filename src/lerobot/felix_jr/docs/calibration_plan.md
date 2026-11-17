@@ -117,18 +117,31 @@ older map's into the parameters (left -16.5 / +3.0 deg, right -18.0 / +0.5 deg, 
 
 ### 4. The joint session's new flow
 
-- The sweep first (item 2.1 above), its drift check against the start's fixed-tip pixel.
+- ~~The sweep first (item 2.1 above), its drift check against the start's fixed-tip pixel.~~ **Done (2026-11-17):**
+  `JointCollect.sweep_first`, before the window opens (phase "sweep"; `n` does not skip it; a resumed session keeps
+  its sweep): `measure_wrist_tip`, then the fixed tip found against the start's (`sweep_drift_px`, the median over the
+  frames, `gripper_sweep.fixed_tip`): more than `SWEEP_DRIFT_PX` (5), or no tips found, and the person is asked
+  whether to go on. The sweep after `q` is gone.
 - ~~The jaws open at the arm views and low poses (`gripper.pos` 20 / 35 / 50 in turn).~~ **Done (2026-11-17):**
   `joint_views.VIEW_OPENINGS` (`joint_sim.OPEN` is it), `with_openings` (closed without the arm's gripper map, with a
   message; `joint_collect --openings`, none: closed); both tips kept 2 cm over the table at every opening
   (`tips_clear`, in `low_poses` and `clear_of_table`: the moving tip turns down past the fixed one; no low pose lost,
-  40 of 40 planned on either arm). Until the panes below, the head clicks the fixed tip only.
-- The head's panes: "fixed tip" and "moving tip" (`TipClick` faces `pinch` / `moving_pinch`; the face from the model:
-  `joint_views.head_face_angle`), replacing today's two face panes; the wrist pane shows the live picture only.
+  40 of 40 planned on either arm).
+- ~~The head's panes: "fixed tip" and "moving tip" (`TipClick` faces `pinch` / `moving_pinch`; the face from the model:
+  `joint_views.head_face_angle`), replacing today's two face panes; the wrist pane shows the live picture only.~~
+  **Done (2026-11-17):** `PANES` `head:fixed`, `head:moving`, `wrist`; `JointCollect.face_of` (the fixed tip
+  `pinch` / `wrist`, the moving `moving_pinch` / `moving`, by the head's face), the moving pane only with the jaws
+  `MIN_MOVING_OPENING_DEG` (5) open, its tip predicted (`joint_views.moving_fingertips`, which `joint_sim` now uses
+  too). The wrist pane shows the moment's picture and, with the sweep, takes no clicks. At the arm views the head sees
+  the wrist camera's side (it looks down on it), so their clicks are `wrist` / `moving`: the smoke test's were.
+  `joint_fit.report` compares the estimates by name (the fit adds the hinge for the moving tip: it crashed).
 - ~~The low-pose planner drops poses with the fingers edge-on to the head (`EDGE_ON_DEG`).~~ **Already so:**
   `low_poses` keeps a roll only within `HEAD_FACE_MAX_DEG` (75, where `EDGE_ON_DEG` starts); now a test says so
   (`test_joint_views`). The arm views do not (the board's views come first; their head clicks are optional).
-- Rehearsed against the fake robot (`server.server --fake`) and the smoke test (`test_joint_collect_smoke`).
+- Rehearsed against the fake robot (`server.server --fake`) and the smoke test (`test_joint_collect_smoke`). **The
+  smoke tests done (2026-11-17)**: a session clicking both tips (4+ moving-tip clicks, the fit as near the truth), the
+  sweep first (declined, gone on), the drift check's three answers. Not yet rehearsed by hand on the fake server, nor
+  run on the robot.
 
 ### 5. The gripper map without the calipers
 
@@ -156,7 +169,14 @@ Newest first. Each commit that changes the calibration adds its entry here, titl
 name its own hash, so the next one fills it in. Before the plan (2026-11-16) the work is in `camera_calibration.md`
 and git's log.
 
-- **The jaws open at the joint session's views, both tips clear of the table** (2026-11-17, hash in the next entry).
+- **The joint session's head clicks both fingertips; the sweep first, with its drift check** (2026-11-17, hash in the
+  next entry). Item 4's last two points. `joint_collect`: `PANES` `head:fixed` / `head:moving` / `wrist`, the face
+  from the model (`face_of`), the moving pane only with the jaws open; `sweep_first` before the window (the fixed
+  tip's drift from the start's, `SWEEP_DRIFT_PX`; asked to go on past it, or with no tips), the sweep after `q`
+  gone. `joint_views.moving_fingertips` (`joint_sim` uses it). `joint_fit.report` compares estimates by name (it
+  crashed when the fit added the hinge). Tests: the collection smoke tests click both tips, take the sweep first, and
+  check the drift's three answers.
+- **`c4793f371`: The jaws open at the joint session's views, both tips clear of the table** (2026-11-17).
   Item 4, its first two points. `joint_views`: `VIEW_OPENINGS`, `with_openings`, `tips_clear` (in `low_poses` and
   `clear_of_table`); `joint_collect --openings`; `joint_sim.OPEN` the same openings. Tests: `test_joint_views` (new),
   the collection smoke test with the jaws opening.

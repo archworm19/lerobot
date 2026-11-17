@@ -135,6 +135,29 @@ def fingertips(
     return pinch[:3, 3].copy(), pinch[:3, :3] @ face + pinch[:3, 3]
 
 
+def moving_fingertips(
+    model: XleRobotModel,
+    arm: str,
+    q: np.ndarray,
+    opening_deg: float,
+    theta: np.ndarray | None = None,
+    thickness: float = JAW_THICKNESS_M,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The moving fingertip on the head's face and on the wrist camera's, root frame, the jaws `opening_deg` open.
+
+    `fingertips`' two points turned about the hinge by the opening (`XleRobotModel.moving_jaw`): the faces of
+    `joint_fit.MOVING_PINCH` and `joint_fit.MOVING`.
+    """
+    pinch = model.frame_pose(pinch_frame(arm), q, theta)
+    turned = model.moving_jaw(arm, opening_deg, theta)
+    face = model.wrist_face(arm) * (thickness / JAW_THICKNESS_M)
+    on_pinch, on_wrist = (
+        pinch[:3, :3] @ (turned[:3, :3] @ point + turned[:3, 3]) + pinch[:3, 3]
+        for point in (np.zeros(3), face)
+    )
+    return on_pinch, on_wrist
+
+
 def in_picture(uv: np.ndarray, size: tuple[int, int], margin: float = 10.0) -> bool:
     """Whether every pixel is in a picture of `size` (width, height), `margin` from its edges."""
     return bool(
