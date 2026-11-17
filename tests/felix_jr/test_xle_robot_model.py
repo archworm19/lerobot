@@ -15,6 +15,7 @@ from lerobot.felix_jr.calibration.merge_urdf import (  # noqa: E402
 )
 from lerobot.felix_jr.calibration.xle_robot_model import (  # noqa: E402
     GripperMap,
+    WristCamera,
     XleRobotModel,
     default_parameters,
     pinch_frame,
@@ -248,9 +249,11 @@ def test_save_and_load_give_back_the_same_model(model, tmp_path):
 def test_the_default_parameters_cover_the_head_once_and_each_arm():
     for arm in ("left", "right"):
         params = default_parameters([arm])
-        assert len(params) == 43 and len({p.name for p in params}) == 43
+        assert len(params) == 49 and len({p.name for p in params}) == 49
         assert {p.arm for p in params} == {None, arm}
-    assert len(default_parameters()) == 14 + 2 * 29  # the head and camera once, then each arm
+    assert (
+        len(default_parameters()) == 14 + 2 * 35
+    )  # the head and camera once, then each arm (its camera too)
     assert not any(
         "top_base_link" in p.name for p in default_parameters()
     )  # the head tower: see the docstring
@@ -279,6 +282,41 @@ def test_the_head_axes_are_optional_and_kept(model, tmp_path):
     axes.save(tmp_path / "axes.urdf")
     back = XleRobotModel.load(tmp_path / "axes.urdf")
     assert back.estimate_dict() == pytest.approx(tilted)
+
+
+def test_the_fingers_mounts_turn_each_finger_about_its_tip_on_the_hinges_axis(model, tmp_path):
+    """A mount is the jaws' opening turn applied to its finger at its tip (positive as they open); new parameters, at
+    the design (0) where unset, with their priors in the covariance; saved and loaded; never fitted by the clicks."""
+    model.covariance = np.eye(len(model.parameters)) * 1e-6
+    try:
+        mounted = model.with_finger_mounts("left", moving_deg=-15.0)
+    finally:
+        model.covariance = None
+    assert mounted is not model and "rot:left_moving_finger_joint:z" not in {p.name for p in model.parameters}
+    assert mounted.finger_mount_deg("left", "moving") == pytest.approx(-15.0)
+    assert mounted.finger_mount_deg("left", "fixed") == 0.0 == model.finger_mount_deg("left", "moving")
+    np.testing.assert_allclose(np.diag(mounted.covariance)[-2:], np.radians([5.0, 20.0]) ** 2)  # their priors
+    for finger, deg in (("moving", -15.0), ("fixed", 7.0)):
+        turned = mounted.with_finger_mounts("left", **{f"{finger}_deg": deg})
+        design = model.finger_pose("left", finger)
+        np.testing.assert_allclose(turned.finger_pose("left", finger)[:3, 3], design[:3, 3], atol=1e-12)
+        np.testing.assert_allclose(
+            turned.finger_pose("left", finger)[:3, :3],
+            model.moving_jaw("left", deg)[:3, :3] @ design[:3, :3],
+            atol=1e-6,
+        )
+    mounted.save(tmp_path / "mounted.urdf")
+    assert XleRobotModel.load(tmp_path / "mounted.urdf").finger_mount_deg("left", "moving") == pytest.approx(
+        -15.0
+    )
+    from lerobot.felix_jr.calibration import boards, joint_fit
+
+    camera = WristCamera(320, 240, 200.0, 200.0, 160.0, 120.0, "rational", (0.0,) * 8)
+    problem = joint_fit.JointProblem(mounted, boards.parse_board(boards.PRINTED_BOARD), {"left": camera}, [])
+    assert problem.free[[p.name == "zero:left_wrist_roll" for p in mounted.parameters]].all()
+    assert not any(
+        free for p, free in zip(mounted.parameters, problem.free, strict=True) if p.group == "finger"
+    )
 
 
 def test_a_new_fit_takes_todays_priors_and_keeps_the_estimates(model):
@@ -336,7 +374,14 @@ def test_head_angles_and_pinch_frames():
 @pytest.mark.parametrize(("point", "opening"), [("pinch", None), ("moving_tip", 35.0)])
 def test_the_pixel_jacobian_matches_finite_differences(model, arm, point, opening):
     rng = np.random.default_rng(5)
-    theta = np.array([rng.normal(0, p.sigma) for p in model.parameters])
+    # the wrist cameras' parameters (added 2026-11-16) from a stream of their own: the others' draws as before
+    cameras = np.random.default_rng(6)
+    theta = np.array(
+        [
+            cameras.normal(0, p.sigma) if p.group == "wrist camera" else rng.normal(0, p.sigma)
+            for p in model.parameters
+        ]
+    )
     theta[[p.kind == "rot" for p in model.parameters]] *= (
         10  # large rotations: the exp map's Jacobian matters
     )
@@ -344,11 +389,13 @@ def test_the_pixel_jacobian_matches_finite_differences(model, arm, point, openin
     # the gripper joint's own angle moves neither point: the moving tip is set by the opening
     joints = ["head_pan_joint", "head_tilt_joint", *(f"{arm}_{j}" for j in ARM_JOINTS), f"{arm}_gripper"]
     which = {"point": point, "opening_deg": opening}
-    while True:
+    for _ in range(1000):  # (bounded: a draw that never shows the point fails, not hangs)
         arm_pose, ticks = random_readings(rng)
         q = model.joint_vector({arm: arm_pose}, ticks)
         if model.predict(arm, q, theta, **which).z > 0.1:
             break
+    else:
+        raise AssertionError("no pose in front of the head camera")
     d_parameters, d_joints = model.pixel_jacobian(arm, q, theta, joints, **which)
     step = 1e-6
     for i in range(len(theta)):

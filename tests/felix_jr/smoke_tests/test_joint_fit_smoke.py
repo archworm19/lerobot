@@ -33,8 +33,8 @@ def test_a_simulated_session_is_fitted():
     fit = fit_staged(JointProblem(model, world.board, {ARM: world.camera}, sightings, clicks))
     assert fit.rms_px[f"{ARM} board"] < 1.0 and fit.rms_px["head board"] < 1.0, fit.rms_px
     poses = world.grasp_poses(8)
-    before = world.score(model.estimates, world.gc0, JAW_THICKNESS_M, poses)
-    after = world.score(fit.theta, fit.gripper_from_camera[ARM], fit.thickness, poses)
+    before = world.score(model.estimates, JAW_THICKNESS_M, poses)
+    after = world.score(fit.theta, fit.thickness, poses)
     # 1.5 deg before the views were kept clear of the arm and the board (2026-11-12): they pin the camera's turn less
     assert after["wrist px"] < 2.0 and after["camera mm"] < 3.0 and after["camera deg"] < 2.0, after
     assert after["head px"] < 4.0 < before["head px"], (before, after)

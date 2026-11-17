@@ -50,8 +50,15 @@ and is untested anywhere else, so the person clicks what the head sees).
 ### 2. The lens step alone; the camera's start from its design
 
 - **Done (2026-11-16):** the camera-pose step (extrinsics, `fit_extrinsics`, `POSE_VIEWS`) is out of `wrist_camera`;
-  a new lens keeps `--start-from`'s pose on the gripper (`with_lens`). A robot with no pose yet cannot start a joint
-  session until the design pose below is in.
+  a new lens leaves the camera's pose on the gripper as it was (`with_lens`). The design pose is in (item 3): a robot
+  never calibrated starts from it.
+- **The design pose** (measured 2026-11-16, `hardware_risks.md`): TheRobotStudio's module pose as drawn (its axes,
+  the lens on its barrel's axis 15 mm out), not adjusted for our 45 mm boards: the calibration's correction says how
+  far ours are (~9 mm, within 1-3 deg), with priors that allow it (1.5 cm, 5 deg).
+- **Checked in the simulator (2026-11-16):** the joint fit started from the design's camera, the true one where ours
+  are (`calib_20261115_grippers.urdf`'s corrections, plus a quarter-prior draw: 12-14 mm and 1.5-2.8 deg off), the
+  procedure decided (the head clicking both tips, the wrist's tips from the end sweep), 3 seeds: the camera to
+  0.4-1.0 mm and 0.2-0.4 deg, converged in 25-107 steps, no fit failed.
 - The joint session then starts the camera from its **design pose**: the hex-nut mount and the UVC module's STLs
   (SO-ARM100's `SO101_Wrist_Cam_Hex-Nut_Mount_32x32_UVC_Module`, as `sim2real.robot` places them), the lens at the
   module's optical center.
@@ -67,9 +74,11 @@ calibration stores only **corrections** to it (`zero:` / `pos:` / `rot:` paramet
 top of the design every time (`XleRobotModel`, "Parameters, nominal values and estimates"). A model with no
 corrections *is* the naive robot. What does not follow that yet:
 
-- the wrist camera's pose on the gripper: stored whole (`WristCamera.gripper_from_camera`), not as a correction to a
-  design pose;
-- the fingers' mount angles (`GripperMap.finger_mount_deg`, `fixed_finger_mount_deg`) and the gripper map itself.
+- ~~the wrist camera's pose on the gripper: stored whole (`WristCamera.gripper_from_camera`), not as a correction to a
+  design pose~~ **done (2026-11-16)**, below;
+- ~~the fingers' mount angles (`GripperMap.finger_mount_deg`, `fixed_finger_mount_deg`)~~ **done (2026-11-17)**,
+  below;
+- the gripper map itself (item 5).
 
 Decided (2026-11-16): the design URDF stays **static** once the design values are in it, and the file names say
 which is which, and `urdfs/` keeps only the two that matter. **Done (2026-11-16):** `xlerobot_so101.urdf` ->
@@ -84,6 +93,27 @@ calibration stores corrections to them as parameters with priors (the mount's to
 calibration a set of corrections on it: no separate "naive URDF" to keep in step, and the corrections themselves say
 how far the robot is from its design (a report column). Old calibrations keep loading (their whole poses read as
 corrections from the design).
+
+**Done for the wrist cameras (2026-11-16):** `design_xlerobot_so101.urdf` has, per arm, a fixed
+`<arm>_wrist_camera_joint` from the gripper link to an `<arm>_wrist_camera_optical` frame at the design pose
+(`merge_urdf.design_gripper_from_camera`: TheRobotStudio's mount and module, their numbers in `merge_urdf`); the
+camera's pose is six parameters on it (`wrist_camera_parameters`, group "wrist camera", 1.5 cm and 5 deg), corrected
+like the arm's mount. `WristCamera` is the lens only; `XleRobotModel.wrist_camera_pose` / `gripper_from_camera` read
+the frame. `XleRobotModel.load` turns an older file's whole pose into these corrections (exactly: 6e-16 on
+`calib_20261115_grippers.urdf`, its cameras 3.7 / 9.1 / -2.6 mm and 2.0 deg (left), 2.9 / 10.1 / 1.8 mm and 1.0 deg
+(right) from the design). `joint_fit`'s separate camera unknowns are gone: the cameras' parameters are among the
+estimates, free also while the arm is held (`fit_staged`).
+
+**Done for the fingers (2026-11-17):** `design_xlerobot_so101.urdf` has, per arm, fixed `<arm>_fixed_finger` and
+`<arm>_moving_finger` frames under the pinch frame (joints `<arm>_<finger>_finger_joint`): each finger's tip on the
+pinch point in its STL's axes, the jaws closed (`merge_urdf.FINGER_AXES`, the placement `sim2real.robot` drew them by;
+ours, not a drawing's: no drawing puts the finger on the SO-101's jaws). The hinge's axis is each frame's z, so a
+mount is one parameter, `rot:<arm>_<finger>_finger_joint:z` (`finger_mount_parameters`, group "finger"; priors 5 deg
+for the fixed finger, 20 for the moving one, which sits 16-18 deg off). Off by default like the hinge: `gripper_sweep`
+adds and fits them (`with_finger_mounts`), and `joint_fit` never frees them (no point it sees depends on them).
+`XleRobotModel.finger_mount_deg` / `finger_pose` read them; the sim draws the fingers by `finger_pose`, where it drew
+them before (within 1 um on `calib_20261115_grippers.urdf`). `GripperMap` lost its two mount fields: `load` turns an
+older map's into the parameters (left -16.5 / +3.0 deg, right -18.0 / +0.5 deg, moving / fixed).
 
 ### 4. The joint session's new flow
 
@@ -120,8 +150,18 @@ Newest first. Each commit that changes the calibration adds its entry here, titl
 name its own hash, so the next one fills it in. Before the plan (2026-11-16) the work is in `camera_calibration.md`
 and git's log.
 
-- **The URDFs named for what they are; only the design and the current calibration kept** (2026-11-16, hash in the
-  next entry). Item 3's naming: `xlerobot_so101.urdf` -> `design_xlerobot_so101.urdf` (`merge_urdf.MERGED_URDF`),
+- **The wrist cameras and the fingers as corrections to design frames** (2026-11-17, hash in the next entry). Items 2
+  and 3. `merge_urdf`: per arm, the wrist camera's design frame (`<arm>_wrist_camera_optical`, TheRobotStudio's mount
+  and module) and the fingers' (`<arm>_fixed_finger`, `<arm>_moving_finger`) in `design_xlerobot_so101.urdf`.
+  `XleRobotModel`: the camera's pose six parameters on its frame (`wrist_camera_parameters`, in the defaults: 35 per
+  arm), each finger's mount one (`finger_mount_parameters`, opt-in); `WristCamera` the lens only, `GripperMap` without
+  the mounts; `load` turns older files' whole camera poses and map mounts into these corrections (exactly), and pads
+  the covariance with the priors. `joint_fit`: the separate camera unknowns gone (the camera's parameters free also
+  with the arm held), the fingers' never freed. `joint_sim`, `joint_views`, `check`, `wrist_camera`, the harness,
+  `sim2real.robot` and `gripper_sweep` read the frames. Checked in the simulator: from the design's camera, the truth
+  12-14 mm and 1.5-2.8 deg off, to 0.4-1.0 mm and 0.2-0.4 deg (3 seeds). Tests: the camera and finger parameters,
+  the migrations; the pixel-Jacobian test's search bounded (it hung when the parameters shifted its draws).
+- **`3f651cc00`: The URDFs named for what they are; only the design and the current calibration kept** (2026-11-16). Item 3's naming: `xlerobot_so101.urdf` -> `design_xlerobot_so101.urdf` (`merge_urdf.MERGED_URDF`),
   `xle_calib_1115_grippers4.urdf` -> `calib_20261115_grippers.urdf` (`api.MODEL`); the two older calibrations tests
   start from moved to `tests/felix_jr/reference/`, `xle_calib_1008` and `xle_calib_1008_wrist` removed. The wrist
   camera's measured board (45 mm, its lens roughly centered, not the 32 mm module the design's mount holds) recorded

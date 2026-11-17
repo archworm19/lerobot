@@ -1,7 +1,7 @@
 """Planning a joint calibration's views (`joint_collect` on the robot, `joint_sim` in simulation).
 
 `docs/camera_calibration.md`, "The rework". Everything is planned on a model: the calibration's start for a session,
-the true robot in a simulation (`theta`, `gripper_from_camera`). Per board placement:
+the true robot in a simulation (`theta`, the wrist camera's pose among its parameters). Per board placement:
 
 - `suggest_placements`: where to put the board: on the table ahead of the arm, toward the robot's middle, where the
   head sees it whole with the arms folded.
@@ -19,12 +19,11 @@ import cv2
 import numpy as np
 
 from lerobot.felix_jr.calibration.boards import Board
-from lerobot.felix_jr.calibration.merge_urdf import SO101_JOINTS
+from lerobot.felix_jr.calibration.merge_urdf import SO101_JOINTS, wrist_camera_frame
 from lerobot.felix_jr.calibration.xle_robot_model import (
     JAW_THICKNESS_M,
     XleRobotModel,
     pinch_frame,
-    wrist_camera_link,
 )
 from lerobot.utils.import_utils import _scipy_available, require_package
 
@@ -100,11 +99,9 @@ def wrist_pose(
     arm: str,
     q: np.ndarray,
     theta: np.ndarray | None = None,
-    gc: np.ndarray | None = None,
 ) -> np.ndarray:
-    """root_from_camera of `arm`'s wrist camera at `q` (the model's estimates and camera pose unless given)."""
-    gc = np.asarray(model.wrist_cameras[arm].gripper_from_camera if gc is None else gc, dtype=np.float64)
-    return model.frame_pose(wrist_camera_link(arm), q, theta) @ gc
+    """root_from_camera of `arm`'s wrist camera at `q` (the model's estimates unless given: its pose among them)."""
+    return model.frame_pose(wrist_camera_frame(arm), q, theta)
 
 
 def wrist_pixels(
@@ -113,10 +110,9 @@ def wrist_pixels(
     q: np.ndarray,
     points: np.ndarray,
     theta: np.ndarray | None = None,
-    gc: np.ndarray | None = None,
 ) -> np.ndarray:
     """Root-frame points in the wrist camera's picture at `q`."""
-    pose = wrist_pose(model, arm, q, theta, gc)
+    pose = wrist_pose(model, arm, q, theta)
     return model.wrist_cameras[arm].project((np.atleast_2d(points) - pose[:3, 3]) @ pose[:3, :3])
 
 
@@ -150,7 +146,6 @@ def wrist_sees(
     q: np.ndarray,
     points: np.ndarray,
     theta: np.ndarray | None = None,
-    gc: np.ndarray | None = None,
     margin: float = 10.0,
     min_fraction: float = 1.0,
 ) -> np.ndarray | None:
@@ -159,7 +154,7 @@ def wrist_sees(
     `margin`: how far inside the picture (and beyond the fingers' box) a point must be.
     """
     camera = model.wrist_cameras[arm]
-    uv = wrist_pixels(model, arm, q, points, theta, gc)
+    uv = wrist_pixels(model, arm, q, points, theta)
     seen = (
         np.isfinite(uv).all(axis=1)
         & (uv[:, 0] > margin)
@@ -167,7 +162,7 @@ def wrist_sees(
         & (uv[:, 1] > margin)
         & (uv[:, 1] < camera.height - margin)
     )
-    tips = wrist_pixels(model, arm, q, np.array(fingertips(model, arm, q, theta)), theta, gc)
+    tips = wrist_pixels(model, arm, q, np.array(fingertips(model, arm, q, theta)), theta)
     if np.isfinite(tips).all():
         extra = (
             margin - 10.0
@@ -223,7 +218,6 @@ def look_at(
     yaw_deg: float,
     pixel: Sequence[float] = AIM_PX,
     theta: np.ndarray | None = None,
-    gc: np.ndarray | None = None,
     start_deg: Sequence[float] = (0.0, 0.0, 30.0, 60.0, 0.0),
     limits_deg: Mapping[str, tuple[float | None, float | None]] | None = None,
 ) -> dict[str, float]:
@@ -237,7 +231,7 @@ def look_at(
     camera = model.wrist_cameras[arm]
 
     def residual(q: np.ndarray) -> np.ndarray:
-        pose = wrist_pose(model, arm, q, theta, gc)
+        pose = wrist_pose(model, arm, q, theta)
         uv = camera.project(((target - pose[:3, 3]) @ pose[:3, :3])[None])[0]
         return np.r_[(pose[:3, 3] - eye) / 0.01, np.nan_to_num((uv - np.asarray(pixel)) / 20.0, nan=50.0)]
 

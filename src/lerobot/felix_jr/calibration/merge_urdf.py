@@ -16,6 +16,15 @@ are LeRobot's calibrated degrees one to one (the teleop relies on this), so no s
   matches the SO-101's shoulder, elbow and wrist pivots with those of the arm inside `xlerobot.urdf`, over random
   poses (the alignment the first calibrations were made with, kept so they still apply).
 - A fixed `head_camera_optical` frame under `head_camera_link`: x right, y down, z forward.
+- Per arm, a fixed `<arm>_wrist_camera_optical` frame under `<arm>_gripper_link` (joint `<arm>_wrist_camera_joint`):
+  the wrist camera's optical frame (x right, y down, z forward) where its mount's drawing puts it (`WRIST_CAMERA_*`).
+  A calibration corrects it like any fixed joint (`pos:` / `rot:` parameters); our cameras are ~1 cm off it (a 45 mm
+  board in a mount drawn for a 32 mm module: `docs/hardware_risks.md`).
+- Per arm, the XLeRobot's fingers: fixed `<arm>_fixed_finger` and `<arm>_moving_finger` frames under the pinch frame
+  `<arm>_gripper_frame_link` (joints `<arm>_<finger>_finger_joint`), each at its finger's tip with its STL's axes
+  (`FINGER_AXES`), the jaws closed: the tips meet on the pinch point. The moving one turns with the jaws about the
+  hinge (`XleRobotModel.moving_jaw`; the URDF's gripper joint is not the opening). A calibration corrects each by one
+  turn about its z, the hinge's axis (`XleRobotModel.finger_mount_parameters`): how the finger sits on its jaw.
 - No visuals, collisions, transmissions or materials: we do not have the meshes, and only the tree is needed.
 
 The output is committed; a test checks it is what this script builds. Rebuild it with
@@ -46,6 +55,31 @@ CAMERA_LINK, OPTICAL_FRAME = "head_camera_link", "head_camera_optical"
 # Optical frame axes in the camera link's frame: x right (-y), y down (-z), z forward (+x).
 LINK_TO_OPTICAL = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
 DROPPED_LINKS = ("head_camera_rgb_frame", "head_camera_depth_frame")
+# The wrist camera's design pose, from TheRobotStudio's SO-101 MuJoCo model (`so101_new_calib_camera.xml` at the commit
+# `sim2real.assets` pins, Apache 2.0): the hex-nut mount for a 32 x 32 mm UVC module in the gripper's body, and the
+# module in the mount, as (position m, quaternion w x y z). The module's axes are a camera's optical axes (x right,
+# y down, z out through the lens: our calibrated cameras are within 1-3 deg of them). Its lens barrel is on its z axis,
+# 4 to 26 mm out (its mesh); a pinhole's center is inside the lens, somewhere along it: the middle,
+# `WRIST_CAMERA_LENS_Z` (the calibrated ones: 9 and 13.5 mm, the direction the fit pins down worst).
+WRIST_CAMERA_MOUNT = (
+    (-0.0150, 0.0240, -0.0315),
+    (0.4997981226682881, -0.5001999599912927, 0.4998017973423795, -0.5001999599912927),
+)
+WRIST_CAMERA_MODULE = (
+    (-0.04941, -0.03813, 0.0175),
+    (0.37978693649389456, -0.5964584309361936, -0.37978833153177, -0.596456240026065),
+)
+WRIST_CAMERA_LENS_Z = 0.015
+# The XLeRobot finger's STL axes (`sim2real/meshes`: x from the tip to the base, y out of its straight face, z its depth
+# from its flat side) in the pinch frame, the jaws closed: the fixed finger's x to -z (back along the gripper), y to -x
+# (toward the moving jaw), z to +y (across the hinge); the moving one turned half a turn about the gripper's axis. The
+# hinge's axis is each frame's z (-z for the fixed finger, +z for the moving one, as the jaws open). Ours, not a
+# drawing's (none places the finger on the SO-101's jaws): the moving finger sits ~17 deg off it on our jaws.
+FINGERS = ("fixed", "moving")
+FINGER_AXES = {
+    "fixed": np.array([[0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0]]),
+    "moving": np.array([[0.0, 1.0, 0.0], [0.0, 0.0, -1.0], [-1.0, 0.0, 0.0]]),
+}
 
 # How the SO-101's joints relate to the arm joints inside xlerobot.urdf: q_xle = sign * q_so101 + offset. Signs and
 # the lift / elbow / wrist-flex offsets were found by matching the pivots' positions over random poses (the residual
@@ -63,6 +97,45 @@ ALIGN_OFFSETS = {
     "left": (np.pi / 2, np.pi / 2, np.pi / 2, 0.0),
     "right": (-np.pi / 2, np.pi / 2, np.pi / 2, 0.0),
 }
+
+
+def wrist_camera_frame(arm: str) -> str:
+    """The link that is `arm`'s wrist camera's optical frame (x right, y down, z forward)."""
+    return f"{arm}_wrist_camera_optical"
+
+
+def wrist_camera_joint(arm: str) -> str:
+    """The fixed joint placing `arm`'s wrist camera on its gripper: its `pos:` / `rot:` parameters are the camera's pose."""
+    return f"{arm}_wrist_camera_joint"
+
+
+def finger_frame(arm: str, finger: str) -> str:
+    """The link at `arm`'s `finger`'s tip (`FINGERS`), in its STL's axes, the jaws closed."""
+    return f"{arm}_{finger}_finger"
+
+
+def finger_joint(arm: str, finger: str) -> str:
+    """The fixed joint placing `arm`'s `finger` on the pinch frame: its `rot:...:z` parameter is the finger's mount."""
+    return f"{arm}_{finger}_finger_joint"
+
+
+def design_gripper_from_camera() -> np.ndarray:
+    """The wrist camera's design pose in `<arm>_gripper_link` (4x4; the module docstring, `WRIST_CAMERA_*`)."""
+
+    def pose(position: tuple[float, ...], quaternion: tuple[float, ...]) -> np.ndarray:
+        w, x, y, z = np.asarray(quaternion) / np.linalg.norm(quaternion)
+        out = np.eye(4)
+        out[:3, :3] = [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+        ]
+        out[:3, 3] = position
+        return out
+
+    lens = np.eye(4)
+    lens[2, 3] = WRIST_CAMERA_LENS_Z
+    return pose(*WRIST_CAMERA_MOUNT) @ pose(*WRIST_CAMERA_MODULE) @ lens
 
 
 def build_merged_urdf() -> str:
@@ -95,6 +168,24 @@ def build_merged_urdf() -> str:
                 child_element(copy, end).set("link", prefix + link_of(joint, end))
             xle.append(copy)
         _add_fixed_joint(xle, f"{arm}_arm_mount", ARM_BASES[arm], f"{prefix}base_link", mounts[arm])
+        xle.append(ET.Element("link", {"name": wrist_camera_frame(arm)}))
+        camera = design_gripper_from_camera()
+        _add_fixed_joint(
+            xle,
+            wrist_camera_joint(arm),
+            f"{prefix}gripper_link",
+            wrist_camera_frame(arm),
+            pin.SE3(camera[:3, :3], camera[:3, 3]),
+        )
+        for finger in FINGERS:
+            xle.append(ET.Element("link", {"name": finger_frame(arm, finger)}))
+            _add_fixed_joint(
+                xle,
+                finger_joint(arm, finger),
+                f"{prefix}gripper_frame_link",
+                finger_frame(arm, finger),
+                pin.SE3(FINGER_AXES[finger], np.zeros(3)),
+            )
 
     xle.append(ET.Element("link", {"name": OPTICAL_FRAME}))
     _add_fixed_joint(

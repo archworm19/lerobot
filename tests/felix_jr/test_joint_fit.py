@@ -45,7 +45,6 @@ def test_every_residual_is_zero_at_the_truth(session):
     truth = world.truth
     x = problem.start()  # the joints' errors at zero: the readings are exact here
     x[problem.slices["theta"]] = truth.theta[problem.free]
-    x[problem.slices["gc"]] = _vec(truth.gripper_from_camera)
     x[problem.slices["boards"]] = np.concatenate([_vec(world.boards[p]) for p in problem.placements])
     x[problem.slices["thickness"]] = truth.thickness
     parts = problem.residual_parts(x)
@@ -145,17 +144,8 @@ def test_the_two_chains_agree_on_the_board_at_the_truth_only(session):
 
     world, problem = session  # no noise: at the truth the head and the arm put the board in the same place
     cameras = {ARM: world.camera}
-    true = agreement(
-        problem.model,
-        world.board,
-        cameras,
-        problem.sightings,
-        world.truth.theta,
-        {ARM: world.truth.gripper_from_camera},
-    )
-    start = agreement(
-        problem.model, world.board, cameras, problem.sightings, problem.model.estimates, {ARM: world.gc0}
-    )
+    true = agreement(problem.model, world.board, cameras, problem.sightings, world.truth.theta)
+    start = agreement(problem.model, world.board, cameras, problem.sightings, problem.model.estimates)
     assert len(true) == len(start) > 0
     assert true.max(axis=0)[0] < 0.1 and true.max(axis=0)[1] < 0.05, true
     assert np.median(start[:, 0]) > 2.0, start
@@ -169,8 +159,8 @@ def test_a_moment_with_too_few_board_points_is_left_out_of_the_agreement(session
     from lerobot.felix_jr.calibration.joint_fit import MIN_POSE_POINTS, agreement
 
     world, problem = session
-    cameras, gcs = {ARM: world.camera}, {ARM: world.truth.gripper_from_camera}
-    full = agreement(problem.model, world.board, cameras, problem.sightings, world.truth.theta, gcs)
+    cameras = {ARM: world.camera}
+    full = agreement(problem.model, world.board, cameras, problem.sightings, world.truth.theta)
     one = next(id(s.look) for s in problem.sightings if s.camera == HEAD)
     few = [
         replace(s, detection=replace(s.detection, ids=s.detection.ids[:6], pixels=s.detection.pixels[:6]))
@@ -179,7 +169,7 @@ def test_a_moment_with_too_few_board_points_is_left_out_of_the_agreement(session
         for s in problem.sightings
     ]
     assert MIN_POSE_POINTS > 6
-    assert len(agreement(problem.model, world.board, cameras, few, world.truth.theta, gcs)) == len(full) - 1
+    assert len(agreement(problem.model, world.board, cameras, few, world.truth.theta)) == len(full) - 1
 
 
 def test_two_sessions_placements_are_two_boards(session, tmp_path):
@@ -263,7 +253,8 @@ def test_the_moving_fingertip_from_the_wrist_alone_leaves_the_hinge_to_a_few_mm(
     priors cost least. A second view (the head's clicks on the moving tip) is the TODO
     (`docs/camera_calibration.md`, "Not done yet")."""
     from lerobot.felix_jr.calibration.joint_fit import JAW_THICKNESS_M, MOVING, Look, TipClick, fit_staged
-    from lerobot.felix_jr.calibration.xle_robot_model import pinch_frame, wrist_camera_link
+    from lerobot.felix_jr.calibration.merge_urdf import wrist_camera_frame
+    from lerobot.felix_jr.calibration.xle_robot_model import pinch_frame
 
     world, problem = session
     model = world.model.with_gripper_hinge(ARM)
@@ -281,7 +272,7 @@ def test_the_moving_fingertip_from_the_wrist_alone_leaves_the_hinge_to_a_few_mm(
             turned = model.moving_jaw(ARM, model.opening_deg(ARM, pos) + 0.8, truth)
             face = model.wrist_face(ARM) * (world.truth.thickness / JAW_THICKNESS_M)
             point = pinch @ turned @ np.r_[face, 1.0]
-            camera = model.frame_pose(wrist_camera_link(ARM), q, truth) @ world.truth.gripper_from_camera
+            camera = model.frame_pose(wrist_camera_frame(ARM), q, truth)
             pixel = world.camera.project(((point[:3] - camera[:3, 3]) @ camera[:3, :3])[None])[0]
             moving.append(TipClick(ARM, ARM, seen, pixel, "", MOVING))
     with_moving = JointProblem(
@@ -300,7 +291,7 @@ def test_the_wrist_camera_is_found_from_its_own_sightings(session):
     on it (`fit_staged`'s retry, for a camera far off)."""
     world, problem = session
     gc = problem.wrist_cameras_from_sightings(world.truth.theta, world.boards)[ARM]
-    true = world.truth.gripper_from_camera
+    true = world.model.gripper_from_camera(ARM, world.truth.theta)
     assert np.linalg.norm(gc[:3, 3] - true[:3, 3]) < 1e-3
     assert np.degrees(np.linalg.norm(cv2.Rodrigues(gc[:3, :3] @ true[:3, :3].T)[0])) < 0.2
 
@@ -328,8 +319,8 @@ def test_the_hinge_along_its_own_axis_is_not_fitted_and_the_fit_says_what_it_lea
     free = {n for n, f in zip(names, hinge.free, strict=True) if f}
     assert f"pos:{ARM}_gripper:y" not in free and {f"pos:{ARM}_gripper:x", f"pos:{ARM}_gripper:z"} <= free
     x = hinge.start()
-    theta, gcs, boards, thickness = hinge.unpack(x)
-    u = uncertainty(hinge, JointFit(theta, gcs, boards, thickness, x=x))
+    theta, boards, thickness = hinge.unpack(x)
+    u = uncertainty(hinge, JointFit(theta, {}, boards, thickness, x=x))
     assert f"pos:{ARM}_gripper:x" in u["sd"] and f"pos:{ARM}_gripper:y" not in u["sd"]
     for name, v in u["sd"].items():
         if v["prior"] is not None:

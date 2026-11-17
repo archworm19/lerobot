@@ -435,9 +435,8 @@ def _shifted(claw: ClawTarget, offset_root: np.ndarray) -> ClawTarget:
 
 
 def wrist_camera_position(model: XleRobotModel, arm: str, solution: FrameSolution) -> np.ndarray | None:
-    """The wrist camera's optics (root frame, m) at a solve's joints; None without its pose on the gripper."""
-    camera = model.wrist_cameras.get(arm)
-    if camera is None or camera.gripper_from_camera is None:
+    """The wrist camera's optics (root frame, m) at a solve's joints; None without a calibrated wrist camera."""
+    if arm not in model.wrist_cameras:
         return None
     return model.wrist_camera_pose(arm, model.joint_vector({arm: dict(solution.joints)}))[:3, 3]
 

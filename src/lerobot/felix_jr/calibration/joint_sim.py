@@ -111,10 +111,9 @@ class Scenario:
 
 @dataclass
 class Truth:
-    """The true robot: its estimates, its wrist camera's pose on the gripper, its fingers' thickness."""
+    """The true robot: its estimates (its wrist camera's pose on the gripper among them), its fingers' thickness."""
 
     theta: np.ndarray
-    gripper_from_camera: np.ndarray
     thickness: float
     opening_off_deg: float = 0.0  # the real opening less the gripper map's
 
@@ -131,16 +130,19 @@ def draw_truth(model: XleRobotModel, rng: np.random.Generator, scale: float = 1.
     """
     theta = model.estimates.copy()
     for i, p in enumerate(model.parameters):
-        if p.arm in (None, ARM):
+        if p.arm in (None, ARM) and p.group != "wrist camera":  # (the camera's: below)
             hinge = p.name.startswith(f"pos:{ARM}_gripper:")
             theta[i] += rng.normal(0.0, HINGE_OFF_M if hinge else scale * p.sigma)  # (the hinge: unscaled)
-    gc = np.array(model.wrist_cameras[ARM].gripper_from_camera, dtype=np.float64)
+    # the wrist camera turned and moved on its gripper (`CAMERA_*`; drawn after the rest, as before it was a parameter)
+    gc = model.gripper_from_camera(ARM)
     true_gc = gc.copy()
     true_gc[:3, :3] = gc[:3, :3] @ _turn(scale * CAMERA_TURN_DEG, rng)
     true_gc[:3, 3] += rng.normal(0.0, scale * CAMERA_SHIFT_M, 3)
+    index = {p.name: i for i, p in enumerate(model.parameters)}
+    for name, value in model.camera_corrections(ARM, true_gc).items():
+        theta[index[name]] = value
     return Truth(
         theta,
-        true_gc,
         JAW_THICKNESS_M + rng.normal(0.0, scale * THICKNESS_OFF_M),
         # its own stream (spawned: `rng`'s draws, and the sessions drawn after, stay as they were before it)
         float(np.random.default_rng(rng.bit_generator.seed_seq.spawn(1)[0]).normal(0.0, OPENING_OFF_DEG)),
@@ -159,7 +161,6 @@ class World:
             CLICK_NOISE_PX,
         )
         self.camera = model.wrist_cameras[ARM]
-        self.gc0 = np.array(self.camera.gripper_from_camera, dtype=np.float64)
         base = model.frame_pose(f"{ARM}_base_link", model.joint_vector())
         self.base = base[:3, 3]
         self.table_z = self.base[2] - TABLE_BELOW_BASE_M
@@ -170,9 +171,9 @@ class World:
 
     # ---- the cameras, true or modeled ------------------------------------------------------------------------
 
-    def truth_or_model(self, true: bool) -> tuple[np.ndarray | None, np.ndarray]:
-        """(theta, gripper_from_camera) of the truth, or of the model."""
-        return (self.truth.theta, self.truth.gripper_from_camera) if true else (None, self.gc0)
+    def truth_or_model(self, true: bool) -> tuple[np.ndarray | None]:
+        """(theta,) of the truth, or of the model (None: its estimates)."""
+        return (self.truth.theta,) if true else (None,)
 
     def wrist_pose(self, q: np.ndarray, true: bool) -> np.ndarray:
         """root_from_camera of the wrist camera at `q`: the truth's, or the model's."""
@@ -430,11 +431,9 @@ class World:
         """Poses low over the table, as a grasp's (`joint_views.low_poses`): the low views, and the held-out ones."""
         return jv.low_poses(self.model, ARM, REST, n, self.table_z, self.rng)
 
-    def score(
-        self, theta: np.ndarray, gc: np.ndarray, thickness: float, poses: list[dict[str, float]]
-    ) -> dict[str, float]:
-        """The held-out errors of a fitted (theta, gc, thickness) against the truth (the module docstring)."""
-        fitted = World(self.model, Truth(theta, gc, thickness), self.board, self.rng)
+    def score(self, theta: np.ndarray, thickness: float, poses: list[dict[str, float]]) -> dict[str, float]:
+        """The held-out errors of a fitted (theta, thickness) against the truth (the module docstring)."""
+        fitted = World(self.model, Truth(theta, thickness), self.board, self.rng)
         head, wrist, cam_mm, cam_deg, move = [], [], [], [], []
         for arm in poses:
             q_plan = self.model.joint_vector({ARM: arm}, self.home_ticks)
@@ -553,8 +552,8 @@ def run(
             print("  weak", round(w["sd"], 2), [(n, round(v, 2)) for n, v in w["parts"]])
     world.rng = np.random.default_rng(10_000 + seed)  # held-out poses apart from the session's
     poses = world.grasp_poses(held_out)
-    before = world.score(model.estimates, world.gc0, JAW_THICKNESS_M, poses)
-    after = world.score(fit.theta, fit.gripper_from_camera[ARM], fit.thickness, poses)
+    before = world.score(model.estimates, JAW_THICKNESS_M, poses)
+    after = world.score(fit.theta, fit.thickness, poses)
     counts = {
         "wrist views": sum(s.camera == ARM for s in sightings),
         "head views": sum(s.camera == HEAD for s in sightings),

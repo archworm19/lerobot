@@ -235,6 +235,24 @@
     <child link="left_base_link" />
     <origin xyz="0.0393694915315771 -0.0547773692111682 0.00288346070380407" rpy="-0.0047543404706647 0.00589619346181669 -3.08558814928951" />
   </joint>
+  <link name="left_wrist_camera_optical" />
+  <joint name="left_wrist_camera_joint" type="fixed">
+    <parent link="left_gripper_link" />
+    <child link="left_wrist_camera_optical" />
+    <origin xyz="0.00250019329229591 0.0670838713996361 -0.00699615079856229" rpy="2.70398898037638 7.00028201316982e-06 -5.23273839458938e-06" />
+  </joint>
+  <link name="left_fixed_finger" />
+  <joint name="left_fixed_finger_joint" type="fixed">
+    <parent link="left_gripper_frame_link" />
+    <child link="left_fixed_finger" />
+    <origin xyz="0 0 0" rpy="-1.5707963267949 1.5707963267949 0" />
+  </joint>
+  <link name="left_moving_finger" />
+  <joint name="left_moving_finger_joint" type="fixed">
+    <parent link="left_gripper_frame_link" />
+    <child link="left_moving_finger" />
+    <origin xyz="0 0 0" rpy="1.5707963267949 1.5707963267949 0" />
+  </joint>
   <link name="right_base_link">
     <inertial>
       <origin xyz="0.0137179 -5.19711e-05 0.0334843" rpy="0 0 0" />
@@ -343,6 +361,24 @@
     <parent link="Base_2" />
     <child link="right_base_link" />
     <origin xyz="-0.039369491531577 -0.0356225307564069 0.00288353106345438" rpy="-0.00474700545098735 0.00589578224463866 0.0560045475472164" />
+  </joint>
+  <link name="right_wrist_camera_optical" />
+  <joint name="right_wrist_camera_joint" type="fixed">
+    <parent link="right_gripper_link" />
+    <child link="right_wrist_camera_optical" />
+    <origin xyz="0.00250019329229591 0.0670838713996361 -0.00699615079856229" rpy="2.70398898037638 7.00028201316982e-06 -5.23273839458938e-06" />
+  </joint>
+  <link name="right_fixed_finger" />
+  <joint name="right_fixed_finger_joint" type="fixed">
+    <parent link="right_gripper_frame_link" />
+    <child link="right_fixed_finger" />
+    <origin xyz="0 0 0" rpy="-1.5707963267949 1.5707963267949 0" />
+  </joint>
+  <link name="right_moving_finger" />
+  <joint name="right_moving_finger_joint" type="fixed">
+    <parent link="right_gripper_frame_link" />
+    <child link="right_moving_finger" />
+    <origin xyz="0 0 0" rpy="1.5707963267949 1.5707963267949 0" />
   </joint>
   <link name="head_camera_optical" />
   <joint name="head_camera_optical_joint" type="fixed">

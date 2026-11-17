@@ -131,7 +131,8 @@ servo's (its calibrated range); only `pos_closed`, where the tips meet, was fitt
   fingers.
 - **The geometry** (`fit_geometry`): the hinge's position (a calibrated parameter, `pos:<arm>_gripper:*`) and the
   opening's offset from the moving tip's circle, then the moving finger's mount on its jaw
-  (`GripperMap.finger_mount_deg`) from its outline; `--out` writes them into a new calibrated URDF.
+  (`XleRobotModel.finger_mount_deg`, a parameter on the design's finger frame since 2026-11-17) from its outline;
+  `--out` writes them into a new calibrated URDF.
 - **On ruler2's frames** (offline): the left at `gripper.pos` 43.7, the map's 55.1 deg, fitted 54.2 (-0.9; the model's
   tip 5 px from the real one, the fixed finger's agreement 0.73); the right closed, no fit (and the blinds in view).
 - **The left arm's sweep on the robot** (2026-11-15, `gripper.pos` 0-50): the map's opening right to 0.1 deg
@@ -145,7 +146,7 @@ servo's (its calibrated range); only `pos_closed`, where the tips meet, was fitt
   -16.5 deg both times, the hinge 3.9 and 2.1 mm (the same way; it repeats to ~2 mm: average a few sweeps), the
   opening within 0.4 deg. **Both arms** (`--arm both`, 2026-11-15): the moving fingers -15.5 (left) and -17.0 deg
   (right), the hinges 1.2 and 4.6 mm, the openings -0.2 and -1.0 deg; and **the fixed fingers turned too**, +4.0
-  and +2.0 deg about their tips (`GripperMap.fixed_finger_mount_deg`; their outlines' agreement 0.74 -> 0.93, 0.79
+  and +2.0 deg about their tips (then `GripperMap.fixed_finger_mount_deg`, now a parameter; their outlines' agreement 0.74 -> 0.93, 0.79
   -> 0.88). Only the turn about the hinge's axis is fitted: the wrist camera sees the fingers' outlines in that plane;
   their offset along the hinge's axis and their tilt out of it are the SO-101's design (the head's views could find
   them). **The left camera moved on its mount** between the three left sweeps (the fixed finger's tip 6 px over an

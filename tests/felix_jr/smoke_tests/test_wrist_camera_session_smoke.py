@@ -15,7 +15,6 @@ from test_wrist_camera import (  # noqa: E402
     GRIPPER_FROM_CAMERA,
     TRUE_CAMERA,
     URDF,
-    _with_pose,
     held,
     render_board,
 )
@@ -64,7 +63,9 @@ def robot(tmp_path):
 
 def test_a_session_calibrates_the_lens_by_keys_and_keeps_the_cameras_pose(robot, model, tmp_path):
     fake, client, holding = robot
-    start = model.with_wrist_camera("right", _with_pose(TRUE_CAMERA))  # a pose on the gripper already (joint)
+    start = model.with_wrist_camera(
+        "right", TRUE_CAMERA, GRIPPER_FROM_CAMERA
+    )  # a pose on the gripper (a joint fit's)
     start.arm_calibration["right"] = arm_record(client.arm_calibration()["right_arm"])
     out = tmp_path / "out"
     out.mkdir()
@@ -107,9 +108,11 @@ def test_a_session_calibrates_the_lens_by_keys_and_keeps_the_cameras_pose(robot,
     path = write(start, [session.record], out)
     written = XleRobotModel.load(path).wrist_cameras["right"]
     assert written.fx == pytest.approx(400.0, rel=0.02)
-    np.testing.assert_allclose(np.array(written.gripper_from_camera), GRIPPER_FROM_CAMERA)  # the pose kept
+    np.testing.assert_allclose(
+        XleRobotModel.load(path).gripper_from_camera("right"), GRIPPER_FROM_CAMERA, atol=1e-12
+    )
     report = (out / "wrist_cameras.md").read_text()
-    assert "kept from the start" in report and "corners each" in report
+    assert "corrections to its design (kept)" in report and "corners each" in report
     assert (out / "right_views.json").is_file() and any((out / "images").iterdir())
     assert shown and shown[-1].shape == (480, 640, 3)
     # --resume keeps the saved views

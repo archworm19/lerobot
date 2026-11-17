@@ -152,7 +152,7 @@ class CheckSession(LiveView):
         )
         self.openings, self.gripper_step, self.out_dir = [float(o) for o in openings], gripper_step, out_dir
         camera = model.wrist_cameras.get(arm)
-        self.wrist = camera if camera is not None and camera.gripper_from_camera is not None else None
+        self.wrist = camera
         if self.wrist is None:
             self.notes.append(f"no calibrated {arm} wrist camera in the calibration: the head camera only")
         elif arm not in client.hello().get("wrist_cameras", []):

@@ -85,7 +85,7 @@ def setup(tmp_path):
         return render_board(HEAD_SIZE, head_matrix, np.linalg.inv(camera) @ root_board)
 
     def wrist(arm, state):
-        camera = jv.wrist_pose(start, ARM, true_q(state), truth.theta, truth.gripper_from_camera)
+        camera = jv.wrist_pose(start, ARM, true_q(state), truth.theta)
         lens = start.wrist_cameras[ARM]
         return render_board((lens.width, lens.height), lens.matrix(), np.linalg.inv(camera) @ root_board)
 
@@ -132,9 +132,7 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup):
             head_tip, wrist_tip = jv.fingertips(start, ARM, q, truth.theta, truth.thickness)
             seen = head_tip if session.head_face == "pinch" else wrist_tip
             uv_head = start.project(seen[None], q, truth.theta)[0][0]
-            uv_wrist = jv.wrist_pixels(
-                start, ARM, q, wrist_tip[None], truth.theta, truth.gripper_from_camera
-            )[0]
+            uv_wrist = jv.wrist_pixels(start, ARM, q, wrist_tip[None], truth.theta)[0]
             if jv.in_picture(uv_head[None], HEAD_SIZE):
                 session.click(f"head:{session.head_face}", *uv_head)  # the pane of the face it shows
             if jv.in_picture(uv_wrist[None], (640, 480)):
@@ -172,13 +170,13 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup):
     # nearer the truth: the wrist camera's pose relative to the pinch frame, at a pose like the views'
     q = start.joint_vector({ARM: session.views[0]})
 
-    def camera_in_pinch(model, theta, gc):
+    def camera_in_pinch(model, theta):
         pinch = model.frame_pose(f"{ARM}_gripper_frame_link", q, theta)
-        return np.linalg.inv(pinch) @ jv.wrist_pose(model, ARM, q, theta, gc)
+        return np.linalg.inv(pinch) @ jv.wrist_pose(model, ARM, q, theta)
 
-    true_rel = camera_in_pinch(start, truth.theta, truth.gripper_from_camera)
-    before = camera_in_pinch(start, None, None)
-    after = camera_in_pinch(calibrated, None, None)
+    true_rel = camera_in_pinch(start, truth.theta)
+    before = camera_in_pinch(start, None)
+    after = camera_in_pinch(calibrated, None)
     error_before = np.linalg.norm(before[:3, 3] - true_rel[:3, 3])
     error_after = np.linalg.norm(after[:3, 3] - true_rel[:3, 3])
     assert error_after < 0.002 and error_after < 0.5 * error_before, (

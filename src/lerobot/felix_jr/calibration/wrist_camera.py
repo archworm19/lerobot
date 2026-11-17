@@ -41,7 +41,7 @@ import json
 import os
 import time
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -67,7 +67,7 @@ from lerobot.felix_jr.calibration.xle_robot_model import (  # noqa: E402
     XleRobotModel,
     arm_record,
     pinch_frame,
-    wrist_camera_link,
+    wrist_camera_frame,
 )
 from lerobot.felix_jr.server.client import FelixClient, WristCapture  # noqa: E402
 from lerobot.felix_jr.server.protocol import DEFAULT_PORT, ServerError  # noqa: E402
@@ -398,11 +398,7 @@ def fingertips_in_wrist_image(
     pinch = model.frame_pose(pinch_frame(arm), q)
     tips = np.array([pinch[:3, 3], model.moving_tip(arm, q, opening)])
     tips = tips + pinch[:3, :3] @ model.wrist_face(arm)  # the face the wrist camera sees
-    if camera.gripper_from_camera is None:
-        raise ValueError("the camera's pose on the gripper is not known yet")
-    camera_from_root = np.linalg.inv(
-        model.frame_pose(wrist_camera_link(arm), q) @ np.array(camera.gripper_from_camera)
-    )
+    camera_from_root = np.linalg.inv(model.frame_pose(wrist_camera_frame(arm), q))
     return camera.project(tips @ camera_from_root[:3, :3].T + camera_from_root[:3, 3])
 
 
@@ -455,15 +451,11 @@ class ArmRecord:
 
 
 def with_lens(model: XleRobotModel, arm: str, lens: WristCamera) -> XleRobotModel:
-    """`model` with `arm`'s wrist camera's lens replaced by `lens`, its pose on the gripper kept (none if it had none)."""
-    old = model.wrist_cameras.get(arm)
-    if old is not None:
-        lens = replace(
-            lens,
-            gripper_from_camera=old.gripper_from_camera,
-            extrinsics_rms_px=old.extrinsics_rms_px,
-            extrinsics_views=old.extrinsics_views,
-        )
+    """`model` with `arm`'s wrist camera's lens replaced by `lens`.
+
+    Its pose on the gripper (the model's wrist camera parameters: the design's, or a joint session's corrections) is
+    untouched.
+    """
     return model.with_wrist_camera(arm, lens)
 
 
@@ -478,16 +470,18 @@ def fit_record(model: XleRobotModel, record: ArmRecord) -> tuple[WristCamera | N
             f"- focus accepted at sharpness {record.focus_sharpness:.0f} (in focus above {SHARP_ENOUGH:.0f})"
         )
     corners = [len(v) for v in record.intrinsic_views]
-    old = model.wrist_cameras.get(record.arm)
+    moved = [
+        abs(v) for k, v in model.estimate_dict().items() if f"{record.arm}_wrist_camera_joint" in k and v
+    ]
     lines += [
         f"- lens: {camera.model}, {camera.width} x {camera.height}, fx {camera.fx:.1f} fy {camera.fy:.1f}, "
         f"center ({camera.ppx:.1f}, {camera.ppy:.1f}); RMS {camera.rms_px or 0:.2f} px over {camera.n_views} views "
         f"(worst {errors.max():.2f} px; {min(corners)}-{max(corners)} corners each)",
         "- pose on the gripper: "
         + (
-            "kept from the start (the joint session fits it)"
-            if old is not None and old.gripper_from_camera is not None
-            else "none (the joint session needs a start pose: `docs/calibration_plan.md`, item 2)"
+            "the start's, a joint session's corrections to its design (kept)"
+            if moved
+            else "its design (`design_xlerobot_so101.urdf`): a joint session corrects it"
         ),
     ]
     return camera, [*lines, ""]

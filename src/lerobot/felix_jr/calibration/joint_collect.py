@@ -6,7 +6,8 @@
       [--max-vel 20] [--wrist-tip sweep|click] [--resume]
 
 `docs/camera_calibration.md`, "The rework". Start the server on the Pi with the arm and the head. `--start-from` must
-have the arm's wrist camera (its lens, from `calibration.wrist_camera`, and a first pose on the gripper). The window
+have the arm's wrist camera's lens (`calibration.wrist_camera`; its pose on the gripper starts at the design's, or a
+calibration's). The window
 shows three panes: the head's picture twice, once per fingertip face (the pinch face, magenta; the wrist camera's
 side, a finger's thickness away, cyan), and the wrist camera's (cyan: it sees only its own side), each with that
 face's tip as the model predicts it circled. A click is on the face of the pane it is in. Per board placement:
@@ -232,7 +233,7 @@ class JointCollect:
                 f"the head's directions changed since {start_from} ({self.model.head_signs} -> {signs})"
             )
         camera = self.model.wrist_cameras.get(arm)
-        if camera is None or camera.gripper_from_camera is None:
+        if camera is None:
             raise ValueError(
                 f"{start_from} has no {arm} wrist camera: run calibration.wrist_camera's lens step first"
             )

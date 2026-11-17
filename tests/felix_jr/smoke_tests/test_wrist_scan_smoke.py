@@ -14,7 +14,13 @@ pytest.importorskip("pinocchio")
 pytest.importorskip("scipy")
 
 from test_sfm import motion_errors, render, table_texture  # noqa: E402
-from test_wrist_camera import TABLE_BELOW_BASE_M, TRUE_CAMERA, URDF, _with_pose, start_joints  # noqa: E402
+from test_wrist_camera import (  # noqa: E402
+    GRIPPER_FROM_CAMERA,
+    TABLE_BELOW_BASE_M,
+    TRUE_CAMERA,
+    URDF,
+    start_joints,
+)
 
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel  # noqa: E402
 from lerobot.felix_jr.harness import api  # noqa: E402
@@ -37,7 +43,7 @@ def true_q(model, reading):
 
 @pytest.fixture(scope="module")
 def model():
-    return XleRobotModel.load(URDF).with_wrist_camera(ARM, _with_pose(TRUE_CAMERA))
+    return XleRobotModel.load(URDF).with_wrist_camera(ARM, TRUE_CAMERA, GRIPPER_FROM_CAMERA)
 
 
 def test_a_wrist_scan_measures_the_cameras_real_motion_and_the_table(model, tmp_path):

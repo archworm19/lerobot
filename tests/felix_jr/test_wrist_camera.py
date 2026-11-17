@@ -13,6 +13,7 @@ pytest.importorskip("pinocchio")
 pytest.importorskip("scipy")
 
 from lerobot.felix_jr.calibration.boards import CharucoBoard, Detection  # noqa: E402
+from lerobot.felix_jr.calibration.merge_urdf import design_gripper_from_camera  # noqa: E402
 from lerobot.felix_jr.calibration.wrist_camera import (  # noqa: E402
     COVERAGE_CELLS,
     ArmRecord,
@@ -364,10 +365,6 @@ def test_sharpness_drops_with_blur():
 # ---- saving -------------------------------------------------------------------------------------------------
 
 
-def _with_pose(camera: WristCamera) -> WristCamera:
-    return replace(camera, gripper_from_camera=tuple(map(tuple, GRIPPER_FROM_CAMERA)))
-
-
 def test_a_record_is_saved_and_read_back_and_a_checkerboards_is_refused(tmp_path):
     views = synthetic_views(3)
     record = ArmRecord("right", BOARD, SIZE, "rational", {"gripper": {"range_min": 1}}, views, 123.0)
@@ -386,17 +383,18 @@ def test_a_record_is_saved_and_read_back_and_a_checkerboards_is_refused(tmp_path
 
 
 def test_a_new_lens_keeps_the_cameras_pose_on_the_gripper(model):
-    posed = model.with_wrist_camera("right", _with_pose(TRUE_CAMERA))
+    posed = model.with_wrist_camera("right", TRUE_CAMERA, GRIPPER_FROM_CAMERA)
     lens = replace(TRUE_CAMERA, fx=410.0)
-    kept = with_lens(posed, "right", lens).wrist_cameras["right"]
-    assert kept.fx == 410.0 and np.allclose(kept.gripper_from_camera, GRIPPER_FROM_CAMERA)
-    fresh = with_lens(model, "left", lens).wrist_cameras["left"]
-    assert fresh.gripper_from_camera is None  # none to keep: the joint session needs a start pose
+    kept = with_lens(posed, "right", lens)
+    assert kept.wrist_cameras["right"].fx == 410.0
+    np.testing.assert_allclose(kept.gripper_from_camera("right"), GRIPPER_FROM_CAMERA, atol=1e-12)
+    fresh = with_lens(model, "left", lens)  # no pose of its own: the design's
+    np.testing.assert_allclose(fresh.gripper_from_camera("left"), design_gripper_from_camera(), atol=1e-12)
 
 
 def test_the_model_carries_the_wrist_camera(model, tmp_path):
-    camera = _with_pose(TRUE_CAMERA)
-    with_camera = model.with_wrist_camera("right", camera)
+    camera = TRUE_CAMERA
+    with_camera = model.with_wrist_camera("right", camera, GRIPPER_FROM_CAMERA)
     assert model.wrist_cameras == {}  # a copy
     with_camera.save(tmp_path / "c.urdf")
     loaded = XleRobotModel.load(tmp_path / "c.urdf")
@@ -405,6 +403,7 @@ def test_the_model_carries_the_wrist_camera(model, tmp_path):
     np.testing.assert_allclose(
         loaded.wrist_camera_pose("right", q),
         model.frame_pose(wrist_camera_link("right"), q) @ GRIPPER_FROM_CAMERA,
+        atol=1e-12,
     )
     with pytest.raises(ValueError, match="no calibrated left"):
         loaded.wrist_camera_pose("left", q)

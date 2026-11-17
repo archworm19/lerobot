@@ -151,15 +151,14 @@ class WristView:
 def wrist_view(model: XleRobotModel, capture: "WristCapture") -> WristView:
     """A `WristView` from `FelixClient.wrist_capture` (the joints read with the frame)."""
     arm = capture.arm
-    camera = model.wrist_cameras.get(arm)
-    if camera is None or camera.gripper_from_camera is None:
+    if arm not in model.wrist_cameras:
         raise ValueError(f"the model has no calibrated {arm} wrist camera: calibration.wrist_camera")
     pose = {k: float(v) for k, v in capture.state[f"{arm}_arm"].items()}
     q = model.joint_vector({arm: pose})
     return WristView(
         arm,
         capture.color,
-        camera,
+        model.wrist_cameras[arm],
         pose,
         model.frame_pose(pinch_frame(arm), q),
         model.wrist_camera_pose(arm, q),

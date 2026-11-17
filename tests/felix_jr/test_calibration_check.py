@@ -162,18 +162,11 @@ def test_annotate_draws_both_tips_and_skips_one_behind_the_camera():
     assert not has_color(alone, PINCH_COLOR, 60, 40 + 12)
 
 
-def wrist_camera() -> WristCamera:
-    """A wrist camera like the fake robot's (320 x 240), looking along the gripper's axis from 2 cm to its side."""
-
-    gripper_from_camera = (
-        (1.0, 0.0, 0.0, 0.0),
-        (0.0, -1.0, 0.0, 0.02),
-        (0.0, 0.0, -1.0, -0.03),
-        (0.0, 0.0, 0.0, 1.0),
-    )
-    return WristCamera(
-        320, 240, 200.0, 200.0, 160.0, 120.0, "rational", (0.0,) * 8, gripper_from_camera=gripper_from_camera
-    )
+# a wrist camera like the fake robot's (320 x 240), looking along the gripper's axis from 2 cm to its side
+WRIST_CAMERA = WristCamera(320, 240, 200.0, 200.0, 160.0, 120.0, "rational", (0.0,) * 8)
+GRIPPER_FROM_WRIST_CAMERA = np.array(
+    [[1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.02], [0.0, 0.0, -1.0, -0.03], [0.0, 0.0, 0.0, 1.0]]
+)
 
 
 def test_the_wrist_camera_shows_the_fingertips_beside_the_head_camera(robot, tmp_path):
@@ -182,7 +175,7 @@ def test_the_wrist_camera_shows_the_fingertips_beside_the_head_camera(robot, tmp
         bare, shown = make_session(client, model_for(client))
         assert any("head camera only" in note for note in bare.notes)
         assert shown[-1].shape[1] == 320 and bare.wrist_fingertips() is None
-        model = model_for(client).with_wrist_camera("left", wrist_camera())
+        model = model_for(client).with_wrist_camera("left", WRIST_CAMERA, GRIPPER_FROM_WRIST_CAMERA)
         session, shown = make_session(client, model, out_dir=tmp_path / "check")
         session.handle("next")
         assert shown[-1].shape[:2] == (

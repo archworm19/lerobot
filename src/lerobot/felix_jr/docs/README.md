@@ -238,7 +238,8 @@ radius r. It needs a calibrated URDF from section 6 (the model's radius is the s
 The wrist cameras (plain USB / UVC boards, one per arm, plugged into the Pi) are read by the server. Their lens
 (intrinsics) goes into the calibration here, once per lens: redo it when a lens is refocused or a camera replaced, not
 when a mount moves. Their pose on the gripper is the joint session's (`calibration.joint_collect`, which ties it to
-the head's view of the fingers): this step keeps `--start-from`'s. (The camera-pose step, and the checkerboard, were
+the head's view of the fingers), a correction to the design's (`design_xlerobot_so101.urdf`): this step leaves it as
+it was. (The camera-pose step, and the checkerboard, were
 retired on 2026-11-16: `calibration_plan.md`.)
 
 0. **Let your user read the cameras** (once per Pi): `groups` must list `video`; if not,
@@ -280,7 +281,7 @@ retired on 2026-11-16: `calibration_plan.md`.)
      what would help. `c` once there are 12: the lens is fitted on random halves of the views first and accepted
      when they agree within 3%; if not, it says so and wants more views. That ends the arm's camera.
    - **Resuming:** the views are saved as they are kept; `--resume` (same `--out-dir`) keeps them and adds to them.
-5. It writes `calibration.urdf` (the start with the new lenses, each camera's pose on the gripper kept) and
+5. It writes `calibration.urdf` (the start with the new lenses, each camera's pose on the gripper as it was) and
    `wrist_cameras.md` (the lens, the errors) in the folder, and keeps the views: `wrist_camera --refit --start-from
    <urdf> --out-dir <folder>` fits them again with no robot. Views recorded with the checkerboard (before 2026-11-16)
    are no longer read.

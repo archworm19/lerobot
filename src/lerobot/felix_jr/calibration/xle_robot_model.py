@@ -48,6 +48,10 @@ The design is in `docs/camera_calibration.md`. In short:
   pinch frame; with a margin, aimed that much toward the moving jaw, so the fixed one, which does not move, clears
   the object). `moving_jaw` is the turn that takes the fixed jaw to the moving one at an opening (to draw it), and
   `gripper_pos_for` the `gripper.pos` that opens the jaws that far (the arm's `GripperMap`).
+- **The fingers' mounts.** The XLeRobot fingers on the jaws are design frames at their tips (`merge_urdf.FINGER_AXES`),
+  each corrected by one turn about the hinge's axis (`finger_mount_parameters`, fitted by `calibration.gripper_sweep`,
+  not by the clicks: no point the model predicts depends on them). The sim draws the fingers by them
+  (`sim2real.robot`); `finger_mount_deg` reads them, `with_finger_mounts` sets them.
 
 Joint configurations `q` are pinocchio configuration vectors of measured angles (`joint_vector` builds one from
 servo readings); `zero:` corrections are added inside, so the same `q` serves every `theta`.
@@ -65,11 +69,18 @@ import numpy as np
 
 from lerobot.felix_jr.calibration.merge_urdf import (
     ARMS,
+    FINGER_AXES,
+    FINGERS,
     MERGED_URDF,
     OPTICAL_FRAME,
     SO101_JOINTS,
     attr,
+    design_gripper_from_camera,
+    finger_frame,
+    finger_joint,
     link_of,
+    wrist_camera_frame,
+    wrist_camera_joint,
 )
 from lerobot.utils.import_utils import _pinocchio_available, require_package
 
@@ -109,6 +120,14 @@ SIGMAS = {
     # the gripper's hinge (the moving jaw's joint origin): the SO-101's design until fitted from the moving tip's path
     # (`calibration.gripper_sweep`: the left arm's 7 mm off, 2026-11-15)
     "hinge": 0.010,
+    # the wrist camera on its gripper, from its mount's drawing (`merge_urdf`): our 45 mm boards sit ~1 cm off it
+    # (`docs/hardware_risks.md`), the board flat in the mount (1-3 deg)
+    "wrist camera pos": 0.015,
+    "wrist camera rot": np.radians(5.0),
+    # the fingers' mounts on their jaws (`merge_urdf.FINGER_AXES`): the fixed one's within a few degrees of the design
+    # (+0.5 to +4 deg, 2026-11-15); the moving one's design is ours, not a drawing's, and it sits 16-18 deg off it
+    "fixed finger mount": np.radians(5.0),
+    "moving finger mount": np.radians(20.0),
 }
 # the head joints' axes may tilt (`default_parameters(head_axes=True)`): the turns about the two axes square to each
 # joint's own (the pan turns about z, the tilt about y); a turn about its own axis is its zero
@@ -185,7 +204,8 @@ def default_parameters(
 ) -> list[Param]:
     """The parameters we calibrate, with their priors (`SIGMAS`): the head and camera, then each arm's.
 
-    Per arm, 14 head and camera parameters plus 29 of the arm (mount, joint zeros and origins, tip offset). Joint
+    Per arm, 14 head and camera parameters plus 35 of the arm (mount, joint zeros and origins, tip offset, the wrist
+    camera's pose on the gripper: `wrist_camera_parameters`). Joint
     origins and most of the rest stay at their priors in practice (the fit's report says which were learned), but
     keeping them in costs little and lets the uncertainty show. The head tower is not included: moving it and moving
     the arm mount shift every pixel identically, so only one of them can be found, and the mount is it.
@@ -208,6 +228,7 @@ def default_parameters(
             params.append(Param(f"zero:{name}", SIGMAS["arm zero"], "arm", arm=arm))
             params += [Param(f"pos:{name}:{a}", SIGMAS["arm origin"], "arm", arm=arm) for a in AXES]
         params += [Param(f"pos:{pinch_joint(arm)}:{a}", SIGMAS["tip"], "tip", arm=arm) for a in AXES]
+        params += wrist_camera_parameters(arm)
     if overrides:
         params = [
             Param(p.name, overrides[p.name][1], p.group, overrides[p.name][0], p.arm)
@@ -218,12 +239,36 @@ def default_parameters(
     return params
 
 
+def wrist_camera_parameters(arm: str) -> list[Param]:
+    """`arm`'s wrist camera's pose on its gripper (its fixed joint's origin, `merge_urdf.wrist_camera_joint`), 6."""
+    joint = wrist_camera_joint(arm)
+    return [Param(f"pos:{joint}:{a}", SIGMAS["wrist camera pos"], "wrist camera", arm=arm) for a in AXES] + [
+        Param(f"rot:{joint}:{a}", SIGMAS["wrist camera rot"], "wrist camera", arm=arm) for a in AXES
+    ]
+
+
 def gripper_hinge_parameters(arm: str) -> list[Param]:
     """`arm`'s gripper hinge's position (its joint's origin, in the gripper's frame), 3 parameters.
 
     Off by default: the moving tip's path in the wrist camera finds it (`calibration.gripper_sweep`), the clicks do not.
     """
     return [Param(f"pos:{arm_joint(arm, 'gripper')}:{a}", SIGMAS["hinge"], "tip", arm=arm) for a in AXES]
+
+
+# the turn about each finger frame's z that opens the jaws (`merge_urdf.FINGER_AXES`): the hinge's axis is -z for the
+# fixed finger, +z for the moving one, so `finger_mount_deg` = sign * the parameter (in degrees)
+FINGER_MOUNT_SIGN = {"fixed": -1.0, "moving": 1.0}
+
+
+def finger_mount_parameters(arm: str) -> list[Param]:
+    """`arm`'s fingers' mounts on their jaws, each a turn about its tip on the hinge's axis (`FINGERS`), 2 parameters.
+
+    Off by default, like the hinge: the sweep's outlines find them (`calibration.gripper_sweep`), the clicks do not.
+    """
+    return [
+        Param(f"rot:{finger_joint(arm, f)}:z", SIGMAS[f"{f} finger mount"], "finger", arm=arm)
+        for f in FINGERS
+    ]
 
 
 def head_axis_parameters() -> list[Param]:
@@ -270,10 +315,8 @@ class GripperMap:
 
     The opening is the moving jaw's angle about the hinge from where the tips meet:
     `deg_per_unit * (gripper.pos - pos_closed)`, negative below `pos_closed` (the servo squeezes closed jaws).
-    `finger_mount_deg`: the moving finger's turn on its jaw, about its tip (the hinge's axis, positive as the jaws
-    open), from where it would lie along the fixed one with the tips together (`calibration.gripper_sweep`); the sim
-    places the finger by it (`sim2real.robot`), the model's points do not depend on it. `fixed_finger_mount_deg`: the
-    fixed finger's turn about its tip (the pinch point), likewise (left +4, right +2 deg, 2026-11-15).
+    (The fingers' mounts were kept here until 2026-11-17, `OLD_FINGER_MOUNT_KEYS`: now parameters,
+    `finger_mount_parameters`.)
     `gripper.pos` is LeRobot's 0-100 over the gripper's calibrated tick range, so the map holds only under the
     gripper's LeRobot calibration it was measured with (`calibration`, a `motor_record` as the robot reported it):
     recalibrating the arm with `lerobot-calibrate` invalidates it (`XleRobotModel.check_robot`). `measurements` are
@@ -286,8 +329,6 @@ class GripperMap:
     calibration: dict[str, int]
     measurements: tuple[tuple[float, float], ...] = ()
     radius_m: float | None = None
-    finger_mount_deg: float = 0.0
-    fixed_finger_mount_deg: float = 0.0
 
     def opening_deg(self, pos: float) -> float:
         """The jaws' opening angle (degrees) at `gripper.pos` `pos`."""
@@ -316,13 +357,13 @@ WRIST_CAMERA_MODELS = (
 
 @dataclass(frozen=True)
 class WristCamera:
-    """An arm's wrist camera: its lens (`calibration.wrist_camera`, intrinsics) and its pose on the gripper (extrinsics).
+    """An arm's wrist camera's lens (`calibration.wrist_camera`, intrinsics).
 
     `width` x `height` the frame size calibrated at; `fx, fy, ppx, ppy` the pinhole part; `model` one of
     `WRIST_CAMERA_MODELS` with its `coeffs` (OpenCV's order: rational `k1 k2 p1 p2 k3 k4 k5 k6`, fisheye `k1 k2 k3
-    k4`); `rms_px` the reprojection error over `n_views` views of the board. `gripper_from_camera` is the camera's
-    optical frame (x right, y down, z forward) in `<arm>_gripper_link`, row-major 4x4, None until the extrinsics are
-    calibrated; `extrinsics_rms_px` and `extrinsics_views` say what they were fitted to.
+    k4`); `rms_px` the reprojection error over `n_views` views of the board. Its pose on the gripper is the model's:
+    the design's `<arm>_wrist_camera_optical` frame, corrected by the arm's wrist camera parameters
+    (`XleRobotModel.wrist_camera_pose`, `gripper_from_camera`).
     """
 
     width: int
@@ -335,9 +376,6 @@ class WristCamera:
     coeffs: tuple[float, ...]
     rms_px: float | None = None
     n_views: int = 0
-    gripper_from_camera: tuple[tuple[float, ...], ...] | None = None
-    extrinsics_rms_px: float | None = None
-    extrinsics_views: int = 0
 
     def matrix(self) -> np.ndarray:
         """The 3x3 camera matrix."""
@@ -364,6 +402,13 @@ class WristCamera:
 def wrist_camera_link(arm: str) -> str:
     """The link a wrist camera is fixed to."""
     return f"{arm}_gripper_link"
+
+
+# the fields older calibrations kept in `WristCamera` (the camera's pose, now the wrist camera parameters: `load`)
+OLD_CAMERA_POSE_KEYS = ("gripper_from_camera", "extrinsics_rms_px", "extrinsics_views")
+# a `GripperMap`'s fingers' mounts (degrees, positive as the jaws open) before they were parameters (`load` turns them
+# into `finger_mount_parameters`), by finger
+OLD_FINGER_MOUNT_KEYS = {"moving": "finger_mount_deg", "fixed": "fixed_finger_mount_deg"}
 
 
 class RobotMismatchError(RuntimeError):
@@ -1168,8 +1213,14 @@ class XleRobotModel:
             element_origin.set("rpy", _format(pin.rpy.matrixToRpy(rotation)))
         return '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode") + "\n"
 
-    def with_wrist_camera(self, arm: str, camera: WristCamera) -> "XleRobotModel":
-        """A copy of the model with `arm`'s wrist camera `camera` (replacing an earlier one); saved in `<felix_calibration>`."""
+    def with_wrist_camera(
+        self, arm: str, camera: WristCamera, gripper_from_camera: np.ndarray | None = None
+    ) -> "XleRobotModel":
+        """A copy of the model with `arm`'s wrist camera's lens `camera` (replacing an earlier one).
+
+        Saved in `<felix_calibration>`. With `gripper_from_camera` (4x4), its pose on the gripper set there too (its
+        corrections, `camera_corrections`); without, the pose as it was.
+        """
         if camera.model not in WRIST_CAMERA_MODELS:
             raise ValueError(f"unknown lens model {camera.model!r}: one of {WRIST_CAMERA_MODELS}")
         model = type(self)(
@@ -1185,6 +1236,8 @@ class XleRobotModel:
             self.wrist_cameras | {arm: camera},
         )
         model.set_estimates(self._estimates.copy())
+        if gripper_from_camera is not None:
+            model.set_estimates(model.estimate_dict() | model.camera_corrections(arm, gripper_from_camera))
         model.covariance = self.covariance
         model.fit_info = dict(self.fit_info)
         return model
@@ -1239,9 +1292,57 @@ class XleRobotModel:
 
     def with_gripper_hinge(self, arm: str) -> "XleRobotModel":
         """A copy with `arm`'s gripper hinge's position among its parameters (at 0 where new; `gripper_hinge_parameters`)."""
+        return self._with_parameters(gripper_hinge_parameters(arm))
+
+    def with_finger_mounts(
+        self, arm: str, moving_deg: float | None = None, fixed_deg: float | None = None
+    ) -> "XleRobotModel":
+        """A copy with `arm`'s fingers' mounts among its parameters (`finger_mount_parameters`), set where given.
+
+        `moving_deg` / `fixed_deg`: each finger's turn on its jaw (degrees, positive as the jaws open); None: as it
+        was (0, the design, where new). Always a new model (the one given is left as it was).
+        """
+        model = self._with_parameters(finger_mount_parameters(arm), always=True)
+        given = {"moving": moving_deg, "fixed": fixed_deg}
+        model.set_estimates(
+            model.estimate_dict()
+            | {
+                f"rot:{finger_joint(arm, f)}:z": float(np.radians(deg) * FINGER_MOUNT_SIGN[f])
+                for f, deg in given.items()
+                if deg is not None
+            }
+        )
+        return model
+
+    def finger_mount_deg(
+        self, arm: str, finger: str, theta: np.ndarray | Mapping[str, float] | None = None
+    ) -> float:
+        """`arm`'s `finger`'s turn on its jaw (degrees, positive as the jaws open; 0, the design, if not calibrated)."""
+        estimates = self.estimate_dict(theta)
+        return float(
+            np.degrees(estimates.get(f"rot:{finger_joint(arm, finger)}:z", 0.0)) * FINGER_MOUNT_SIGN[finger]
+        )
+
+    def finger_pose(
+        self, arm: str, finger: str, theta: np.ndarray | Mapping[str, float] | None = None
+    ) -> np.ndarray:
+        """`arm`'s `finger`'s frame (its tip, its STL's axes, `merge_urdf.FINGER_AXES`) in the pinch frame (4x4).
+
+        With the jaws closed: the moving one opens by `moving_jaw`'s turn on top of it.
+        """
+        q = self.joint_vector()
+        return np.linalg.inv(self.frame_pose(pinch_frame(arm), q, theta)) @ self.frame_pose(
+            finger_frame(arm, finger), q, theta
+        )
+
+    def _with_parameters(self, parameters: Sequence[Param], always: bool = False) -> "XleRobotModel":
+        """A copy with `parameters` added where new: at 0, their priors in the covariance.
+
+        `self` if none is new, unless `always`.
+        """
         have = {p.name for p in self.parameters}
-        new = [p for p in gripper_hinge_parameters(arm) if p.name not in have]
-        if not new:
+        new = [p for p in parameters if p.name not in have]
+        if not new and not always:
             return self
         model = type(self)(
             self.urdf,
@@ -1256,17 +1357,41 @@ class XleRobotModel:
             self.wrist_cameras,
         )
         model.set_estimates(self.estimate_dict())
+        model.covariance = _padded(self.covariance, new)
         model.fit_info = dict(self.fit_info)
         return model
 
     def wrist_camera_pose(
         self, arm: str, q: np.ndarray, theta: np.ndarray | Mapping[str, float] | None = None
     ) -> np.ndarray:
-        """root_from_camera (4x4) of `arm`'s wrist camera (its optical frame) at `q`; needs its extrinsics."""
-        camera = self.wrist_cameras.get(arm)
-        if camera is None or camera.gripper_from_camera is None:
-            raise ValueError(f"no calibrated {arm} wrist camera pose: run calibration.wrist_camera")
-        return self.frame_pose(wrist_camera_link(arm), q, theta) @ np.array(camera.gripper_from_camera)
+        """root_from_camera (4x4) of `arm`'s wrist camera (its optical frame) at `q`; needs its lens calibrated."""
+        if arm not in self.wrist_cameras:
+            raise ValueError(f"no calibrated {arm} wrist camera: run calibration.wrist_camera")
+        return self.frame_pose(wrist_camera_frame(arm), q, theta)
+
+    def gripper_from_camera(
+        self, arm: str, theta: np.ndarray | Mapping[str, float] | None = None
+    ) -> np.ndarray:
+        """`arm`'s wrist camera's optical frame in `<arm>_gripper_link` (4x4): the design's, corrected by `theta`."""
+        q = self.joint_vector()
+        return np.linalg.inv(self.frame_pose(wrist_camera_link(arm), q, theta)) @ self.frame_pose(
+            wrist_camera_frame(arm), q, theta
+        )
+
+    def camera_corrections(self, arm: str, gripper_from_camera: np.ndarray) -> dict[str, float]:
+        """The wrist camera parameters that put `arm`'s camera at `gripper_from_camera` (4x4, in the gripper link).
+
+        The inverse of `gripper_from_camera`: the joint's origin is the camera's pose in the gripper link, corrected
+        as `R exp(w)`, `t + dt` (`Param`).
+        """
+        nominal = self._joints[wrist_camera_joint(arm)].origin
+        target = np.asarray(gripper_from_camera, dtype=np.float64)
+        turn = pin.log3(nominal.rotation.T @ target[:3, :3])
+        shift = target[:3, 3] - nominal.translation
+        joint = wrist_camera_joint(arm)
+        return {f"pos:{joint}:{a}": float(v) for a, v in zip(AXES, shift, strict=True)} | {
+            f"rot:{joint}:{a}": float(v) for a, v in zip(AXES, turn, strict=True)
+        }
 
     def save(self, path: str | Path) -> None:
         """Write the calibrated URDF: `to_urdf()` plus a `<felix_calibration>` element holding everything else.
@@ -1328,6 +1453,40 @@ class XleRobotModel:
                 name = attr(element_, "name") if element_.tag == "link" else None
                 if name in plates or (child is not None and attr(child, "link") in plates):
                     root.remove(element_)
+        # before 2026-11-16 the wrist cameras' poses were kept whole (`WristCamera.gripper_from_camera`), with no
+        # design frame in the URDF: the design's frame added, the pose turned into its corrections below
+        names = {attr(j, "name") for j in root.findall("joint")}
+        design = design_gripper_from_camera()
+        older = [
+            arm for arm in ARMS if wrist_camera_joint(arm) not in names
+        ]  # saved before the frame was designed
+        for arm in older:
+            ET.SubElement(root, "link", {"name": wrist_camera_frame(arm)})
+            joint_ = ET.SubElement(root, "joint", {"name": wrist_camera_joint(arm), "type": "fixed"})
+            ET.SubElement(joint_, "parent", {"link": wrist_camera_link(arm)})
+            ET.SubElement(joint_, "child", {"link": wrist_camera_frame(arm)})
+            ET.SubElement(
+                joint_,
+                "origin",
+                {"xyz": _format(design[:3, 3]), "rpy": _format(pin.rpy.matrixToRpy(design[:3, :3]))},
+            )
+        # before 2026-11-17 the fingers had no design frames (their mounts were `GripperMap` fields): added, the old
+        # mounts turned into their parameters below
+        for arm in ARMS:
+            if finger_joint(arm, FINGERS[0]) in names or pinch_frame(arm) not in {
+                attr(link, "name") for link in root.findall("link")
+            }:
+                continue
+            for finger in FINGERS:
+                ET.SubElement(root, "link", {"name": finger_frame(arm, finger)})
+                joint_ = ET.SubElement(root, "joint", {"name": finger_joint(arm, finger), "type": "fixed"})
+                ET.SubElement(joint_, "parent", {"link": pinch_frame(arm)})
+                ET.SubElement(joint_, "child", {"link": finger_frame(arm, finger)})
+                ET.SubElement(
+                    joint_,
+                    "origin",
+                    {"xyz": "0 0 0", "rpy": _format(pin.rpy.matrixToRpy(FINGER_AXES[finger]))},
+                )
         for joint in root.findall("joint"):
             name = attr(joint, "name")
             if name not in data["nominal_origins"]:
@@ -1337,37 +1496,75 @@ class XleRobotModel:
                 joint.remove(origin)
             if data["nominal_origins"][name] is not None:
                 ET.SubElement(joint, "origin", data["nominal_origins"][name])
+        parameters = [Param(**p) for p in data["parameters"]]
+        have = {p.name for p in parameters}
+        added = [p for arm in older for p in wrist_camera_parameters(arm) if p.name not in have]
+        maps = data.get("gripper_maps", {})  # a calibration may have none (none measured yet)
+        old_mounts = {  # an older map's fingers' mounts, as parameters
+            arm: {f: float(m[key]) for f, key in OLD_FINGER_MOUNT_KEYS.items() if key in m}
+            for arm, m in maps.items()
+        }
+        added += [
+            p
+            for arm, mounts in old_mounts.items()
+            if mounts
+            for p in finger_mount_parameters(arm)
+            if p.name not in have
+        ]
         model = cls(
             '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode") + "\n",
             data["head_signs"],
             data["head_refs"],
             data["intrinsics"],
-            [Param(**p) for p in data["parameters"]],
+            parameters + added,
             data["floor_z"],
             data["visible_side"],
-            {  # a calibration may have none (none measured yet)
-                arm: GripperMap(**m | {"measurements": tuple(map(tuple, m["measurements"]))})
-                for arm, m in data.get("gripper_maps", {}).items()
+            {
+                arm: GripperMap(
+                    **{k: v for k, v in m.items() if k not in OLD_FINGER_MOUNT_KEYS.values()}
+                    | {"measurements": tuple(map(tuple, m["measurements"]))}
+                )
+                for arm, m in maps.items()
             },
             data.get("arm_calibration", {}),  # none in calibrations made before snapshots
             {  # none before the wrist cameras were calibrated
                 arm: WristCamera(
-                    **c
-                    | {
-                        "coeffs": tuple(c["coeffs"]),
-                        "gripper_from_camera": None
-                        if c["gripper_from_camera"] is None
-                        else tuple(map(tuple, c["gripper_from_camera"])),
-                    }
+                    **{k: v for k, v in c.items() if k not in OLD_CAMERA_POSE_KEYS}
+                    | {"coeffs": tuple(c["coeffs"])}
                 )
                 for arm, c in data.get("wrist_cameras", {}).items()
             },
         )
-        model.set_estimates(np.array(data["estimates"], dtype=float))
+        estimates = np.r_[np.array(data["estimates"], dtype=float), np.zeros(len(added))]
+        model.set_estimates(estimates)
+        for arm, c in data.get("wrist_cameras", {}).items():  # an older calibration's pose, as corrections
+            if c.get("gripper_from_camera") is not None and any(p.arm == arm for p in added):
+                model.set_estimates(
+                    model.estimate_dict() | model.camera_corrections(arm, np.array(c["gripper_from_camera"]))
+                )
+        for arm, mounts in old_mounts.items():
+            model.set_estimates(
+                model.estimate_dict()
+                | {
+                    f"rot:{finger_joint(arm, f)}:z": float(np.radians(deg) * FINGER_MOUNT_SIGN[f])
+                    for f, deg in mounts.items()
+                    if any(p.arm == arm and p.group == "finger" for p in added)
+                }
+            )
         if data["covariance"] is not None:
-            model.covariance = np.array(data["covariance"], dtype=float)
+            model.covariance = _padded(np.array(data["covariance"], dtype=float), added)
         model.fit_info = data["fit_info"]
         return model
+
+
+def _padded(covariance: np.ndarray | None, added: Sequence[Param]) -> np.ndarray | None:
+    """`covariance` with `added` parameters appended: their priors, uncorrelated (None stays None)."""
+    if covariance is None or not added:
+        return covariance
+    n = len(covariance)
+    out = np.pad(covariance, ((0, len(added)), (0, len(added))))
+    out[np.arange(n, n + len(added)), np.arange(n, n + len(added))] = [p.sigma**2 for p in added]
+    return out
 
 
 def _record_differences(

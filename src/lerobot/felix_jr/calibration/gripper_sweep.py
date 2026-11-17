@@ -47,7 +47,7 @@ calibrated parameter, `pos:<arm>_gripper:*`, `XleRobotModel.with_gripper_hinge`)
 by least squares on their pixels (`fit_hinge`). The model's tip there is the XLeRobot finger's corner the wrist camera
 sees (`sim2real.robot.FINGER_MOVING_WRIST_TIP_M`), and the detected one is taken from the finger's raw pixels (the
 clean-up blunts it by a few pixels): either alone moved the hinge 1-2 mm on synthetic frames. Then the moving finger's
-mount, its turn on its jaw about its tip (`GripperMap.finger_mount_deg`), by its outline's agreement over the frames
+mount, its turn on its jaw about its tip (`XleRobotModel.finger_mount_deg`, a parameter), by its outline's agreement over the frames
 (`fit_mount`). Only frames whose colors were read right (`trusted`), and the hinge's fit robust: a tip it still misses
 by more than `OUTLIER_PX` is left out and the fit done again (a misread tip took a hinge to 10 mm before). The sweep is
 fitted again with the corrected model (`corrected_*.png`), and `--out` writes it, a new calibrated URDF (`--urdf` is
@@ -300,8 +300,7 @@ def tip_pixel(model: XleRobotModel, arm: str, q: np.ndarray, opening_deg: float)
     The XLeRobot finger's (`sim2real.robot.FINGER_MOVING_WRIST_TIP_M`), turned by its mount: not the model's generic
     `wrist_face`, 1.1 mm short of it along the finger (the tip's edge leans), which the fit took up in the hinge.
     """
-    gripper_map = model.gripper_maps.get(arm)
-    mount = model.moving_jaw(arm, gripper_map.finger_mount_deg if gripper_map else 0.0)[:3, :3]
+    mount = model.moving_jaw(arm, model.finger_mount_deg(arm, "moving"))[:3, :3]
     corner = mount @ robot.FINGER_MOVING_WRIST_TIP_M
     on_the_jaw = model.moving_jaw(arm, opening_deg) @ np.r_[corner, 1.0]  # (pinch frame)
     return _project(model, arm, q, (model.frame_pose(pinch_frame(arm), q) @ on_the_jaw)[:3])
@@ -669,10 +668,8 @@ class GripperGeometry:
         float, float, float
     ]  # the hinge's move, in the gripper's frame (its joint's origin)
     opening_offset_deg: float  # the real opening less the map's: `pos_closed` moves by -it / deg_per_unit
-    finger_mount_deg: float  # the moving finger's turn on its jaw (`GripperMap.finger_mount_deg`)
-    fixed_finger_mount_deg: (
-        float  # the fixed finger's turn about its tip (`GripperMap.fixed_finger_mount_deg`)
-    )
+    finger_mount_deg: float  # the moving finger's turn on its jaw (`XleRobotModel.finger_mount_deg`)
+    fixed_finger_mount_deg: float  # the fixed finger's turn about its tip (likewise)
     tip_rms_px: (
         float  # the model's tips from the detected ones, over the sweep, with the fitted hinge and offset
     )
@@ -698,12 +695,12 @@ def corrected_model(
     mount_deg: float,
     fixed_mount_deg: float | None = None,
 ) -> XleRobotModel:
-    """A copy of `model` with `arm`'s gripper corrected (`with_gripper_hinge`; the rest as it was).
+    """A copy of `model` with `arm`'s gripper corrected (`with_gripper_hinge`, `with_finger_mounts`; the rest as it was).
 
     Its hinge moved by `hinge_shift_m` (the gripper's frame), its map's `pos_closed` by the opening offset, and its
     fingers' mounts set to `mount_deg` (the moving one) and `fixed_mount_deg` (the fixed one; None: as it was).
     """
-    corrected = copy.copy(model.with_gripper_hinge(arm))
+    corrected = model.with_gripper_hinge(arm).with_finger_mounts(arm, mount_deg, fixed_mount_deg)
     estimates = corrected.estimate_dict()
     for axis, shift in zip(("x", "y", "z"), hinge_shift_m, strict=True):
         estimates[f"pos:{arm}_gripper:{axis}"] += float(shift)
@@ -713,10 +710,6 @@ def corrected_model(
         arm: replace(
             gripper_map,
             pos_closed=gripper_map.pos_closed - offset_deg / gripper_map.deg_per_unit,
-            finger_mount_deg=mount_deg,
-            fixed_finger_mount_deg=gripper_map.fixed_finger_mount_deg
-            if fixed_mount_deg is None
-            else fixed_mount_deg,
         )
     }
     return corrected
@@ -780,11 +773,7 @@ def fit_mount(
     """
     scores = {}
     for angle in angles:
-        gripper_map = model.gripper_maps[arm]
-        trial = copy.copy(model)
-        trial.gripper_maps = dict(model.gripper_maps) | {
-            arm: replace(gripper_map, finger_mount_deg=float(angle))
-        }
+        trial = model.with_finger_mounts(arm, moving_deg=float(angle))
         fingers = FingerRenderer(trial, arm)
         total = 0.0
         for frame, detected, _ in seen:
@@ -810,11 +799,7 @@ def fit_fixed_mount(
     open_frames = [(frame, detected) for frame, detected, fit in seen if fit.fitted_deg is not None]
     scores, per_frame = {}, {}
     for angle in angles:
-        gripper_map = model.gripper_maps[arm]
-        trial = copy.copy(model)
-        trial.gripper_maps = dict(model.gripper_maps) | {
-            arm: replace(gripper_map, fixed_finger_mount_deg=float(angle))
-        }
+        trial = model.with_finger_mounts(arm, fixed_deg=float(angle))
         fingers = FingerRenderer(trial, arm)
         each = []
         for frame, detected in open_frames:
@@ -872,9 +857,7 @@ def fit_geometry(
     )
     fixed_scores = dict(sorted((fixed_scores | fine_scores).items()))
     fixed_mount = max(fixed_scores, key=fixed_scores.__getitem__)
-    model = corrected_model(
-        model, arm, np.zeros(3), 0.0, model.gripper_maps[arm].finger_mount_deg, fixed_mount
-    )
+    model = corrected_model(model, arm, np.zeros(3), 0.0, model.finger_mount_deg(arm, "moving"), fixed_mount)
     kept, dropped = trusted(seen, (fixed_each | fine_each)[fixed_mount])
     while True:
         if len(kept) < MIN_GEOMETRY_FRAMES:
@@ -1212,8 +1195,7 @@ def fixed_tip(
     `FIXED_BACK_M` back from its tip toward it), its corner the wrist camera sees (`FINGER_FIXED_WRIST_TIP_M`). With the
     jaws closed the moving finger's tip lies against it, at about the same place.
     """
-    gripper_map = model.gripper_maps.get(arm)
-    mount = model.moving_jaw(arm, gripper_map.fixed_finger_mount_deg if gripper_map else 0.0)[:3, :3]
+    mount = model.moving_jaw(arm, model.finger_mount_deg(arm, "fixed"))[:3, :3]
     corner = mount @ robot.FINGER_FIXED_WRIST_TIP_M
     back = mount @ (corner + np.array([0.0, 0.0, -FIXED_BACK_M]))  # (the pinch z points to the tips)
     q = model.joint_vector({arm: pose})

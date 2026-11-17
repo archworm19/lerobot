@@ -89,7 +89,7 @@ Parameters are corrections on top of the URDF, one row each (`Param`: name, prio
 
 `default_parameters()`: the head and camera once (both head joints' zeros and origins, the camera mount's position
 and rotation: 14), then per arm the mount's position and rotation, each SO-101 joint's zero and origin, and the
-pinch point's offset (29); 72 in all. Priors (`SIGMAS`): head zeros 20 deg (the head's home is not level), head
+pinch point's offset and (since 2026-11-16) the wrist camera's pose on the gripper (35); 84 in all. Priors (`SIGMAS`): head zeros 20 deg (the head's home is not level), head
 joint origins 2 mm, camera mount 3 mm in x and z and **15 mm laterally** (the RGB sensor's position in the camera
 link is the least certain), 2 deg in rotation; arm mounts 15 mm and 5 deg; arm joint zeros 2 deg and origins 2 mm;
 pinch point offset 8 mm. The head tower is not a parameter: moving it and moving the arm mount shift every pixel
@@ -501,8 +501,7 @@ arm-held start is capped at 300 steps (`HELD_START_NFEV`): only a start, a wrong
 
 **What the fit determined** (`uncertainty`, in the report): from the Jacobian at the solution, (J^T J)^-1 with the
 boards' poses and the joints' errors marginalized out: each unknown's sd against its prior, the pairs correlated past
-0.9 (`CORRELATED`), and the three least determined directions (each unknown over its prior; a camera's turn over 1
-deg, its shift over 1 mm). Pairs at +-1.0 that only the priors split and that predict the same are expected: the head
+0.9 (`CORRELATED`), and the three least determined directions (each unknown over its prior). Pairs at +-1.0 that only the priors split and that predict the same are expected: the head
 tilt's zero and the head camera's turn about the same axis; the wrist roll's zero and the wrist camera's turn about
 the roll axis (without the moving tip in the head's view, below). The robust loss's down-weighting is not in it.
 

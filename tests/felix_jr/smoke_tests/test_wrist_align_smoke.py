@@ -17,7 +17,7 @@ import pytest
 pytest.importorskip("pinocchio")
 pytest.importorskip("scipy")
 
-from test_wrist_camera import TRUE_CAMERA, URDF, _with_pose, start_joints  # noqa: E402
+from test_wrist_camera import GRIPPER_FROM_CAMERA, TRUE_CAMERA, URDF, start_joints  # noqa: E402
 
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, pinch_frame  # noqa: E402
 from lerobot.felix_jr.harness import api  # noqa: E402
@@ -35,7 +35,7 @@ AHEAD_M = 0.06
 
 @pytest.fixture(scope="module")
 def model():
-    return XleRobotModel.load(URDF).with_wrist_camera(ARM, _with_pose(TRUE_CAMERA))
+    return XleRobotModel.load(URDF).with_wrist_camera(ARM, TRUE_CAMERA, GRIPPER_FROM_CAMERA)
 
 
 @pytest.fixture

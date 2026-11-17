@@ -20,9 +20,9 @@ jaws, drawn only (not collided with yet: the contact pads are the next step). On
 jaw tips, so with them the jaws' meshes (drawn and collided with) are cut off at the fingers' base. Placed from the
 calibration: the fixed finger's tip on the pinch point, tip to base back along the gripper (the pinch -z), its
 straight face toward the moving jaw (the pinch -x), its depth across the hinge toward the wrist camera's side; the
-moving finger the same part turned half a turn about the gripper's axis, the tips meeting with the jaws closed, and turned on its jaw about its
-tip by the arm's `GripperMap.finger_mount_deg`, and the fixed one about its tip by `fixed_finger_mount_deg`
-(`calibration.gripper_sweep` fits both).
+moving finger the same part turned half a turn about the gripper's axis, the tips meeting with the jaws closed (the
+design's finger frames, `merge_urdf.FINGER_AXES`), each turned about its tip by its calibrated mount
+(`XleRobotModel.finger_pose`; `calibration.gripper_sweep` fits both).
 Against ruler2's frames both fingers sat on the real ones (within ~10 px; the gripper closed and ~55 deg open).
 
 The moving jaw: MuJoCo's gripper joint is the opening from where the tips meet (`GripperMap.opening_deg`), taking
@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from lerobot.felix_jr.calibration.merge_urdf import FINGER_AXES
 from lerobot.felix_jr.calibration.xle_robot_model import WristCamera, XleRobotModel, pinch_frame
 from lerobot.utils.import_utils import _mujoco_available, require_package
 
@@ -84,10 +85,8 @@ FINGER_TIP_FAR_MM = (626.8879, 201.2773, 11.115)  # and on the other side (the t
 FINGER_BASE_MM = 694.1  # its base's x: the SO-101's jaws are cut off ahead of it
 # the SO-101's meshes that hold its jaw tips, by body (the fixed jaw is part of the gripper's frame)
 JAW_MESHES = {"gripper": "wrist_roll_follower_so101_v1", "moving_jaw_so101_v1": "moving_jaw_so101_v1"}
-# its axes in the pinch frame: the fixed finger's x to -z (back along the gripper), y to -x (toward the moving jaw),
-# z to +y (across the hinge); the moving one turned half a turn about the gripper's axis
-FINGER_FIXED_AXES = np.array([[0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0]])
-FINGER_MOVING_AXES = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, -1.0], [-1.0, 0.0, 0.0]])
+# its axes in the pinch frame, the design's (`merge_urdf.FINGER_AXES`)
+FINGER_FIXED_AXES, FINGER_MOVING_AXES = FINGER_AXES["fixed"], FINGER_AXES["moving"]
 # the moving finger's tip on the wrist camera's side (its flat side's corner), from the pinch point with the jaws closed,
 # in the pinch frame: 11 mm across the hinge and, the tip's edge leaning, 1.1 mm back (before its mount's turn)
 FINGER_MOVING_WRIST_TIP_M = (
@@ -124,11 +123,10 @@ def _camera(
     return camera
 
 
-def _finger_pose(axes: np.ndarray, tip_mm: tuple[float, float, float]) -> np.ndarray:
-    """pinch_from_finger (4x4, the STL in meters): `axes` the STL's axes in the pinch frame, its point `tip_mm` on the pinch."""
-    pose = np.eye(4)
-    pose[:3, :3] = axes
-    pose[:3, 3] = -axes @ (np.asarray(tip_mm) / 1000.0)
+def _finger_pose(tip_frame: np.ndarray, tip_mm: tuple[float, float, float]) -> np.ndarray:
+    """pinch_from_finger (4x4, the STL in meters): the STL's point `tip_mm` at `tip_frame`'s origin, in its axes."""
+    pose = np.array(tip_frame, dtype=float)
+    pose[:3, 3] = tip_frame[:3, 3] - tip_frame[:3, :3] @ (np.asarray(tip_mm) / 1000.0)
     return pose
 
 
@@ -174,30 +172,20 @@ def _add_fingers(spec: "mujoco.MjSpec", model: XleRobotModel, arm: str, q: np.nd
         raise FileNotFoundError(f"{stl} is a git LFS pointer, not the mesh: run `git lfs pull`")
     spec.add_mesh(name="finger", file=str(Path(stl).resolve()), scale=[0.001] * 3)
     pinch = model.frame_pose(pinch_frame(arm), q)
-    # each finger's mount: turned about its tip (the pinch point, the jaws closed) about the hinge's axis
-    gripper_map = model.gripper_maps.get(arm)
-
-    def mount(deg: float) -> np.ndarray:
-        turn = np.eye(4)
-        if deg:
-            turn[:3, :3] = model.moving_jaw(arm, deg)[:3, :3]
-        return turn
-
-    fixed_deg = gripper_map.fixed_finger_mount_deg if gripper_map is not None else 0.0
-    moving_deg = gripper_map.finger_mount_deg if gripper_map is not None else 0.0
+    # each finger at its frame, turned about its tip by its mount (the jaws closed)
     # the tip on the head's side goes on the pinch point: the moving finger is turned over, its other side there
     for body, link, name, placed in (
         (
             "gripper",
             "gripper_link",
             FINGER_FIXED,
-            mount(fixed_deg) @ _finger_pose(FINGER_FIXED_AXES, FINGER_TIP_MM),
+            _finger_pose(model.finger_pose(arm, "fixed"), FINGER_TIP_MM),
         ),
         (
             "moving_jaw_so101_v1",
             "moving_jaw_so101_v1_link",
             FINGER_MOVING,
-            mount(moving_deg) @ _finger_pose(FINGER_MOVING_AXES, FINGER_TIP_FAR_MM),
+            _finger_pose(model.finger_pose(arm, "moving"), FINGER_TIP_FAR_MM),
         ),
     ):
         body_pose = model.frame_pose(f"{arm}_{link}", q)
@@ -246,11 +234,11 @@ def arm_spec(
     pos, quat = _pos_quat(np.linalg.inv(poses["gripper"]) @ model.frame_pose(pinch_frame(arm), q))
     gripper.add_site(name=PINCH, pos=pos, quat=quat, size=[0.003, 0, 0], rgba=[1, 0, 1, 1], group=4)
     camera: WristCamera | None = model.wrist_cameras.get(arm)
-    if camera is not None and camera.gripper_from_camera is not None:
+    if camera is not None:
         _camera(
             gripper,
             WRIST_CAMERA,
-            np.array(camera.gripper_from_camera),
+            model.gripper_from_camera(arm),
             camera.width,
             camera.height,
             camera.fx,
