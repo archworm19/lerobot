@@ -305,8 +305,8 @@ def main() -> None:
             camera = model.arm_calibration.get(args.arm)
             if camera is not None and camera != record:
                 raise SystemExit(
-                    f"the {args.arm} arm was recalibrated since {args.start_from}'s camera calibration: recalibrate "
-                    "the camera first (docs/README.md section 6)"
+                    f"the {args.arm} arm was recalibrated since {args.start_from}'s camera calibration: run a new "
+                    "joint session first (docs/README.md section 7)"
                 )
             if old is not None and old.calibration != record["gripper"]:
                 print(f"the {args.arm} arm was recalibrated since its gripper map was measured: replacing it")

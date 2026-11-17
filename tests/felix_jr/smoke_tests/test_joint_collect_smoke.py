@@ -111,16 +111,26 @@ def setup(tmp_path):
     server.close()
 
 
-@pytest.mark.parametrize("measured_map", [True, False], ids=["measured map", "no map"])
-def test_a_session_collects_sightings_and_clicks_and_fits(setup, measured_map):
-    """Also from a start with no gripper map (`measured_map` False): the session takes the servo's
-    (`GripperMap.from_servo`) and the fit puts where the tips meet where the truth has them."""
+@pytest.mark.parametrize("gripper_map", ["measured", "none", "stale"])
+def test_a_session_collects_sightings_and_clicks_and_fits(setup, gripper_map):
+    """From a start whose gripper map was measured under the robot's gripper calibration, from one with none, and from
+    one made under another (`lerobot-calibrate` since): the last two take the servo's (`GripperMap.from_servo`). The
+    fit puts where the tips meet where the truth has them, whichever."""
+    from dataclasses import replace
+
+    from lerobot.felix_jr.calibration.xle_robot_model import motor_record
+
     client, start, start_path, truth, true_q, tmp_path = setup
-    if not measured_map:
-        bare = XleRobotModel.load(start_path)
-        bare.gripper_maps.pop(ARM)
-        start_path = tmp_path / "start_no_map.urdf"
-        bare.save(start_path)
+    robot_gripper = motor_record(client.arm_calibration()[f"{ARM}_arm"]["gripper"])
+    variant = XleRobotModel.load(start_path)
+    if gripper_map == "measured":  # under the fake robot's gripper calibration
+        variant.gripper_maps[ARM] = replace(variant.gripper_maps[ARM], calibration=robot_gripper)
+    elif gripper_map == "none":
+        variant.gripper_maps.pop(ARM)
+    else:  # stale: as the reference has it (its homing offset not the fake's)
+        assert variant.gripper_maps[ARM].calibration != robot_gripper
+    start_path = tmp_path / f"start_{gripper_map}.urdf"
+    variant.save(start_path)
     shown = []
     out = tmp_path / "session"
     with client.session():
@@ -138,6 +148,7 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup, measured_map):
             wrist_tip="click",  # (clicked here: the fake robot's wrist frames have no fingers for a sweep to find)
         )
         assert session.phase == "place" and shown, session.message
+        assert session.model.gripper_maps[ARM].default == (gripper_map != "measured")
 
         def click_truth():
             """Click the fingertips where the true robot shows them: the wrist its own face, the head both tips on

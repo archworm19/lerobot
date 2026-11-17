@@ -683,6 +683,3 @@ The plan that follows from these (the procedure decided, the work in order): [ca
 - **Some fits crawl near the answer:** one simulated session ran 1500 steps unconverged even from the truth (cost
   within 1.5% of the best found). Each restart (`fit_staged`'s trial, then the full fit) also resets the openings and
   the joints' errors to zero.
-- `docs/README.md`'s calibration sections (6-9) still describe the click calibration (`collect`, `xle_fit`),
-  `gripper_step` and `wrist_camera` as the way to calibrate; joint_collect / joint_fit and the gripper sweep are
-  the current way.

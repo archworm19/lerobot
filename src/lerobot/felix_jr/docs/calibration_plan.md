@@ -172,9 +172,13 @@ older map's into the parameters (left -16.5 / +3.0 deg, right -18.0 / +0.5 deg, 
 
 ### 7. The run book
 
-`docs/README.md` sections 6-9 rewritten for the procedure above: the lens step, the joint session, the optional
-caliper step (marked optional, what it is still good for), the check; the old click calibration (`collect`,
-`xle_fit`) and the camera-pose step marked retired.
+**Done (2026-11-17):** `docs/README.md` sections 6-9 in the procedure's order: 6 the lenses (was 8), 7 the joint
+session (new: the sweep first and its drift check, the board placements, the two head panes, the low poses, reading
+the report, the other arm and `joint_fit` refitting both), 8 the calipers, optional (was 7), 9 the check; the click
+calibration (`collect`, `xle_fit`) and the camera-pose step marked retired. The section pointers in the code's
+messages (`check_robot`, `gripper_step`) and the other docs moved with them. Found writing it: a session started
+from a map made under another LeRobot calibration of the gripper kept it; it now takes the servo's
+(`joint_collect`), tested end to end (the collection smoke test: measured, none, stale).
 
 ## Changes, by commit
 
@@ -182,7 +186,12 @@ Newest first. Each commit that changes the calibration adds its entry here, titl
 name its own hash, so the next one fills it in. Before the plan (2026-11-16) the work is in `camera_calibration.md`
 and git's log.
 
-- **The gripper map from the servo when there is none; the calipers optional** (2026-11-17, hash in the next entry).
+- **The run book for the new procedure; a stale gripper map replaced at a session's start** (2026-11-17, hash in the
+  next entry). Item 7: `README.md` sections 6-9 in the procedure's order (the lenses, the joint session, the
+  calipers optional, the check), the section pointers in `check_robot`'s and `gripper_step`'s messages and the other
+  docs. `joint_collect`: a start's map made under another LeRobot calibration of the gripper is replaced by the
+  servo's. Tests: the collection smoke test from a measured, a missing and a stale map.
+- **`965154cb2`: The gripper map from the servo when there is none; the calipers optional** (2026-11-17).
   Item 5. `GripperMap.from_servo` and `default`, `servo_deg_per_unit` in the model; `joint_collect` takes the default
   for an arm with no map; `joint_fit`'s opening prior 6 deg for it, `default` cleared once fitted, the report saying
   so; `joint_sim --opening-off`; `gripper_step` optional. Tests: the default map and its save, its prior, the

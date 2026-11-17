@@ -26,7 +26,7 @@ the IK smoke test is built on pen1).
     ~2 cm error toward the fixed jaw put the pen just outside the grip (pen1 measured it +0.4..+1.4 cm outside the
     fixed jaw, where the plan put it 0.5 cm inside).
 
-    **Built (2026-11-04).** The gripper map (`calibration.gripper_step`, `README.md` section 7; both arms in
+    **Built (2026-11-04).** The gripper map (`calibration.gripper_step`, now optional: `README.md` section 8; both arms in
     `urdfs/xle_calib_11042026.urdf`), the moving tip (`XleRobotModel.moving_tip`, `point="moving_tip"` on every
     predicting method; not the URDF's joint angle, which is ~16 mm open at 0), checked on the robot
     (`calibration.check`, `README.md` section 9), and the harness on top of it: `width` is the object's, the jaws open until the
@@ -81,7 +81,8 @@ the IK smoke test is built on pen1).
     which arm's (by unplugging each); the server reads them (`wrist_capture`, protocol 5); `calibration.wrist_camera` fits the
     lens (a hand-held checkerboard) and the pose on the gripper (a fixed board seen from several arm poses: a
     hand-eye fit), a separate step after the click calibration; both go into `calibration.urdf`
-    (`XleRobotModel.wrist_cameras`, `WristCamera`, `wrist_camera_pose`). README section 8b.
+    (`XleRobotModel.wrist_cameras`, `WristCamera`, `wrist_camera_pose`). README section 6 (the lens; the pose step
+    retired 2026-11-16, the joint session's since).
 
     **d. In the harness (2026-11-08), tried on bowl5/bowl6:** `wrist_look`, `render_wrist` (the fingertips, the
     approach line, the closing line, the object's midline from its observed top), `plan_alignment`,

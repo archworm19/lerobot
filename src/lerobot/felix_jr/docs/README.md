@@ -49,8 +49,9 @@ The servos keep their calibration and IDs, so nothing needs recalibrating. This 
 port names, and a copy of the arm files.
 
 a. **Install.** `uv sync --locked --extra feetech` (arms, wheels and head). On the Pi add `--extra pyzmq-dep`
-   for the server (see [server_plan.md](server_plan.md)); on the computer that runs the camera calibration
-   (section 6) add `--extra felix_jr` (pinocchio, placo and scipy). A plain `uv sync` lacks `pyserial`, so the
+   for the server (see [server_plan.md](server_plan.md)); on the computer that runs the calibration
+   (sections 6-9) add `--extra felix_jr` (pinocchio, placo and scipy) and `--extra felix_jr_sim` (MuJoCo, for the
+   gripper sweep). A plain `uv sync` lacks `pyserial`, so the
    scripts would fail with `No module named 'serial'`.
 b. **Find each arm's port.** Plug in both arms' USB cables, then:
    `uv run python -m lerobot.felix_jr.setup.find_ports`
@@ -157,88 +158,19 @@ it ends; `stop` aborts and holds in place; only one motion runs at a time; while
 themselves in `client.session()`, which sends it to rest on any exit; scripts that only read open no session and
 are never moved. Details are in `server/motion.py` and the module docstring of `server/client.py`.
 
-### 6. Calibrate the camera to the arms (clicks, needs the server)
+The calibration, in order (the procedure and why: [calibration_plan.md](calibration_plan.md); the fit's design:
+[camera_calibration.md](camera_calibration.md)): **the wrist cameras' lenses** once per lens (section 6), then **a
+joint session per arm** (section 7) each time the robot needs it: a mount moved, a servo recalibrated, the head taken
+apart. The calipers (section 8) are optional. Then **the check** (section 9). Every step writes a new calibrated URDF
+(`urdfs/calib_<date>_<what>.urdf` once kept); none overwrites its `--start-from`. A robot never calibrated starts
+from the design, `urdfs/design_xlerobot_so101.urdf`, with its corrections at 0 (`XleRobotModel`).
 
-Finds the corrections to the robot's URDF (head and camera offsets, arm mounts, arm joint zeros, the pinch point
-offset) so a trajectory can be projected into the camera image. You click the pinch point of the closed gripper in
-about 30 to 60 frames per arm. The result is one file, `calibration.urdf`: a URDF any tool can load (placo,
-`RobotKinematics`, a viewer), which also carries what a refit needs. Background and how to judge the result are in
-[camera_calibration.md](camera_calibration.md).
-
-1. Server on the Pi with the arm (the left arm also carries the head): `server.server --left-port <PORT> ...`.
-   Record the head's home first, for the eyes **and the neck** (`setup.head_range`, then
-   `setup.head_range --name head_neck` with the head looking straight ahead). The servos report their position in
-   raw ticks; the home is what says which tick count means "straight ahead", and every session that is fitted
-   together must use the same one. Without a neck home the script takes wherever the neck happens to be as its
-   reference, and the circle starts off sideways.
-2. On your computer, with the workspace in front of the robot clear and the arm free to move:
-   `uv run python -m lerobot.felix_jr.calibration.collect tcp://<pi>:5555 --arm left --out-dir ~/cal_left
-   [--start-from <an earlier calibration.urdf>]`
-   A window shows the camera with a cyan circle where the model predicts the pinch point. `n` moves the arm
-   (slowly) and the head to the next view: the pinch point in the middle of the picture, seen from the side the
-   wrist camera does not block. Click where the closed fingertips meet; arrow keys nudge the head (do this now and
-   then, so the head's parameters are not confounded with the arm's); `u` undoes a click; `r` refits and prints the
-   error; `q` finishes. Each click refits the model, so the circle closes in on the pinch point. Without
-   `--start-from` the first views may miss (the head's zero angles are unknown): nudge the head until the gripper
-   shows, and click. Views keep the pinch point above `--floor-z` (default: the arm base's height), but nothing
-   checks for other collisions: clear the space and watch the arm. Ctrl+C is safe (the robot stops and goes to
-   rest).
-3. On `q` it fits everything and writes `~/cal_left/calibration.urdf` and `calibration.md`: the held-out pixel
-   error before and after, which parameters were learned, and the largest remaining errors (re-click or undo
-   those).
-4. The right arm, in the same fit as the left one, so the head and camera get one estimate:
-   `uv run python -m lerobot.felix_jr.calibration.collect tcp://<pi>:5555 --arm right --out-dir ~/cal_right
-   --start-from ~/cal_left/calibration.urdf --with ~/cal_left`
-   Its `calibration.urdf` covers both arms. To refit any set of sessions later (e.g. after more clicks):
-   `uv run python -m lerobot.felix_jr.calibration.xle_fit ~/cal_left ~/cal_right --out calibration.urdf`.
-
-An earlier calibration (`--start-from`) is only a starting point, so the first view already shows the gripper; the
-fit itself uses every session's clicks with the wide default priors, so no click counts twice. The sessions must
-share the head's servo map (the script refuses otherwise), so do not re-record the head's home between them, and
-recalibrate from scratch if the camera was remounted or the head taken apart.
-
-**The pinch point and the wrist camera.** The pinch point is only visible when the camera looks at the gripper
-from the side, and from the side *without* the wrist camera, whose board otherwise covers it. Views roll the wrist
-to show that side (`--side positive`, the default; `--side negative` if your wrist camera is on the other side).
-Rolls stay within `--max-roll` (130 degrees): keep an eye on the wrist camera's cable.
-
-`collect --resume` continues an earlier folder. Folders from the first version of `collect` (with
-`kinematic_calibration.json`) are read by `xle_fit` and `--with` as they are.
-
-### 7. Measure the gripper's opening (calipers, needs the server)
-
-Finds how far `gripper.pos` opens each arm's jaws, so plans can open the gripper to a width instead of guessing. The
-gripper is a claw (the moving jaw turns about a hinge ~8 cm behind the tips), so each gap you measure is a chord of
-the circle the tip turns on: `gap = 2 r sin(theta / 2)`, with the opening angle theta at the servo's own scale
-(degrees per unit from the gripper's calibrated range, about 1.27). The script fits where the tips meet and the
-radius r. It needs a calibrated URDF from section 6 (the model's radius is the starting point and the check).
-
-1. Server on the Pi with the arm: `server.server --right-port <PORT>` (or `--left-port`).
-2. On your computer, with calipers at hand:
-   `uv run python -m lerobot.felix_jr.calibration.gripper_step tcp://<pi>:5555 --arm right
-   --start-from <calibration.urdf> --out <new calibration.urdf>`
-   The gripper steps through `--positions` (default 10, 25, ..., 85). At each, measure the gap between the
-   fingertips, inner faces at the very tips, and type it in mm (Enter skips, q stops). A window plots the gaps
-   and the opening angles they give, with the fit, after each one, so a misread gap stands out (`--no-plot` for
-   none).
-3. It prints each measurement against the fit, where the tips meet (`gripper.pos`, about 0-1 if the arm was
-   calibrated with the jaws closed), the radius, and how far the gaps scatter around the fit, and saves the plot next
-   to `--out` (`.png`). The radius should be within a few mm of the model's distance from the pinch point to the hinge
-   (more if the calipers touch beyond the pinch point: 86.8 mm against 80.9 on the right arm); a warning means it is
-   not, or that the gaps scatter more than 2.5 mm: check where the calipers touch, and measure again.
-4. `--out` is the `--start-from` calibration plus the arm's map; `--start-from` is never overwritten. Do the other arm
-   with `--start-from` the file just written. Redo it after `lerobot-calibrate` on that arm: the map is tied to the
-   gripper's LeRobot calibration (as the robot reports it), and the file records which one. The script refuses a
-   `--start-from` made under an older calibration of the arm (recalibrate the camera first). `--refit` refits the
-   stored measurements with no robot. A camera calibration started from this file (`collect` /
-   `xle_fit --start-from`) keeps the maps.
-
-### 8. Calibrate the wrist cameras' lenses (a ChArUco board, needs the server)
+### 6. Calibrate the wrist cameras' lenses (a ChArUco board, needs the server)
 
 The wrist cameras (plain USB / UVC boards, one per arm, plugged into the Pi) are read by the server. Their lens
 (intrinsics) goes into the calibration here, once per lens: redo it when a lens is refocused or a camera replaced, not
-when a mount moves. Their pose on the gripper is the joint session's (`calibration.joint_collect`, which ties it to
-the head's view of the fingers), a correction to the design's (`design_xlerobot_so101.urdf`): this step leaves it as
+when a mount moves. Their pose on the gripper is the joint session's (section 7, which ties it to the head's view of the
+fingers), a correction to the design's (`design_xlerobot_so101.urdf`): this step leaves it as
 it was. (The camera-pose step, and the checkerboard, were
 retired on 2026-11-16: `calibration_plan.md`.)
 
@@ -286,16 +218,117 @@ retired on 2026-11-16: `calibration_plan.md`.)
    <urdf> --out-dir <folder>` fits them again with no robot. Views recorded with the checkerboard (before 2026-11-16)
    are no longer read.
 
+### 7. The joint session: the head, an arm and its wrist camera (a ChArUco board, needs the server)
+
+Finds the corrections to the design (the head's zeros and offsets and its camera's mount, the arm's mount, its joints'
+zeros and origins, the pinch point, the gripper's hinge and where its jaws close, the wrist camera's pose on the
+gripper) from one session per arm: the board seen by both cameras, both fingertips clicked in the head's picture, and
+the fingertips found in the wrist camera's by a gripper sweep. About 20 minutes an arm. It needs the arm's wrist
+camera lens in `--start-from` (section 6); a gripper map (section 8) is optional: without one the session starts from
+the servo's and fits it.
+
+1. **Server** on the Pi with the arm and the head (the left arm carries the head):
+   `server.server --left-port <PORT> --right-port <PORT>`. The head's home recorded (section 4, the neck's too).
+2. **On your computer**, the table in front of the arm clear, the board at hand (`boards.PRINTED_BOARD`, flat and
+   stiff, as in section 6):
+   `uv run --extra felix_jr --extra felix_jr_sim --extra pyzmq-dep python -m lerobot.felix_jr.calibration.joint_collect
+   tcp://<pi>:5555 --arm right --out-dir <a scratch folder> --start-from <calibration.urdf>`
+   (`--placements 2 --arm-views 10 --low-views 10` by default; `--max-vel` the arm's speed, 20 deg/s).
+3. **The gripper sweep, first**, in the terminal, the board not yet down: it prints the sim's checks of the sweep
+   pose (how near the table the gripper comes), asks (Enter to start, `q` to skip), moves the arm over the table and
+   shows a live preview of the fingers found (Enter sweeps, `q` stops), then opens the jaws in steps. Then the **drift
+   check**: the fixed fingertip it found against where `--start-from` has it.
+   - Within 5 px: on without asking.
+   - 5 to 30 px: **the wrist camera moved on its mount** since that calibration (`hardware_risks.md`). If the mount is
+     loose, tighten it and start again (it will move again during the session); `y` goes on.
+   - Past 30 px, or no tips found: the sweep misread the fingers (its frames are in `wrist_tip_sweep/`); its tips are
+     left out and `y` goes on with the head's clicks only for them. Clear the table and try again if you can.
+4. **Place the board.** The window opens; the arms rest and the head looks where the board should go: lay it flat on
+   the drawn outline (roughly). Its corners show green where the head finds them; arrows turn the head if it is cut
+   off. `n` when it is found whole: the head looks at it from a few directions, then **plans the arm views (about 30
+   s: the status line says PLANNING; wait, keys pressed meanwhile are dropped)**.
+5. **Arm views** (`n` each: the arm moves slowly, watch it). The jaws open to `gripper.pos` 20, 35, 50 in turn. The
+   window has three panes, the pictures of one moment:
+   - **head: FIXED fingertip** (magenta): click the fixed finger's tip;
+   - **head: MOVING fingertip** (yellow): click the moving finger's tip (declined with the jaws closed);
+   - **wrist camera** (cyan): no clicks (the sweep has its tips).
+
+   Each head pane circles where the model has its tip and names the face to click on (the pane's title): at the arm
+   views the head looks down on the fingers' wrist-camera side, at the low poses it sees the pinch face (the side
+   away from the wrist camera). Click the tip on that face, where you see it: the picture over the circle. Skip a tip
+   you cannot see (hidden, out of the picture, or the status line's NEARLY EDGE-ON). `u` undoes the last click.
+6. **The next placement** (`--placements`, 2): the arm rests, lay the board on the new outline, as in 4-5.
+7. **Low poses** (`n` each): the gripper low over the table as for a grasp, the head on the fingertips; click both
+   again. Leave the board where it is.
+8. **`q`** fits and writes `calibration.urdf` and `calibration.md` in the folder (a minute or a few). Read the report:
+   - **the residuals**: the boards ~0.1-0.5 px, the clicks ~1-2 px;
+   - **mis-clicks**: clicks more than 30 px from the fitted tip are named, with pictures (`misclicks/`), and left
+     out;
+   - **the held-out moments**: the head's and the arm's chains on where the board is, at moments the fit did not
+     see (a few mm);
+   - **what moved**: the wrist camera on its gripper, the gripper's opening (and whether its map was the servo's
+     default), the estimates that moved most;
+   - **what the fit determined**: unknowns it could not tell apart (their priors settle them) and the least
+     determined directions. A **failed fit** (a kind of residual far off at its median) is flagged at the top:
+     do not use it; look at the mis-clicks and the board sightings, or collect again.
+9. **The other arm**: its own session, `--start-from` the first's `calibration.urdf`; then both fitted together, so
+   the head gets one estimate:
+   `uv run --extra felix_jr python -m lerobot.felix_jr.calibration.joint_fit <left folder> <right folder>
+   --start-from <the first's calibration.urdf> --out <calibration.urdf>` (`--head-axes` also fits the head axes'
+   tilts). The same refits any sessions later with no robot.
+
+`--resume` (same `--out-dir`) continues a session: its clicks and sightings are kept, a sweep it already has is not
+redone. `--wrist-tip click` clicks the wrist camera's fingertip by eye instead of the sweep (~10 px worse);
+`--openings` alone keeps the jaws closed. The script runs in a client session: Ctrl+C or a crash sends the robot to
+rest.
+
+**Retired** (2026-11-16): the click calibration (`calibration.collect`, `xle_fit`: the closed pinch point clicked
+in 30-60 frames per arm, no board) and the wrist camera's separate pose step. Older calibrations still load (their
+wrist cameras' poses and fingers' mounts read as corrections to the design).
+
+### 8. Optional: measure the gripper's opening with calipers (needs the server)
+
+**Optional since 2026-11-17**: the joint session (section 7) fits where the jaws close from the moving fingertip's
+clicks, from the servo's map when there is none. This is still the one measurement of the jaws' width in
+millimeters: a check of that fit, and the ground truth for grip work. Run it after a joint session, `--start-from`
+its calibration.
+
+Finds how far `gripper.pos` opens each arm's jaws, so plans can open the gripper to a width instead of guessing. The
+gripper is a claw (the moving jaw turns about a hinge ~8 cm behind the tips), so each gap you measure is a chord of
+the circle the tip turns on: `gap = 2 r sin(theta / 2)`, with the opening angle theta at the servo's own scale
+(degrees per unit from the gripper's calibrated range, about 1.27). The script fits where the tips meet and the
+radius r. It needs a calibrated URDF (section 7: the model's radius is the starting point and the check).
+
+1. Server on the Pi with the arm: `server.server --right-port <PORT>` (or `--left-port`).
+2. On your computer, with calipers at hand:
+   `uv run python -m lerobot.felix_jr.calibration.gripper_step tcp://<pi>:5555 --arm right
+   --start-from <calibration.urdf> --out <new calibration.urdf>`
+   The gripper steps through `--positions` (default 10, 25, ..., 85). At each, measure the gap between the
+   fingertips, inner faces at the very tips, and type it in mm (Enter skips, q stops). A window plots the gaps
+   and the opening angles they give, with the fit, after each one, so a misread gap stands out (`--no-plot` for
+   none).
+3. It prints each measurement against the fit, where the tips meet (`gripper.pos`, about 0-1 if the arm was
+   calibrated with the jaws closed), the radius, and how far the gaps scatter around the fit, and saves the plot next
+   to `--out` (`.png`). The radius should be within a few mm of the model's distance from the pinch point to the hinge
+   (more if the calipers touch beyond the pinch point: 86.8 mm against 80.9 on the right arm); a warning means it is
+   not, or that the gaps scatter more than 2.5 mm: check where the calipers touch, and measure again.
+4. `--out` is the `--start-from` calibration plus the arm's map; `--start-from` is never overwritten. Do the other arm
+   with `--start-from` the file just written. Redo it after `lerobot-calibrate` on that arm: the map is tied to the
+   gripper's LeRobot calibration (as the robot reports it), and the file records which one. The script refuses a
+   `--start-from` made under an older calibration of the arm (a new joint session first). `--refit` refits the
+   stored measurements with no robot. A joint session started from this file keeps the map as its start (and fits
+   where the jaws close again).
+
 ### 9. Check the calibration on the robot (no clicks, needs the server)
 
 Draws where the calibrated URDF puts both fingertips over the head camera, view after view, with the gripper at
 different openings: the pinch point (cyan, placed by the camera calibration) and the moving jaw's tip (magenta,
-placed by the gripper map from section 7 as well). When the URDF has the arm's wrist camera (section 8, and its pose from a joint
-session) and the server streams it, the wrist camera's picture is shown beside the head camera's with the same two circles, placed
+placed by the gripper map as well). When the URDF has the arm's wrist camera (section 6, and its pose from a joint
+session, section 7) and the server streams it, the wrist camera's picture is shown beside the head camera's with the same two circles, placed
 by its lens and its pose on the gripper. It needs a URDF with the arm's gripper map, made for this robot (the same
 check as the harness's: a recalibrated arm or flipped head directions are refused).
 
-1. Server on the Pi with the arm (and the head): as for section 6.
+1. Server on the Pi with the arm (and the head): as for section 7.
 2. On your computer, with the workspace clear:
    `uv run python -m lerobot.felix_jr.calibration.check tcp://<pi>:5555 --arm right --model <calibration.urdf>
    --out-dir <a scratch folder>`
@@ -303,9 +336,10 @@ check as the harness's: a recalibrated arm or flipped head directions are refuse
    (default 0, 15, 30, 50, 70); `[` / `]` close / open it by `--gripper-step` at the same view; the arrow keys turn
    the head; `q` quits and sends the robot to rest.
 3. Read the result: both circles should sit on the fingertips everywhere. An offset of the pinch point that changes
-   with the pose or the head is the camera calibration (recalibrate, section 6); a pinch point on target with the
-   moving tip off, growing with the opening, is the gripper map (re-measure, section 7). In the wrist picture the
-   fingertips stay in about the same place: circles off them there are the wrist camera's (its lens, section 8, or its
+   with the pose or the head is the calibration (a new joint session, section 7); a pinch point on target with the
+   moving tip off, growing with the opening, is the gripper map (the joint session fits it from the moving tip's
+   clicks; the calipers, section 8, measure it). In the wrist picture the
+   fingertips stay in about the same place: circles off them there are the wrist camera's (its lens, section 6, or its
    pose, the joint session), whatever the head camera shows. With `--out-dir`, every frame is saved as drawn and raw (the wrist picture too),
    with `frames.json` (the measured state and both predictions per frame, and their wrist pixels).
 
@@ -331,11 +365,12 @@ check as the harness's: a recalibrated arm or flipped head directions are refuse
 - `RobotMismatchError: the calibration does not match the robot` when the harness connects: the calibrated URDF
   was made under settings that have changed on the robot since. The message lists each mismatch and its fix:
   - `head_<servo>: sign`: the head's directions changed (`setup.head` redone), so every head angle is inverted;
-    recalibrate the camera (section 6). A re-recorded head home is not a mismatch: it only changes where the head
+    a new joint session (section 7). A re-recorded head home is not a mismatch: it only changes where the head
     rests.
   - `<arm> arm: <motor> recalibrated on the robot`: the arm was recalibrated with `lerobot-calibrate`, so its joint
-    angles mean something else than when you clicked; recalibrate the camera (section 6).
-  - `<arm> gripper map: gripper recalibrated`: rerun `calibration.gripper_step` (section 7).
+    angles mean something else than when you clicked; a new joint session (section 7).
+  - `<arm> gripper map: gripper recalibrated`: a new joint session (section 7: it starts from the servo's map and fits
+    it), or the calipers (section 8).
 
   Calibrations made before the URDF kept a snapshot of the arms' LeRobot calibration cannot be checked for the arms
   (a warning is logged); recalibrating the camera adds one. Older servers (protocol 3) lack the `arm_calibration`

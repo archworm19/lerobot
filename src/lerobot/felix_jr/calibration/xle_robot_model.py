@@ -1173,7 +1173,7 @@ class XleRobotModel:
             if servo in head and head[servo]["sign"] != self.head_signs[servo]:
                 problems.append(
                     f"{servo}: sign {head[servo]['sign']} on the robot, {self.head_signs[servo]} in the calibration "
-                    "(setup.head redone? recalibrate the camera, docs/README.md section 6)"
+                    "(setup.head redone? a new joint session, docs/README.md section 7)"
                 )
         robot = {arm_id.removesuffix("_arm"): arm_record(m) for arm_id, m in client.arm_calibration().items()}
         for arm, motors in robot.items():
@@ -1182,7 +1182,7 @@ class XleRobotModel:
                     f"{arm} arm",
                     self.arm_calibration[arm],
                     motors,
-                    "recalibrate the camera, docs/README.md section 6",
+                    "a new joint session, docs/README.md section 7",
                 )
             elif any(p.arm == arm and v for p, v in zip(self.parameters, self._estimates, strict=True)):
                 log.warning(
@@ -1193,7 +1193,7 @@ class XleRobotModel:
                     f"{arm} gripper map",
                     {"gripper": self.gripper_maps[arm].calibration},
                     motors,
-                    "rerun calibration.gripper_step, docs/README.md section 7",
+                    "a new joint session (it takes the servo's map), docs/README.md section 7",
                 )
         if problems:
             raise RobotMismatchError("the calibration does not match the robot:\n  " + "\n  ".join(problems))
