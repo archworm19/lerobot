@@ -580,7 +580,7 @@ SCENARIOS = (
 
 # the merged procedure (`docs/camera_calibration.md`, "The fingers in the joint session"): 2 placements, 10 arm + 6
 # head views each, 10 low poses
-OPEN = (20.0, 35.0, 50.0)  # `gripper.pos` the jaws take in turn at the views
+OPEN = jv.VIEW_OPENINGS  # `gripper.pos` the jaws take in turn at the views (the session's)
 FINGER_SCENARIOS = (
     Scenario(
         2, 10, 6, True, "today: closed, wrist tips from an end sweep", 10, wrist_auto=True, end_sweep=True

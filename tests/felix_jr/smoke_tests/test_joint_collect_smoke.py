@@ -165,6 +165,9 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup):
     saved = load_session(out)
     assert len(saved.sightings) == len(session.session.sightings) and len(saved.clicks) >= 6
     assert all((out / s.image).is_file() for s in saved.sightings)
+    # the jaws opened at the views in turn (the start has the arm's gripper map), the opening read with each look
+    openings = {round(c.look.arms[ARM]["gripper.pos"]) for c in saved.clicks}
+    assert openings <= {round(pos) for pos in jv.VIEW_OPENINGS} and len(openings) >= 2, openings
     calibrated = XleRobotModel.load(path)
     assert (out / "calibration.md").is_file()
     # nearer the truth: the wrist camera's pose relative to the pinch frame, at a pose like the views'

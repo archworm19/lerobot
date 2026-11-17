@@ -118,10 +118,16 @@ older map's into the parameters (left -16.5 / +3.0 deg, right -18.0 / +0.5 deg, 
 ### 4. The joint session's new flow
 
 - The sweep first (item 2.1 above), its drift check against the start's fixed-tip pixel.
-- The jaws open at the arm views and low poses (`gripper.pos` 20 / 35 / 50 in turn).
+- ~~The jaws open at the arm views and low poses (`gripper.pos` 20 / 35 / 50 in turn).~~ **Done (2026-11-17):**
+  `joint_views.VIEW_OPENINGS` (`joint_sim.OPEN` is it), `with_openings` (closed without the arm's gripper map, with a
+  message; `joint_collect --openings`, none: closed); both tips kept 2 cm over the table at every opening
+  (`tips_clear`, in `low_poses` and `clear_of_table`: the moving tip turns down past the fixed one; no low pose lost,
+  40 of 40 planned on either arm). Until the panes below, the head clicks the fixed tip only.
 - The head's panes: "fixed tip" and "moving tip" (`TipClick` faces `pinch` / `moving_pinch`; the face from the model:
   `joint_views.head_face_angle`), replacing today's two face panes; the wrist pane shows the live picture only.
-- The low-pose planner drops poses with the fingers edge-on to the head (`EDGE_ON_DEG`).
+- ~~The low-pose planner drops poses with the fingers edge-on to the head (`EDGE_ON_DEG`).~~ **Already so:**
+  `low_poses` keeps a roll only within `HEAD_FACE_MAX_DEG` (75, where `EDGE_ON_DEG` starts); now a test says so
+  (`test_joint_views`). The arm views do not (the board's views come first; their head clicks are optional).
 - Rehearsed against the fake robot (`server.server --fake`) and the smoke test (`test_joint_collect_smoke`).
 
 ### 5. The gripper map without the calipers
@@ -150,7 +156,12 @@ Newest first. Each commit that changes the calibration adds its entry here, titl
 name its own hash, so the next one fills it in. Before the plan (2026-11-16) the work is in `camera_calibration.md`
 and git's log.
 
-- **The wrist cameras and the fingers as corrections to design frames** (2026-11-17, hash in the next entry). Items 2
+- **The jaws open at the joint session's views, both tips clear of the table** (2026-11-17, hash in the next entry).
+  Item 4, its first two points. `joint_views`: `VIEW_OPENINGS`, `with_openings`, `tips_clear` (in `low_poses` and
+  `clear_of_table`); `joint_collect --openings`; `joint_sim.OPEN` the same openings. Tests: `test_joint_views` (new),
+  the collection smoke test with the jaws opening.
+- **`26afef53c`: The wrist cameras and the fingers as corrections to design frames** (2026-11-17; tagged
+  `felix-calib-design-frames-20261117`). Items 2
   and 3. `merge_urdf`: per arm, the wrist camera's design frame (`<arm>_wrist_camera_optical`, TheRobotStudio's mount
   and module) and the fingers' (`<arm>_fixed_finger`, `<arm>_moving_finger`) in `design_xlerobot_so101.urdf`.
   `XleRobotModel`: the camera's pose six parameters on its frame (`wrist_camera_parameters`, in the defaults: 35 per

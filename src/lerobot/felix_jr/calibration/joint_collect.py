@@ -3,7 +3,7 @@
   uv run --extra felix_jr --extra felix_jr_sim --extra pyzmq-dep python -m lerobot.felix_jr.calibration.joint_collect \
       tcp://<pi>:5555 --arm right --out-dir <scratch folder> --start-from <calibration.urdf>
       [--board charuco:9x7:0.025:0.018:DICT_4X4_50] [--placements 2] [--arm-views 10] [--head-views 6] [--low-views 10]
-      [--max-vel 20] [--wrist-tip sweep|click] [--resume]
+      [--max-vel 20] [--wrist-tip sweep|click] [--openings 20 35 50] [--resume]
 
 `docs/camera_calibration.md`, "The rework". Start the server on the Pi with the arm and the head. `--start-from` must
 have the arm's wrist camera's lens (`calibration.wrist_camera`; its pose on the gripper starts at the design's, or a
@@ -19,6 +19,12 @@ face's tip as the model predicts it circled. A click is on the face of the pane 
 2. **Arm views.** Each `n` moves the arm (slowly: watch it) to the next planned view of the board, the head looking at
    the board: a moment both cameras see it at ties the head to the arm. Click the fixed fingertip in the wrist
    camera's picture (the face toward it), and in the head's if it shows (the face the head sees).
+
+**The jaws open** at the arm views and the low poses, `gripper.pos` 20, 35, 50 in turn (`--openings`;
+`joint_views.VIEW_OPENINGS`; `--openings` alone keeps them closed): the moving tip's arc about the hinge is what fixes the
+hinge and the opening's offset (`joint_sim`). Both tips are kept 2 cm over the table at every opening
+(`joint_views.tips_clear`). They open only with the arm's gripper map in `--start-from` (`calibration.gripper_step`):
+without, closed. Click the **fixed** fingertip, as before (the moving tip's panes: `docs/calibration_plan.md`, item 4).
 
 Then **low poses**: each `n` moves the gripper low over the table, as for a grasp, and the head looks at the fingertip:
 click it in both pictures. The head's clicks matter: a wrist click fixes only the direction from its camera to the
@@ -214,6 +220,7 @@ class JointCollect:
         resume: bool = False,
         seed: int = 0,
         wrist_tip: str = "sweep",
+        openings: tuple[float, ...] = jv.VIEW_OPENINGS,
     ):
         """Load the start, check it against the robot, and send the arms to rest for the first placement."""
         self.client, self.arm, self.arm_id, self.out_dir, self.show = client, arm, f"{arm}_arm", out_dir, show
@@ -224,6 +231,7 @@ class JointCollect:
         if wrist_tip not in WRIST_TIPS:
             raise ValueError(f"wrist_tip: one of {WRIST_TIPS}, not {wrist_tip!r}")
         self.wrist_tip = wrist_tip
+        self.openings = tuple(openings)
         (out_dir / "images").mkdir(parents=True, exist_ok=True)
         self.model = XleRobotModel.load(start_from)
         head = client.head_state()
@@ -236,6 +244,10 @@ class JointCollect:
         if camera is None:
             raise ValueError(
                 f"{start_from} has no {arm} wrist camera: run calibration.wrist_camera's lens step first"
+            )
+        if self.openings and arm not in self.model.gripper_maps:
+            print(
+                f"{start_from} has no {arm} gripper map (calibration.gripper_step): the jaws stay closed at the views"
             )
         capture = client.capture()
         self.model.intrinsics = {k: capture.calibration["color_intrinsics"][k] for k in INTRINSICS_KEYS}
@@ -297,7 +309,8 @@ class JointCollect:
         return move_head_to(self.client, ticks)
 
     def _move_arm(self, pose: dict[str, float]) -> bool:
-        status = self.client.move_joints({self.arm_id: {**pose, "gripper.pos": 0.0}}, max_vel=self.max_vel)
+        pose = {"gripper.pos": 0.0, **pose}  # (the jaws as planned: `joint_views.with_openings`)
+        status = self.client.move_joints({self.arm_id: pose}, max_vel=self.max_vel)
         if status["state"] != "done":
             self.message = f"the arm stopped ({status['state']}: {status['reason']}); n tries the next view"
             return False
@@ -445,15 +458,20 @@ class JointCollect:
             self._capture(self._aim(target))
             seen += self._sight(HEAD) is not None
         region = jv.low_poses(self.model, self.arm, self.rest, 40, self.table_z, self.rng)
-        self.views = jv.arm_views(
+        self.views = jv.with_openings(
             self.model,
             self.arm,
-            self.rest,
-            points,
-            self.n_arm_views,
-            self.rng,
-            min_fraction=self.board.min_view_fraction,
-            region=region,
+            jv.arm_views(
+                self.model,
+                self.arm,
+                self.rest,
+                points,
+                self.n_arm_views,
+                self.rng,
+                min_fraction=self.board.min_view_fraction,
+                region=region,
+            ),
+            self.openings,
         )
         self.view_index = 0
         self.phase = "arm"
@@ -487,7 +505,12 @@ class JointCollect:
         self.render()
 
     def _start_low(self) -> None:
-        self.views = jv.low_poses(self.model, self.arm, self.rest, self.n_low_views, self.table_z, self.rng)
+        self.views = jv.with_openings(
+            self.model,
+            self.arm,
+            jv.low_poses(self.model, self.arm, self.rest, self.n_low_views, self.table_z, self.rng),
+            self.openings,
+        )
         self.view_index = 0
         self.phase = "low"
         self.message = f"{len(self.views)} poses low over the table: n moves the arm there (watch it)"
@@ -743,6 +766,13 @@ def main() -> None:
         help="the wrist camera's fingertip: measured by a gripper sweep after q (default), or clicked",
     )
     parser.add_argument(
+        "--openings",
+        type=float,
+        nargs="*",
+        default=list(jv.VIEW_OPENINGS),
+        help="the jaws' gripper.pos at the views, in turn (default 20 35 50; none: closed)",
+    )
+    parser.add_argument(
         "--head-axes",
         action="store_true",
         help="fit the head's pan and tilt axes' tilts too (4 more parameters)",
@@ -775,6 +805,7 @@ def main() -> None:
             args.max_vel,
             resume=args.resume,
             wrist_tip=args.wrist_tip,
+            openings=tuple(args.openings),
         )
         cv2.setMouseCallback(window, on_mouse)
         try:

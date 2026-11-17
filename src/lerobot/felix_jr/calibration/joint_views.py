@@ -81,6 +81,12 @@ PLACEMENT_AHEAD_M = (
     0.26  # the board's center ahead of the arm's base: where grasps are (35 cm before 2026-11-11)
 )
 PLACEMENT_SIDES_M = (-0.24, -0.06)  # ... and toward the robot's middle (negative y for the right arm)
+# the jaws at the arm views and low poses, `gripper.pos` in turn (`with_openings`): the moving tip's arc about the
+# hinge, clicked by the head, fixes the hinge and the opening's offset (`joint_sim`: the hinge 1.7 -> 0.8 mm)
+VIEW_OPENINGS = (20.0, 35.0, 50.0)
+TIP_CLEARANCE_M = (
+    0.02  # a pose keeps both fingertips this far above the table (the moving one at its opening)
+)
 HEAD_FACE_MAX_DEG = 75.0  # a low pose shows the head the fingertip's face it clicks within this (90: edge on)
 LOW_TILT_DEG = (
     45.0,
@@ -273,9 +279,39 @@ def camera_clear_of_arm(model: XleRobotModel, arm: str, pose: Mapping[str, float
 
 
 def clear_of_table(model: XleRobotModel, arm: str, pose: Mapping[str, float], table_z: float) -> bool:
-    """Whether every link of the arm (`ARM_LINKS`, their origins) is `LINK_CLEARANCE_M` above the table."""
+    """Whether the arm is clear of the table: its links and its fingertips.
+
+    Every link (`ARM_LINKS`, their origins) `LINK_CLEARANCE_M` above it, the fingertips `TIP_CLEARANCE_M` (`tips_clear`).
+    """
     q = model.joint_vector({arm: dict(pose)})
-    return all(model.frame_pose(f"{arm}_{link}", q)[2, 3] > table_z + LINK_CLEARANCE_M for link in ARM_LINKS)
+    return all(
+        model.frame_pose(f"{arm}_{link}", q)[2, 3] > table_z + LINK_CLEARANCE_M for link in ARM_LINKS
+    ) and tips_clear(model, arm, pose, table_z)
+
+
+def tips_clear(model: XleRobotModel, arm: str, pose: Mapping[str, float], table_z: float) -> bool:
+    """Whether both fingertips are `TIP_CLEARANCE_M` above the table at `pose`, the jaws at any of `VIEW_OPENINGS`.
+
+    The moving tip turns down past the fixed one as the jaws open, for a gripper tilted down; without the arm's
+    gripper map (the openings unknown) only the fixed tip is checked, the jaws then closed (`with_openings`).
+    """
+    q = model.joint_vector({arm: dict(pose)})
+    tips = [model.pinch_point(arm, q)]
+    if arm in model.gripper_maps:
+        tips += [model.moving_tip(arm, q, model.opening_deg(arm, pos)) for pos in VIEW_OPENINGS]
+    return all(tip[2] > table_z + TIP_CLEARANCE_M for tip in tips)
+
+
+def with_openings(
+    model: XleRobotModel,
+    arm: str,
+    poses: Sequence[Mapping[str, float]],
+    openings: Sequence[float] = VIEW_OPENINGS,
+) -> list[dict[str, float]]:
+    """`poses` with the jaws at `openings` (`gripper.pos`) in turn; closed (0) without the arm's gripper map or openings."""
+    if not openings or arm not in model.gripper_maps:
+        return [{**pose, "gripper.pos": 0.0} for pose in poses]
+    return [{**pose, "gripper.pos": float(openings[i % len(openings)])} for i, pose in enumerate(poses)]
 
 
 def on_a_bound(
@@ -457,8 +493,9 @@ def low_poses(
     """Up to `n` poses with the pinch point low over the table ahead of the arm, the gripper tilted down, as a grasp's.
 
     The wrist rolled to show the head the fingertip's face it clicks best (`head_face_angle`, within
-    `HEAD_FACE_MAX_DEG`; the roll in 15 deg steps): tilted down, that face looks sideways unless the wrist turns it
-    up. A pose no roll shows it from, or that puts the wrist camera against the arm (`camera_clear_of_arm`) or a joint on
+    `HEAD_FACE_MAX_DEG`, short of edge-on; the roll in 15 deg steps): tilted down, that face looks sideways unless the
+    wrist turns it up. A pose no roll shows it from, a fingertip near the table (`tips_clear`, the jaws at any of
+    `VIEW_OPENINGS`), or that puts the wrist camera against the arm (`camera_clear_of_arm`) or a joint on
     a bound (`LOW_JOINT_LIMITS_DEG`), is dropped and another drawn, `LOW_TRIES_PER_POSE` per pose at most.
     """
     base = model.frame_pose(f"{arm}_base_link", model.joint_vector())[:3, 3]
@@ -487,8 +524,7 @@ def low_poses(
         for turn in np.arange(-180.0, 181.0, 15.0):
             pose = {**planned, "wrist_roll.pos": planned["wrist_roll.pos"] + turn}
             q = model.joint_vector({arm: pose})
-            pinch = model.frame_pose(pinch_frame(arm), q)[:3, 3]
-            if pinch[2] <= table_z + 0.02 or not within_limits(model, arm, pose):  # >= 2 cm over the table
+            if not tips_clear(model, arm, pose, table_z) or not within_limits(model, arm, pose):
                 continue
             if not camera_clear_of_arm(model, arm, pose) or on_a_bound(
                 model, arm, pose, LOW_JOINT_LIMITS_DEG
