@@ -182,3 +182,24 @@ def test_the_map_round_trips_through_the_calibrated_urdf(tmp_path):
     np.testing.assert_array_equal(loaded.estimates, model.estimates)
     q = model.joint_vector()
     np.testing.assert_allclose(loaded.pinch_point("right", q), model.pinch_point("right", q), atol=1e-12)
+
+
+def test_a_map_from_the_servo_alone_is_marked_default_and_survives_a_save():
+    """No calipers (`GripperMap.from_servo`): the servo's degrees per unit, the tips meeting at gripper.pos 0."""
+    gripper = GripperMap.from_servo(GRIPPER)
+    assert gripper.default and gripper.pos_closed == 0.0 and not gripper.measurements
+    assert gripper.deg_per_unit == servo_deg_per_unit(GRIPPER) == pytest.approx(1.2718, abs=1e-4)
+    assert gripper.opening_deg(20.0) == pytest.approx(25.4, abs=0.1)
+    assert not GripperMap(1.5, 1.27, GRIPPER).default  # a measured one
+
+
+def test_a_default_map_is_saved_and_loaded_as_one(tmp_path):
+    pytest.importorskip("pinocchio")
+    from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
+    from lerobot.felix_jr.harness import api
+
+    model = XleRobotModel.load(api.MODEL)
+    assert not model.gripper_maps["right"].default  # older files: measured
+    model.gripper_maps["right"] = GripperMap.from_servo(model.gripper_maps["right"].calibration)
+    model.save(tmp_path / "default.urdf")
+    assert XleRobotModel.load(tmp_path / "default.urdf").gripper_maps["right"].default

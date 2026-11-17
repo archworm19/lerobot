@@ -286,6 +286,28 @@ def test_the_moving_fingertip_from_the_wrist_alone_leaves_the_hinge_to_a_few_mm(
     assert np.linalg.norm(hinge - shift[[0, 2]]) < 3e-3  # the hinge: within the ambiguity, not pinned
 
 
+def test_a_default_gripper_map_widens_its_openings_prior(session):
+    """The servo's map (`GripperMap.from_servo`, no calipers): its opening's prior `DEFAULT_OPENING_SIGMA_DEG`, a
+    measured map's `OPENING_SIGMA_DEG`."""
+    import copy
+    from dataclasses import replace
+
+    from lerobot.felix_jr.calibration.joint_fit import DEFAULT_OPENING_SIGMA_DEG, MOVING, OPENING_SIGMA_DEG
+
+    world, problem = session
+    clicks = [
+        *problem.clicks,
+        replace(problem.clicks[0], face=MOVING),
+    ]  # (one moving-tip click: an opening to fit)
+    measured = JointProblem(world.model, world.board, {ARM: world.camera}, problem.sightings, clicks)
+    default = copy.copy(world.model)
+    default.gripper_maps = {**default.gripper_maps, ARM: replace(default.gripper_maps[ARM], default=True)}
+    widened = JointProblem(default, world.board, {ARM: world.camera}, problem.sightings, clicks)
+    assert list(measured.opening_sigma) == [OPENING_SIGMA_DEG] and list(widened.opening_sigma) == [
+        DEFAULT_OPENING_SIGMA_DEG
+    ]
+
+
 def test_the_wrist_camera_is_found_from_its_own_sightings(session):
     """The arm and the boards as they are: each wrist sighting's PnP, taken back to the gripper, gives the camera's pose
     on it (`fit_staged`'s retry, for a camera far off)."""

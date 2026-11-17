@@ -111,8 +111,16 @@ def setup(tmp_path):
     server.close()
 
 
-def test_a_session_collects_sightings_and_clicks_and_fits(setup):
+@pytest.mark.parametrize("measured_map", [True, False], ids=["measured map", "no map"])
+def test_a_session_collects_sightings_and_clicks_and_fits(setup, measured_map):
+    """Also from a start with no gripper map (`measured_map` False): the session takes the servo's
+    (`GripperMap.from_servo`) and the fit puts where the tips meet where the truth has them."""
     client, start, start_path, truth, true_q, tmp_path = setup
+    if not measured_map:
+        bare = XleRobotModel.load(start_path)
+        bare.gripper_maps.pop(ARM)
+        start_path = tmp_path / "start_no_map.urdf"
+        bare.save(start_path)
     shown = []
     out = tmp_path / "session"
     with client.session():
@@ -186,6 +194,11 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup):
     moving = [c.on_face for c in saved.clicks if c.camera == HEAD and c.on_face in (MOVING, MOVING_PINCH)]
     assert len(moving) >= 4 and MOVING_PINCH in moving, moving
     calibrated = XleRobotModel.load(path)
+    fitted, measured = calibrated.gripper_maps[ARM], start.gripper_maps[ARM]
+    assert not fitted.default  # fitted, whichever it started from
+    # the truth's tips meet where the start's measured map has them, moved by the true opening's offset
+    true_closed = measured.pos_closed - truth.opening_off_deg / measured.deg_per_unit
+    assert fitted.pos_closed == pytest.approx(true_closed, abs=0.4), (fitted.pos_closed, true_closed)
     assert (out / "calibration.md").is_file()
     # nearer the truth: the wrist camera's pose relative to the pinch frame, at a pose like the views'
     q = start.joint_vector({ARM: session.views[0]})

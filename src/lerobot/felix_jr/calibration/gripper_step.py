@@ -1,5 +1,9 @@
 """Measure how far `gripper.pos` opens an arm's jaws, and write it into a calibrated URDF. Runs on your computer.
 
+**Optional** (since 2026-11-17): a joint session without a map starts from the servo's (`GripperMap.from_servo`) and
+fits where the tips meet from the moving tip's clicks (`joint_collect`, `docs/calibration_plan.md` item 5). This is
+still the one measurement of the jaws' width in millimeters: a check of that fit, and the ground truth for grip work.
+
   uv run python -m lerobot.felix_jr.calibration.gripper_step tcp://<pi>:5555 --arm right --start-from <calibration.urdf>
       --out <new calibration.urdf> [--positions 10,25,40,55,70,85] [--no-plot]
   uv run python -m lerobot.felix_jr.calibration.gripper_step --refit --arm right --start-from <urdf> --out <urdf>
@@ -36,7 +40,13 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from lerobot.felix_jr.calibration.xle_robot_model import GripperMap, XleRobotModel, arm_record, motor_record
+from lerobot.felix_jr.calibration.xle_robot_model import (
+    GripperMap,
+    XleRobotModel,
+    arm_record,
+    motor_record,
+    servo_deg_per_unit,
+)
 from lerobot.felix_jr.server.client import FelixClient
 from lerobot.felix_jr.server.protocol import DEFAULT_PORT
 from lerobot.utils.import_utils import _matplotlib_available, _scipy_available, require_package
@@ -49,7 +59,6 @@ if TYPE_CHECKING or _matplotlib_available:
 
 DEFAULT_POSITIONS = (10.0, 25.0, 40.0, 55.0, 70.0, 85.0)
 TOUCHING_M = 0.0005  # a smaller gap: the tips touch
-TICKS_PER_TURN = 4096
 RADIUS_WARNING_M = 0.010  # warn when the fitted radius is this far from the model's
 SCATTER_WARNING_M = 0.0025  # warn when the gaps scatter this much (RMS) around the fit
 
@@ -66,11 +75,6 @@ def opening_from_gap(gap_m: float, radius_m: float) -> float:
 def chord(radius_m: float, opening_deg: np.ndarray) -> np.ndarray:
     """The gap between the tips (m) at each opening angle; `opening_from_gap`'s inverse, 0 once they touch."""
     return 2 * radius_m * np.sin(np.radians(np.clip(opening_deg, 0.0, 180.0)) / 2)
-
-
-def servo_deg_per_unit(calibration: Mapping[str, int]) -> float:
-    """Degrees the servo turns per unit of `gripper.pos`: the gripper's calibrated tick range over 100."""
-    return (calibration["range_max"] - calibration["range_min"]) * 360.0 / TICKS_PER_TURN / 100.0
 
 
 def open_measurements(measurements: Sequence[tuple[float, float]]) -> tuple[np.ndarray, np.ndarray]:

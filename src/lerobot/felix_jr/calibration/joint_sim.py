@@ -16,9 +16,10 @@ Usage: uv run python -m lerobot.felix_jr.calibration.joint_sim [--seeds 3] [--qu
 """
 
 import argparse
+import copy
 import itertools
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
@@ -511,11 +512,22 @@ def run(
     held_out: int = 20,
     verbose: bool = False,
     truth_scale: float = 1.0,
+    opening_off_deg: float | None = None,
 ) -> dict[str, float]:
-    """One simulated session and fit; the held-out scores, before (the model as it is) and after."""
-    model = model.with_gripper_hinge(ARM)  # the hinge off in every truth; fitted where the moving tip is seen
+    """One simulated session and fit; the held-out scores, before (the model as it is) and after.
+
+    `opening_off_deg`: the true opening that far off the map (its sign by the seed's parity), and the map the servo's
+    default (`GripperMap.from_servo`, its wider prior): a session without the calipers. None: drawn (`draw_truth`).
+    """
+    model = copy.copy(
+        model.with_gripper_hinge(ARM)
+    )  # the hinge off in every truth; fitted where the moving tip is seen
     rng = np.random.default_rng(seed)
-    world = World(model, draw_truth(model, rng, truth_scale), board, rng)
+    truth = draw_truth(model, rng, truth_scale)
+    if opening_off_deg is not None:
+        model.gripper_maps = {**model.gripper_maps, ARM: replace(model.gripper_maps[ARM], default=True)}
+        truth = replace(truth, opening_off_deg=opening_off_deg * (1.0 if seed % 2 == 0 else -1.0))
+    world = World(model, truth, board, rng)
     sightings, clicks = world.collect(scenario)
     problem = JointProblem(model, board, {ARM: world.camera}, sightings, clicks)
     started = time.time()
@@ -662,6 +674,12 @@ def main() -> None:
     parser.add_argument(
         "--fingers", action="store_true", help="the moving finger's scenarios (`FINGER_SCENARIOS`) instead"
     )
+    parser.add_argument(
+        "--opening-off",
+        type=float,
+        default=None,
+        help="the true opening this many degrees off the map (+ / - by seed), the map the servo's default",
+    )
     args = parser.parse_args()
     from lerobot.felix_jr.harness import api
 
@@ -682,7 +700,10 @@ def main() -> None:
         + "   (before -> after)"
     )
     for scenario in scenarios:
-        results = [run(model, scenario, seed, board, truth_scale=args.truth_scale) for seed in range(seeds)]
+        results = [
+            run(model, scenario, seed, board, truth_scale=args.truth_scale, opening_off_deg=args.opening_off)
+            for seed in range(seeds)
+        ]
         mean = {k: float(np.mean([r[k] for r in results])) for k in results[0]}
         counts = f"{mean['wrist views']:.0f}/{mean['head views']:.0f}/{mean['clicks']:.0f}/{mean['moving clicks']:.0f}"
         cells = " ".join(f"{mean[k + ' before']:5.1f}>{mean[k]:5.1f}" for k in keys)

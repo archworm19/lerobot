@@ -146,10 +146,22 @@ older map's into the parameters (left -16.5 / +3.0 deg, right -18.0 / +0.5 deg, 
 
 ### 5. The gripper map without the calipers
 
+**Done (2026-11-17).**
+
 - A first calibration has no `GripperMap` (`opening_deg` refuses): build one from the gripper's servo range (degrees
   per unit, as `gripper_step` already takes it) and where it closes, with a wide prior on the opening's offset for that
-  first fit (`OPENING_SIGMA_DEG` is 3 deg, for a map that was measured).
-- Check in the simulator: the map's closing point off by several degrees, recovered.
+  first fit (`OPENING_SIGMA_DEG` is 3 deg, for a map that was measured). **Done:** `GripperMap.from_servo` (degrees
+  per unit `servo_deg_per_unit`, moved into the model; the tips meeting at `gripper.pos` 0: LeRobot's range starts at
+  the jaws closed, ours measured -1.65 and -0.37, 2.1 and 0.5 deg off it), marked `default`; `joint_collect` builds
+  it when the start has none; `JointProblem.opening_sigma` 6 deg for a default map (`DEFAULT_OPENING_SIGMA_DEG`);
+  `calibrate` clears `default` once it fits the opening, and the report says which maps were the default (and any
+  still are: no moving-tip clicks). `gripper_step` marked optional.
+- Check in the simulator: the map's closing point off by several degrees, recovered. **Done** (`joint_sim
+  --opening-off DEG`: the truth that far off, + / - by seed, the map the default; the procedure decided, scenario 3
+  of `FINGER_SCENARIOS`, truth scale 0.25, 3 seeds): from 3 deg off, the opening to 0.11-0.24 deg; from 6, to
+  0.08-0.21; the hinge (0.6-1.4 mm) and the camera (0.5-1.4 mm, 0.2-0.9 deg) as from a measured map (0.7-1.3 mm,
+  0.3-1.2 mm). And end to end: the collection smoke test from a start with no map, `pos_closed` fitted to the
+  truth's within 0.4 units.
 
 ### 6. Loose ends of the fit
 
@@ -170,8 +182,12 @@ Newest first. Each commit that changes the calibration adds its entry here, titl
 name its own hash, so the next one fills it in. Before the plan (2026-11-16) the work is in `camera_calibration.md`
 and git's log.
 
-- **A misread sweep's tips left out; the sweep's pictures saved; the planning said** (2026-11-17, hash in the next
-  entry). From the rehearsal on the fake robot. `joint_collect`: the sweep's fixed tip more than `SWEEP_FAILED_PX`
+- **The gripper map from the servo when there is none; the calipers optional** (2026-11-17, hash in the next entry).
+  Item 5. `GripperMap.from_servo` and `default`, `servo_deg_per_unit` in the model; `joint_collect` takes the default
+  for an arm with no map; `joint_fit`'s opening prior 6 deg for it, `default` cleared once fitted, the report saying
+  so; `joint_sim --opening-off`; `gripper_step` optional. Tests: the default map and its save, its prior, the
+  collection smoke test with no map.
+- **`6efe16755`: A misread sweep's tips left out; the sweep's pictures saved; the planning said** (2026-11-17). From the rehearsal on the fake robot. `joint_collect`: the sweep's fixed tip more than `SWEEP_FAILED_PX`
   (30) from the start's is a misread (the fake's board taken for fingers: 70 px), its tips dropped and the person
   asked to go on without them; each sweep frame saved (`wrist_tip_sweep/frame_NN.png`) for its tips' mis-click
   pictures; "PLANNING the arm views (about 30 s)" before the 30 s of planning, the window painted at once, and keys

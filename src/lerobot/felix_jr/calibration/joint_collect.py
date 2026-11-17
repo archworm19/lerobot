@@ -7,8 +7,8 @@
 
 `docs/calibration_plan.md` (the procedure). Start the server on the Pi with the arm and the head. `--start-from` must
 have the arm's wrist camera's lens (`calibration.wrist_camera`; its pose on the gripper starts at the design's, or a
-calibration's) and, for the jaws to open, the arm's gripper map (`calibration.gripper_step`; without, they stay
-closed).
+calibration's). Its gripper map for the arm (`calibration.gripper_step`, the calipers) is optional: without, the
+session starts from the servo's (`GripperMap.from_servo`) and the fit corrects where the tips meet.
 
 0. **The gripper sweep first** (`--wrist-tip sweep`, the default), the table clear, before the window opens
    (`sweep_first`): the arm to its sweep pose over the table, the jaws opened in steps (`gripper_sweep`: the sim's
@@ -79,7 +79,7 @@ from lerobot.felix_jr.calibration.joint_fit import (
     save_session,
 )
 from lerobot.felix_jr.calibration.live_view import INTRINSICS_KEYS, decode_key, head_limits, move_head_to
-from lerobot.felix_jr.calibration.xle_robot_model import HEAD_JOINTS, XleRobotModel, arm_record
+from lerobot.felix_jr.calibration.xle_robot_model import HEAD_JOINTS, GripperMap, XleRobotModel, arm_record
 from lerobot.felix_jr.harness.look import aim_head
 from lerobot.felix_jr.server.client import Capture, FelixClient, WristCapture
 from lerobot.felix_jr.server.protocol import DEFAULT_PORT
@@ -252,9 +252,14 @@ class JointCollect:
             raise ValueError(
                 f"{start_from} has no {arm} wrist camera: run calibration.wrist_camera's lens step first"
             )
-        if self.openings and arm not in self.model.gripper_maps:
+        if (
+            self.openings and arm not in self.model.gripper_maps
+        ):  # one from the servo's range, the fit corrects it
+            gripper = client.arm_calibration()[self.arm_id]["gripper"]
+            self.model.gripper_maps[arm] = GripperMap.from_servo(gripper)
             print(
-                f"{start_from} has no {arm} gripper map (calibration.gripper_step): the jaws stay closed at the views"
+                f"{start_from} has no {arm} gripper map: the servo's default (the tips meeting at gripper.pos 0); "
+                "the fit corrects it from the moving tip's clicks"
             )
         capture = client.capture()
         self.model.intrinsics = {k: capture.calibration["color_intrinsics"][k] for k in INTRINSICS_KEYS}

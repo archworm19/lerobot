@@ -65,6 +65,8 @@ ALONG_AXIS = (
 )
 CORRELATED = 0.9  # `uncertainty`: two unknowns this correlated after the fit are flagged
 OPENING_SIGMA_DEG = 3.0  # the gripper map's opening, off by this much at most (`gripper_sweep`: within 2 deg)
+# ... a default map's (`GripperMap.from_servo`, no calipers): ours were 0.5 and 2.1 deg off, a new arm may be more
+DEFAULT_OPENING_SIGMA_DEG = 6.0
 JOINT_SIGMA_DEG = 0.2  # a joint's reading against where it is (a servo tick is 0.09 deg; play)
 HUBER = 2.0  # in sigmas: beyond, a residual is down-weighted
 # a board's start (`JointProblem._first_board_pose`): its sightings' poses this near the most central one are averaged
@@ -195,6 +197,15 @@ class JointProblem:
                     and abs(axis["xyz".index(p.name[-1])]) > ALONG_AXIS
                 ):
                     self.free[i] = False
+        # each moving arm's opening's prior: a default map's wider (`DEFAULT_OPENING_SIGMA_DEG`)
+        self.opening_sigma = np.array(
+            [
+                DEFAULT_OPENING_SIGMA_DEG
+                if arm in model.gripper_maps and model.gripper_maps[arm].default
+                else OPENING_SIGMA_DEG
+                for arm in self.moving_arms
+            ]
+        )
         self.mean = np.array([p.mean for p in model.parameters])
         self.sigma = np.array([p.sigma for p in model.parameters])
         self.joint_sigma = np.radians(joint_sigma_deg)
@@ -383,7 +394,7 @@ class JointProblem:
         """The estimates', the thickness' and the joints' errors' prior residuals."""
         theta = (x[self.slices["theta"]] - self.mean[self.free]) / self.sigma[self.free]
         thickness = (x[self.slices["thickness"]] - JAW_THICKNESS_M) / THICKNESS_SIGMA_M
-        openings = x[self.slices["openings"]] / OPENING_SIGMA_DEG
+        openings = x[self.slices["openings"]] / self.opening_sigma
         joints = x[self.slices["joints"]] / self.joint_sigma if self.looks else np.zeros(0)
         return np.concatenate([theta, thickness, openings, joints])
 
@@ -477,7 +488,7 @@ class JointProblem:
         scale = np.ones(self.size) * 0.01
         scale[self.slices["theta"]] = self.sigma[self.free]
         scale[self.slices["thickness"]] = THICKNESS_SIGMA_M
-        scale[self.slices["openings"]] = OPENING_SIGMA_DEG
+        scale[self.slices["openings"]] = self.opening_sigma
         scale[self.slices["joints"]] = max(self.joint_sigma, 1e-4)
         result = least_squares(
             lambda x: self.residuals(x, theta0),
@@ -875,9 +886,7 @@ def uncertainty(problem: JointProblem, fit: JointFit, top: int = 3) -> dict[str,
     sd = np.sqrt(np.clip(np.diag(sub), 0.0, None))
     corr = sub / np.maximum(np.outer(sd, sd), 1e-300)
     theta_free = [p for p, free in zip(problem.model.parameters, problem.free, strict=True) if free]
-    priors = (
-        [p.sigma for p in theta_free] + [THICKNESS_SIGMA_M] + [OPENING_SIGMA_DEG] * len(problem.moving_arms)
-    )
+    priors = [p.sigma for p in theta_free] + [THICKNESS_SIGMA_M] + list(problem.opening_sigma)
     ref = np.array(priors)  # the scale each unknown's weak directions are measured in (`weak`)
     scaled = sub / np.outer(ref, ref)
     values, vectors = np.linalg.eigh(scaled)
@@ -1012,7 +1021,9 @@ def calibrate(
     # the map's opening, off by the fitted offset: where the tips meet (`pos_closed`) moves by it
     maps = dict(calibrated.gripper_maps)
     for arm, offset in fit.openings.items():
-        maps[arm] = replace(maps[arm], pos_closed=maps[arm].pos_closed - offset / maps[arm].deg_per_unit)
+        maps[arm] = replace(
+            maps[arm], pos_closed=maps[arm].pos_closed - offset / maps[arm].deg_per_unit, default=False
+        )
     calibrated.gripper_maps = maps
     calibrated.arm_calibration = {
         **model.arm_calibration,
@@ -1136,8 +1147,18 @@ def report(model: XleRobotModel, start: XleRobotModel, numbers: Mapping[str, Any
         ),
         f"The fingers' thickness: {numbers['thickness_mm']:.1f} mm ({1000 * JAW_THICKNESS_M:.1f} measured).",
         *[
-            f"The {arm} gripper's opening: {offset:+.2f} deg off its map (`pos_closed` moved), from the moving finger's tip."
+            f"The {arm} gripper's opening: {offset:+.2f} deg off its map (`pos_closed` moved), from the moving finger's tip"
+            + (
+                " (the map was the servo's default, `GripperMap.from_servo`: now fitted)."
+                if start.gripper_maps[arm].default
+                else "."
+            )
             for arm, offset in numbers.get("openings_deg", {}).items()
+        ],
+        *[
+            f"The {arm} gripper's map is still the servo's default (`GripperMap.from_servo`): no moving-tip clicks fitted it."
+            for arm, m in model.gripper_maps.items()
+            if m.default
         ],
         "",
         *[

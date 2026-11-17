@@ -299,6 +299,14 @@ class Prediction:
     visibility: float
 
 
+def servo_deg_per_unit(calibration: Mapping[str, int]) -> float:
+    """Degrees the gripper's servo turns per unit of `gripper.pos`.
+
+    Its calibrated tick range over 100: it drives the moving jaw directly.
+    """
+    return (calibration["range_max"] - calibration["range_min"]) * 360.0 / TICKS_PER_TURN / 100.0
+
+
 def motor_record(motor: Mapping[str, int]) -> dict[str, int]:
     """The fields of one motor's LeRobot calibration that decide what its readings mean (`MOTOR_CALIBRATION_FIELDS`)."""
     return {k: int(motor[k]) for k in MOTOR_CALIBRATION_FIELDS}
@@ -316,7 +324,8 @@ class GripperMap:
     The opening is the moving jaw's angle about the hinge from where the tips meet:
     `deg_per_unit * (gripper.pos - pos_closed)`, negative below `pos_closed` (the servo squeezes closed jaws).
     (The fingers' mounts were kept here until 2026-11-17, `OLD_FINGER_MOUNT_KEYS`: now parameters,
-    `finger_mount_parameters`.)
+    `finger_mount_parameters`.) `default`: built from the servo alone (`from_servo`: `pos_closed` taken as 0, no
+    calipers), until a joint fit corrects it (`joint_fit.calibrate`; a wider prior on its opening till then).
     `gripper.pos` is LeRobot's 0-100 over the gripper's calibrated tick range, so the map holds only under the
     gripper's LeRobot calibration it was measured with (`calibration`, a `motor_record` as the robot reported it):
     recalibrating the arm with `lerobot-calibrate` invalidates it (`XleRobotModel.check_robot`). `measurements` are
@@ -329,6 +338,16 @@ class GripperMap:
     calibration: dict[str, int]
     measurements: tuple[tuple[float, float], ...] = ()
     radius_m: float | None = None
+    default: bool = False
+
+    @classmethod
+    def from_servo(cls, calibration: Mapping[str, int]) -> "GripperMap":
+        """The map from the gripper's LeRobot calibration alone (`motor_record`), marked `default`.
+
+        Its degrees per unit from the tick range (`servo_deg_per_unit`), the tips meeting at `gripper.pos` 0 (LeRobot's
+        range starts at the jaws closed: our two arms measured -1.65 and -0.37, 2.1 and 0.5 deg off it).
+        """
+        return cls(0.0, servo_deg_per_unit(calibration), motor_record(calibration), default=True)
 
     def opening_deg(self, pos: float) -> float:
         """The jaws' opening angle (degrees) at `gripper.pos` `pos`."""
