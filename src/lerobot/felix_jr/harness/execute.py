@@ -7,8 +7,9 @@ refuses if a step misses or a joint jumps more than `max_jump_deg` between steps
 tolerance: `pose_tol_deg` at the labeled poses, the looser `step_tol_deg` at the steps between them (they are there to
 stay near the drawn line, not to be exact; a loaded, extended arm does not get within 1.5 deg). Gripper actions go at
 the poses `grip` names (and "start", before the first move); there are none by default. "open" opens the jaws
-`reach.OPEN_CLEARANCE_M` wider than the object (`Poses.width`) and its margin, "close" closes them to `reach.SQUEEZE_M` narrower,
-each as the `gripper.pos` the arm's gripper map gives (`XleRobotModel.gripper_pos_for`).
+`reach.OPEN_CLEARANCE_M` wider than the object (`Poses.width`) and its margin, "close" closes them `reach.SQUEEZE_UNITS`
+past where the tips touch it (`reach.close_gripper_pos`: a grip the servo keeps), each as the `gripper.pos` the arm's
+gripper map gives (`XleRobotModel.gripper_pos_for`).
 
 `run_execution` sends the moves one by one, after checking that the arm is where the poses' capture saw it. Two kinds
 of failure, two answers (`docs/sessions.md`, pen1):
@@ -31,7 +32,7 @@ import numpy as np
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 
 from .objects import ArmPath, Capture, Execution, HeldObject, Move, Poses
-from .reach import OPEN_CLEARANCE_M, SQUEEZE_M, solve_path
+from .reach import OPEN_CLEARANCE_M, SQUEEZE_UNITS, close_gripper_pos, solve_path
 
 if TYPE_CHECKING:
     from lerobot.felix_jr.server.client import FelixClient
@@ -89,19 +90,23 @@ def prepare_execution(
         jump = max(abs(steps.joints[i][k] - steps.joints[i - 1][k]) for k in steps.joints[i])
         if jump > max_jump_deg:
             raise ValueError(f"step {i + 1}: a joint jumps {jump:.0f} deg (more than {max_jump_deg:.0f})")
-    settings = {  # (tips apart, timeout, settle): a grip closed on the object stops short of its target
-        "open": (poses.width + poses.margin + OPEN_CLEARANCE_M, 10.0, True),
-        "close": (max(poses.width - SQUEEZE_M, 0.0), 2.0, False),
+    settings = {  # (timeout, settle): a grip closed on the object stops short of its target
+        "open": (10.0, True),
+        "close": (2.0, False),
     }
-    positions = {
-        action: gripper_pos(model, poses.arm, apart)
-        for action, (apart, _, _) in settings.items()
-        if action in grip.values()
-    }
+    positions: dict[str, float] = {}
+    labels: dict[str, str] = {}
+    if "open" in grip.values():
+        apart = poses.width + poses.margin + OPEN_CLEARANCE_M
+        positions["open"] = gripper_pos(model, poses.arm, apart)
+        labels["open"] = f"tips {100 * apart:.1f} cm apart"
+    if "close" in grip.values():
+        positions["close"] = close_gripper_pos(model, poses.arm, poses.width)
+        labels["close"] = f"{SQUEEZE_UNITS:g} past the object's contact, gripper.pos {positions['close']:.1f}"
 
     def gripper(key: str, where: str) -> Move:
-        apart, timeout, settle = settings[grip[key]]
-        label = f"{where}: gripper {grip[key]} (tips {100 * apart:.1f} cm apart)"
+        timeout, settle = settings[grip[key]]
+        label = f"{where}: gripper {grip[key]} ({labels[grip[key]]})"
         return Move(label, {"gripper.pos": positions[grip[key]]}, timeout, settle)
 
     moves = [gripper(START, "start")] if START in grip else []

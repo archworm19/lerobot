@@ -51,7 +51,8 @@ the IK smoke test is built on pen1).
       **Measured (2026-11-17, `calibration.grip_test`; `tuning_notes.md` 3.10):** the load at 0, 2, 5, 10, 15 units
       past contact: 12, 15, 16, 20, 23 %; over ~20 % for ~2 s the overload protection trips (closing to 0, 33 %,
       tripped in 2.2 s). So: close ~10 units past the object's contact (`gripper.pos`), not to the tips meeting; it held
-      30 s and lifted an 80 g bottle. `reach.SQUEEZE_M` still to change to that.
+      30 s and lifted an 80 g bottle. **Done (2026-11-18):** `reach.SQUEEZE_UNITS` (10), `reach.close_gripper_pos`:
+      the harness closes 10 units past the object's contact (`SQUEEZE_M`, 3 mm of width, is gone).
     - **Grasping at the tips.** The grasp point is between the fingertips, so a thin object is held at the very tips,
       where pen1's pen sat (and pen2's, which slipped). Holding it a finger-depth (~1.5-2 cm) into the jaws would be a `depth` on the grasp: the
       points of both jaws that far back from the tips, and the opening that leaves `width` between them there.

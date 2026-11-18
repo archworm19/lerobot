@@ -296,12 +296,13 @@ def test_the_plan_is_solved_as_recorded_and_prepares_without_jumps(model, plan):
     grips = [m for m in execution.moves if "gripper" in m.label]
     assert [m.label for m in grips] == [
         "start: gripper open (tips 3.0 cm apart)",  # the 1 cm pen, plus the clearance
-        "pick: gripper close (tips 0.7 cm apart)",  # the pen, less the squeeze
+        # the 1 cm pen: its contact is under `SQUEEZE_UNITS` past, so the close is to the tips meeting
+        "pick: gripper close (10 past the object's contact, gripper.pos 0.0)",
         "place: gripper open (tips 3.0 cm apart)",
     ]
     opening, closing = grips[0].targets["gripper.pos"], grips[1].targets["gripper.pos"]
     assert opening == pytest.approx(GRIPPER.pos_for(model.opening_for_width("right", 0.03)))
-    assert 0.0 < closing < opening < 25.0  # not pen1's guessed 60-80
+    assert 0.0 <= closing < opening < 25.0  # not pen1's guessed 60-80 (the pen: closed to the tips meeting, 0)
 
 
 # ---- 6. carrying the pen --------------------------------------------------------------------------------------------

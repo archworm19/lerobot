@@ -12,7 +12,12 @@ pytest.importorskip("scipy")
 
 from lerobot.felix_jr.calibration.xle_robot_model import GripperMap, XleRobotModel, pinch_frame  # noqa: E402
 from lerobot.felix_jr.harness.execute import gripper_pos, held_object, prepare_execution  # noqa: E402
-from lerobot.felix_jr.harness.reach import OPEN_CLEARANCE_M, SQUEEZE_M, join_poses, solve_pose  # noqa: E402
+from lerobot.felix_jr.harness.reach import (  # noqa: E402
+    OPEN_CLEARANCE_M,
+    SQUEEZE_UNITS,
+    join_poses,
+    solve_pose,
+)
 
 URDF = Path(__file__).parent / "reference" / "pen1_calibration_10312026.urdf"
 GRIPPER = GripperMap(
@@ -86,14 +91,14 @@ def test_the_gripper_opens_and_closes_by_the_objects_width(model):
     up = solve_pose(model, "right", CAPTURE, PICK + [0, 0, 0.05], -15.0, width=0.03, init=pose, label="up")
     execution = prepare_execution(model, join_poses(pose, up), {"start": "open", "pick": "close"})
     grips = {m.label: m for m in execution.moves if "gripper" in m.label}
-    assert set(grips) == {
-        "start: gripper open (tips 5.0 cm apart)",
-        "pick: gripper close (tips 2.7 cm apart)",
-    }
+    contact = GRIPPER.pos_for(model.opening_for_width("right", 0.03))  # where the tips touch the 3 cm object
+    closing = f"pick: gripper close (10 past the object's contact, gripper.pos {contact - SQUEEZE_UNITS:.1f})"
+    assert set(grips) == {"start: gripper open (tips 5.0 cm apart)", closing}
     opened, closed = (grips[k].targets["gripper.pos"] for k in sorted(grips, reverse=True))
     assert opened == pytest.approx(GRIPPER.pos_for(model.opening_for_width("right", 0.03 + OPEN_CLEARANCE_M)))
-    assert closed == pytest.approx(GRIPPER.pos_for(model.opening_for_width("right", 0.03 - SQUEEZE_M)))
-    assert not grips["pick: gripper close (tips 2.7 cm apart)"].settle  # it stops on the object
+    # closed `SQUEEZE_UNITS` past the contact: a grip the servo keeps (`tuning_notes.md` 3.10)
+    assert closed == pytest.approx(contact - SQUEEZE_UNITS)
+    assert not grips[closing].settle  # it stops on the object
     # no object: closed is where the tips meet (not below 0); open no wider than the jaws go
     assert gripper_pos(model, "right", 0.0) == 0.0
     assert gripper_pos(model, "right", 1.0) == pytest.approx(100.0)
@@ -150,7 +155,11 @@ def test_a_margin_aims_toward_the_moving_jaw_and_the_object_ends_on_the_fixed_on
     )
     execution = prepare_execution(model, join_poses(pose, up), {"start": "open", "pick": "close"})
     labels = [m.label for m in execution.moves if "gripper" in m.label]
-    assert labels == ["start: gripper open (tips 4.0 cm apart)", "pick: gripper close (tips 0.7 cm apart)"]
+    # a 1 cm object: its contact is under `SQUEEZE_UNITS`, so the close is to the tips meeting (0)
+    assert labels == [
+        "start: gripper open (tips 4.0 cm apart)",
+        "pick: gripper close (10 past the object's contact, gripper.pos 0.0)",
+    ]
     with pytest.raises(ValueError, match="margin"):
         join_poses(pose, solve_pose(model, "right", CAPTURE, PICK, -15.0, width=width, label="other"))
 

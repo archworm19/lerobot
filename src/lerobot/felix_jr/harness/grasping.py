@@ -51,7 +51,7 @@ from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 
 from .objects import Capture, Object, Poses, angles_of
 from .primitives import AntipodalGrasp, HorizontalPlane, Primitive, Ranges, Spacing, Surface
-from .reach import OPEN_CLEARANCE_M, POSITION_TOL_M, ROLL_TOL_DEG, SQUEEZE_M, ArmIK, FrameSolution
+from .reach import OPEN_CLEARANCE_M, POSITION_TOL_M, ROLL_TOL_DEG, ArmIK, FrameSolution, close_gripper_pos
 
 SAG_LIFT_M = 0.01  # grasps aimed this much higher than the object (`GraspSettings.sag_lift`)
 ATTACK_M = 0.05  # the attack point: this far back along the approach from the grasp (`protocols.md`, rule 1)
@@ -136,7 +136,8 @@ class ClawTarget:
     `root_from_pinch` is the pinch frame at the grasp, jaws open; `root_from_attack` the same pinch frame `attack` back
     along the approach. `aim_pinch` is the point of the pinch frame put on the grasp's center (with the margin),
     `held_pinch` where the center is once the jaws close (`XleRobotModel.grasp_offset` with and without the margin).
-    `open_apart` / `close_apart` are how far apart the tips open for the approach and are told to close to (m).
+    `open_apart` / `close_apart` are how far apart the tips open for the approach and are told to close to (m; the
+    close `reach.SQUEEZE_UNITS` past the object's contact, `reach.close_gripper_pos`).
     """
 
     grasp: AntipodalGrasp
@@ -229,8 +230,16 @@ def to_claw(
         margin,
         attack,
         min(grasp.opening + margin + OPEN_CLEARANCE_M, widest),
-        max(grasp.opening - SQUEEZE_M, 0.0),
+        _apart_at(model, arm, close_gripper_pos(model, arm, grasp.opening))
+        if arm in model.gripper_maps
+        else 0.0,
     )
+
+
+def _apart_at(model: XleRobotModel, arm: str, gripper_pos: float) -> float:
+    """How far apart (m) `arm`'s tips are told to be at `gripper_pos` (0 past where they meet)."""
+    opening = max(model.opening_deg(arm, gripper_pos), 0.0)
+    return float(2 * model.jaw_radius(arm) * np.sin(np.radians(opening) / 2))
 
 
 def widest_apart(model: XleRobotModel, arm: str) -> float:

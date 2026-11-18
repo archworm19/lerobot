@@ -52,10 +52,29 @@ if TYPE_CHECKING or _scipy_available:
 LIMIT_MARGIN = 0.95  # joints stay within this fraction of their URDF limits
 PITCH_TOL_DEG = 0.1  # the held pitch: its penalty scale
 PITCH_OK_DEG = 0.5  # and how far off it may end up and still count as held
-# TODO (docs/open_issues.md, 14): how far to open and how hard to close are first guesses.
+# how far to open is a first guess (docs/open_issues.md, 14); how hard to close was measured (`calibration.grip_test`,
+# 2026-11-17, `docs/tuning_notes.md` 3.10)
 OPEN_CLEARANCE_M = 0.02  # the jaws open this much wider than the object for the approach
-SQUEEZE_M = 0.003  # and close to this much narrower than it: holds without stalling the servo for long
+# and close this many `gripper.pos` units past where the tips touch the object (`close_gripper_pos`): the servo presses
+# with ~20 % load there and keeps it (over ~20 % for ~2 s its overload protection trips: closing to 0 on a 45 mm bottle,
+# ~33 %, tripped in 2.2 s; 10 past held 30 s and lifted 80 g). Was 3 mm of width narrower (`SQUEEZE_M`), ~1 deg, a few
+# percent: the pen in pen2 and the bottle in bowl6 slipped out
+SQUEEZE_UNITS = 10.0
 POSITION_TOL_M = 0.005
+
+
+def contact_gripper_pos(model: XleRobotModel, arm: str, width: float) -> float:
+    """The `gripper.pos` at which `arm`'s tips are `width` m apart: where they touch an object that wide."""
+    return float(
+        model.gripper_pos_for(arm, model.opening_for_width(arm, min(width, 2 * model.jaw_radius(arm))))
+    )
+
+
+def close_gripper_pos(model: XleRobotModel, arm: str, width: float) -> float:
+    """The `gripper.pos` to close on an object `width` m wide: `SQUEEZE_UNITS` past its contact (0 at the least)."""
+    return max(0.0, contact_gripper_pos(model, arm, width) - SQUEEZE_UNITS)
+
+
 ROLL_TOL_DEG = 10.0
 AT_LIMIT_RAD = 1e-3  # a joint this close to a bound is reported as at its limit
 

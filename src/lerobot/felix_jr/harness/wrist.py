@@ -277,7 +277,7 @@ def _draw_midline(
 
 def _draw_close(out: np.ndarray, model: XleRobotModel, view: WristView, pick: Poses) -> None:
     """The closing line, the moving tip's sweep to the close, the held center (`render_wrist`), in green."""
-    from .reach import SQUEEZE_M
+    from .reach import close_gripper_pos
 
     arm, green = view.arm, (60, 255, 60)
     if arm not in model.gripper_maps:  # the jaws' opening is not known without it: nothing to draw
@@ -286,7 +286,7 @@ def _draw_close(out: np.ndarray, model: XleRobotModel, view: WristView, pick: Po
     to_pinch = np.linalg.inv(view.root_from_pinch)
     now = max(model.opening_deg(arm, float(view.arm_pose["gripper.pos"])), 0.0)
     touching = model.opening_for_width(arm, pick.width)
-    closed = model.opening_for_width(arm, max(pick.width - SQUEEZE_M, 0.0))
+    closed = max(model.opening_deg(arm, close_gripper_pos(model, arm, pick.width)), 0.0)
     sweep = [
         _apply(to_pinch, model.moving_tip(arm, q, float(a))[None, :])[0] for a in np.linspace(now, closed, 12)
     ]
