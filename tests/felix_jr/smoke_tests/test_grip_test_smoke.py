@@ -38,7 +38,7 @@ def test_a_bottle_is_gripped_held_and_lifted_and_saved(tmp_path, monkeypatch):
     }
     contact = model.gripper_pos_for("right", model.opening_for_width("right", 0.065))
     hardware.arm_backend.object_pos["right_arm"] = contact
-    answers = iter(["water", "65", "200", "500", "y", "", "y", "held", "y", ""])
+    answers = iter(["water", "65", "200", "500", "y", "", "deep", "y", "held", "y", ""])
     asked = []
 
     def ask(prompt):
@@ -63,6 +63,7 @@ def test_a_bottle_is_gripped_held_and_lifted_and_saved(tmp_path, monkeypatch):
     assert len(saved) == 1
     trial = saved[0]
     assert trial["contact_pos"] == pytest.approx(contact)
+    assert trial["depth_mm_actual"] == pytest.approx(grip_test.FINGER_LENGTH_MM - 32.5)  # "deep"
     stalls = [c["stall"] for c in trial["closes"]]
     assert len(stalls) == len(grip_test.PAST_CONTACT)
     assert all(s["pos"] == pytest.approx(contact, abs=0.5) for s in stalls)  # each stalled on the bottle
@@ -95,7 +96,7 @@ def test_a_bottle_that_slips_out_is_marked_and_not_lifted(tmp_path, monkeypatch)
         arm: replace(m, calibration=motor_record(robot[f"{arm}_arm"]["gripper"]))
         for arm, m in model.gripper_maps.items()
     }
-    answers = iter(["feno", "52", "114", "116", "y", "", ""])
+    answers = iter(["feno", "52", "114", "116", "y", "", "", ""])
     asked = []
 
     def ask(prompt):
@@ -143,7 +144,7 @@ def test_an_overload_is_recorded_the_jaw_relieved_and_nothing_lifted(tmp_path, m
     }
     contact = model.gripper_pos_for("right", model.opening_for_width("right", 0.045))
     hardware.arm_backend.object_pos["right_arm"] = contact
-    answers = iter(["pyri", "45", "130", "80", "y", "", "y", "held", "y", ""])
+    answers = iter(["pyri", "45", "130", "80", "y", "", "", "y", "held", "y", ""])
     asked = []
 
     def ask(prompt):

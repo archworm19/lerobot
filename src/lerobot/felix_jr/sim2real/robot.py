@@ -16,7 +16,8 @@ undistorted frames) and the head camera (`head_camera`, fixed in the world: the 
 looks from at the given head ticks).
 
 The fingers (`fingers`, default `FINGER_STL`): the XLeRobot's Fin Ray finger (`meshes/README.md`) on both
-jaws, drawn only (not collided with yet: the contact pads are the next step). On the robot they replace the SO-101's
+jaws, drawn, and collided as pads on its straight inner face (`finger_pads`, `<name>_pad<k>`, the collision group,
+`FINGER_FRICTION`; rigid: the fingers' give is not modeled yet). On the robot they replace the SO-101's
 jaw tips, so with them the jaws' meshes (drawn and collided with) are cut off at the fingers' base. Placed from the
 calibration: the fixed finger's tip on the pinch point, tip to base back along the gripper (the pinch -z), its
 straight face toward the moving jaw (the pinch -x), its depth across the hinge toward the wrist camera's side; the
@@ -72,6 +73,28 @@ CAMERA_MOUNT, CAMERA_MODULE = (
     "wrist_camera",
 )  # TheRobotStudio's bodies (the module: the camera)
 COLLISION_GROUP = 3  # the SO-101's group for what collides (drawn only in a collision view)
+# The gripper's servo and fingers, from what the real gripper did (`calibration.grip_test`, 2026-11-17: pyri 45 mm and
+# feno 53 mm bottles, closed in steps past contact, held 30 s, lifted; `docs/sim2real_grasp.md`):
+# - its position gain at the jaw (N m/rad): the jaw stalled 1.9-3.8 gripper.pos units short of each target with
+#   12-23 % load, ~4.6 % of the stall torque a degree (as `tuning_notes.md` 3.6 has it at P 16). The SO-101 model's
+#   998 is ~100 times stiffer;
+GRIPPER_KP_NM_PER_RAD = 8.8
+# - its torque, capped at what it can keep: over ~20 % load for ~2 s its overload protection trips (45 mm bottle: 15
+#   past contact, 23 %, tripped; 10 past, 20 %, held 30 s at 16 %). 20 % of the STS3215's 3.35 N m stall torque (the
+#   model's forcerange);
+GRIPPER_STALL_NM = 3.35
+GRIPPER_FORCE_NM = 0.2 * GRIPPER_STALL_NM
+# - the fingers' sliding friction: a guess (printed fingers on plastic bottles). The 80 g bottle held through a 4 cm
+#   lift at 16 % load and the 116 g, slipperier one slipped: to be fitted to that (`grip_sim`);
+FINGER_FRICTION = 0.6
+# - the fingers collide as pads on their straight inner faces (`finger_pads`): `PAD_SEGMENTS` boxes along each,
+#   `PAD_THICKNESS_M` thick (the face: 67 mm long, 11 to 24 mm deep, flat; the convex hull of the whole finger, the first
+#   try, tipped the bottles over);
+PAD_SEGMENTS = 4
+PAD_THICKNESS_M = 0.002
+PAD_TORSIONAL_FRICTION, PAD_ROLLING_FRICTION = 0.005, 0.0001
+# - not modeled yet: the fingers' give. The real stall moved ~13 units (~16 deg) from first touch to 15 past contact as
+#   the load rose 12 -> 23 % (the Fin Ray fingers bending, the bottle squeezed); the hulls here are rigid.
 VISUAL_GROUP = 2  # the SO-101's group for what is drawn
 # the camera module's drawn and collided geoms, moved out of those groups: the wrist camera's renders leave them out
 OWN_MODULE_GROUPS = {VISUAL_GROUP: 4, COLLISION_GROUP: 5}
@@ -166,6 +189,32 @@ def _cut_jaw(spec: "mujoco.MjSpec", body: str, body_from_finger: np.ndarray) -> 
         g.meshname = cut.name
 
 
+def finger_pads(stl: Path) -> list[tuple[np.ndarray, np.ndarray]]:
+    """The finger's contact pads, in the STL's coordinates (m): (center, half sizes along its x, y, z) each.
+
+    Its straight inner face (the plane through `FINGER_TIP_MM`, square to the STL's y) cut into `PAD_SEGMENTS` along
+    the finger (x, tip to base), each as deep (z) as the face is there (11 mm at the tip to 24 at the base),
+    `PAD_THICKNESS_M` thick with its outer side on the face.
+    """
+    v = _read_stl(stl).reshape(-1, 3)
+    face_y = FINGER_TIP_MM[1]
+    face = v[np.abs(v[:, 1] - face_y) < 0.3]
+    if len(face) < 3:  # (another mesh than the XLeRobot finger's: no such face, no pads)
+        return []
+    edges = np.linspace(face[:, 0].min(), face[:, 0].max(), PAD_SEGMENTS + 1)
+    pads = []
+    for x0, x1 in zip(edges[:-1], edges[1:], strict=True):
+        band = face[(face[:, 0] >= x0) & (face[:, 0] <= x1)]
+        if len(band) < 2:
+            continue
+        z0, z1 = float(band[:, 2].min()), float(band[:, 2].max())
+        t = 1000.0 * PAD_THICKNESS_M
+        center = np.array([(x0 + x1) / 2, face_y - t / 2, (z0 + z1) / 2]) / 1000.0
+        half = np.array([(x1 - x0) / 2, t / 2, (z1 - z0) / 2]) / 1000.0
+        pads.append((center, half))
+    return pads
+
+
 def _add_fingers(spec: "mujoco.MjSpec", model: XleRobotModel, arm: str, q: np.ndarray, stl: Path) -> None:
     """The finger STL on both jaws, the jaws cut off at its base (module docstring); the fingers drawn only."""
     if Path(stl).read_bytes()[: len(LFS_POINTER)] == LFS_POINTER:
@@ -203,6 +252,24 @@ def _add_fingers(spec: "mujoco.MjSpec", model: XleRobotModel, arm: str, q: np.nd
             conaffinity=0,
             rgba=[0.95, 0.95, 0.95, 1.0],
         )
+        # what the finger collides with: pads on its straight inner face (`finger_pads`), not the mesh, whose convex
+        # hull takes in the ribbed body behind the face (up to 22 mm thick): bottles tipped over on it (grip_sim,
+        # 2026-11-17)
+        for k, (center, half) in enumerate(finger_pads(stl)):
+            pad = body_from_finger @ np.r_[center, 1.0]
+            spec.body(body).add_geom(
+                name=f"{name}_pad{k}",
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=list(half),
+                pos=pad[:3].tolist(),
+                quat=quat,  # (the STL's axes: the box's half sizes are along them)
+                group=COLLISION_GROUP,
+                density=0.0,  # (the finger's mass is the drawn mesh's)
+                friction=[FINGER_FRICTION, PAD_TORSIONAL_FRICTION, PAD_ROLLING_FRICTION],
+                condim=4,  # torsional friction too: a bottle held between two pads cannot spin in place
+                priority=1,  # the pads' friction and softness govern their contacts (else the larger of the two)
+                rgba=[0.9, 0.3, 0.3, 0.6],
+            )
 
 
 def arm_spec(
@@ -248,6 +315,15 @@ def arm_spec(
         )
     if fingers is not None:
         _add_fingers(spec, model, arm, q, fingers)
+    # friction that holds without creeping, for a grasp (MuJoCo's advice: an elliptic cone, a high impratio, no-slip)
+    spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
+    spec.option.impratio = 10.0
+    spec.option.noslip_iterations = 3
+    # the gripper's servo as measured (`GRIPPER_KP_NM_PER_RAD`, `GRIPPER_FORCE_NM`)
+    gripper = spec.actuator(GRIPPER)
+    gripper.gainprm[0] = GRIPPER_KP_NM_PER_RAD
+    gripper.biasprm[1] = -GRIPPER_KP_NM_PER_RAD
+    gripper.forcerange = [-GRIPPER_FORCE_NM, GRIPPER_FORCE_NM]
     k = model.intrinsics
     _camera(
         spec.worldbody,

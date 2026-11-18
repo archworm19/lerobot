@@ -51,6 +51,7 @@ from lerobot.felix_jr.server.protocol import DEFAULT_PORT
 # the bottle's axis this far in from the tips, by default: its radius and this margin, the bottle wholly between the
 # fingers (a 52 mm bottle at 15 mm, mostly beyond the tips, was pushed out as the claw closed: 2026-11-17)
 DEPTH_MARGIN_M = 0.005
+FINGER_LENGTH_MM = 66.0  # the XLeRobot finger, tip to base (`sim2real.robot.FINGER_BASE_MM` less its tip's x)
 PREVIEW_PERIOD_S = 0.15  # the placement window's refresh
 OUTLINE_COLORS = {"bottom": (255, 160, 0), "tips": (255, 64, 255), "top": (0, 255, 255)}  # RGB
 GRIP_AHEAD_M = (0.25, 0.21, 0.17)  # the grip pose's pinch point ahead of the arm's base: the first reached
@@ -330,6 +331,29 @@ class GripTest:
             cv2.destroyWindow(name)
             cv2.waitKey(1)
 
+    def ask_placement(self, bottle: Bottle) -> float | None:
+        """The depth the person actually stood the bottle at (mm from the tips to its axis), if not the drawn one.
+
+        Enter: as drawn (None). A number: that depth. "deep": as far into the jaws as it goes (its axis
+        `FINGER_LENGTH_MM` less its radius in: feno, 2026-11-17, was pushed in, not stood at its outline).
+        """
+        while True:
+            text = (
+                self.ask(
+                    f"  stood at the outline ({bottle.depth_mm:g} mm)? Enter, or the depth you used in mm, or 'deep': "
+                )
+                .strip()
+                .lower()
+            )
+            if not text:
+                return None
+            if text == "deep":
+                return FINGER_LENGTH_MM - bottle.diameter_mm / 2
+            try:
+                return float(text)
+            except ValueError:
+                print("  Enter, a number, or 'deep'")
+
     def _move(self, pose: dict[str, float], why: str) -> bool:
         """Move the arm to `pose` (the gripper not touched) after the sim's check and the person's yes."""
         from .gripper_sweep import FingerRenderer, path_clearance
@@ -389,6 +413,9 @@ class GripTest:
         }
         if not self.place(bottle):
             return False
+        actual = self.ask_placement(bottle)
+        if actual is not None:
+            record["depth_mm_actual"] = actual
         record["frame_open"] = self._frame("open")
         self.results.append(record)  # (saved as it fills)
         for past in PAST_CONTACT:
@@ -500,7 +527,7 @@ class GripTest:
             "| --- | --- | --- | --- | --- | --- | --- |",
         ]
         for r in self.results:
-            b = r["bottle"]
+            b = r["bottle"] | ({"depth_mm": r["depth_mm_actual"]} if "depth_mm_actual" in r else {})
             stalls = ", ".join(f"{c['stall']['pos']:.1f}/{c['stall']['load_pct']:+.0f}" for c in r["closes"])
             hold = r.get("hold", {})
             held = f"{hold['first']['load_pct']:+.0f} -> {hold['last']['load_pct']:+.0f}" if hold else ""
