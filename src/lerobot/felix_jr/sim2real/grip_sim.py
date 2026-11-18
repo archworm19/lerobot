@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 
-from lerobot.felix_jr.calibration.grip_test import Bottle, grip_pose
+from lerobot.felix_jr.calibration.grip_test import PROTECTION_REST_S, REST_PAST_CONTACT, Bottle, grip_pose
 from lerobot.felix_jr.calibration.gripper_sweep import table_height
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, pinch_frame
 from lerobot.utils.import_utils import _mujoco_available, require_package
@@ -135,6 +135,11 @@ def replay(
     hold = None
     if "hold" in trial:
         h = trial["hold"]
+        if (
+            "holds" in trial
+        ):  # (as `grip_test` did since the eased rest: the jaw to just past contact, then the hold)
+            phase = "rest, the jaw eased"
+            close_to(trial["contact_pos"] - REST_PAST_CONTACT, PROTECTION_REST_S)
         phase = f"hold at {h['target']:.1f}"
         hold = close_to(h["target"], HOLD_S) | {
             "real_pos": h["last"]["pos"],

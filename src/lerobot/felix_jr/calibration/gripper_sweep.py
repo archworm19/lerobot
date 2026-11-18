@@ -123,7 +123,13 @@ FIXED_BACK_M = 0.04  # the fixed finger's direction in the frame: from this far 
 MAX_GEOMETRY_RMS_PX = 3.0  # the corrected tips' miss, at most, for `--out` to write the fit
 MOUNT_SEARCH_DEG, MOUNT_COARSE_DEG, MOUNT_FINE_DEG = 20.0, 2.0, 0.5  # the finger's mount, searched about 0
 # what the sweep moves, or moves near the table: the gripper's bodies and the camera's
-SWEPT_BODIES = ("gripper", "moving_jaw_so101_v1", robot.CAMERA_MOUNT, robot.CAMERA_MODULE)
+SWEPT_BODIES = (
+    "gripper",
+    "moving_jaw_so101_v1",
+    robot.CAMERA_MOUNT,
+    robot.CAMERA_MODULE,
+    *robot.FINGER_BODIES.values(),
+)
 SEARCH_DEG, COARSE_DEG, FINE_DEG = 15.0, 0.5, 0.05  # the moving finger's search about the map's opening
 EDGE_PX = 3  # a detected tip this close to the frame's edge is cut off: no fit
 MIN_PIECE_PX = 100  # the finger's pieces smaller than this are specks

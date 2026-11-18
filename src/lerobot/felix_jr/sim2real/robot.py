@@ -79,26 +79,46 @@ COLLISION_GROUP = 3  # the SO-101's group for what collides (drawn only in a col
 #   12-23 % load, ~4.6 % of the stall torque a degree (as `tuning_notes.md` 3.6 has it at P 16). The SO-101 model's
 #   998 is ~100 times stiffer;
 GRIPPER_KP_NM_PER_RAD = 8.8
-# - its torque, capped at what it can keep: over ~20 % load for ~2 s its overload protection trips (45 mm bottle: 15
-#   past contact, 23 %, tripped; 10 past, 20 %, held 30 s at 16 %). 20 % of the STS3215's 3.35 N m stall torque (the
-#   model's forcerange);
+# - its torque, capped at the servo's torque limit (`Max_Torque_Limit` 500: 50 % of the STS3215's 3.35 N m stall torque,
+#   the model's forcerange; the SO-101's anti-burnout setup, `base_follower.py`). The load rose past 20 % on a close
+#   (23 % at 15 past contact, 33 % at 0) before the overload protection tripped (over ~20 % for ~2 s: not modeled; what
+#   it can keep is `GRIPPER_SUSTAINED_NM`; 2026-11-17);
 GRIPPER_STALL_NM = 3.35
-GRIPPER_FORCE_NM = 0.2 * GRIPPER_STALL_NM
-# - the fingers' sliding friction: a guess (printed fingers on plastic bottles). The 80 g bottle held through a 4 cm
-#   lift at 16 % load and the 116 g, slipperier one slipped: to be fitted to that (`grip_sim`);
-FINGER_FRICTION = 0.6
+GRIPPER_FORCE_NM = 0.5 * GRIPPER_STALL_NM
+GRIPPER_SUSTAINED_NM = 0.2 * GRIPPER_STALL_NM
+# - the fingers' sliding friction, fitted to the lifts (`grip_sim`, replaying the trials as run, the stiffness below):
+#   the 80 g bottle held through a 4 cm lift and the 116 g, slipperier one slipped after a couple of seconds. In the
+#   simulator the 116 g one (pushed in 40 mm) slips at 0.30 and holds from 0.33; the 80 g one holds at 0.30 and up:
+#   0.31, near the slipperier bottle's limit as it was. Two bottles: a first value;
+FINGER_FRICTION = 0.31
 # - the fingers collide as pads on their straight inner faces (`finger_pads`): `PAD_SEGMENTS` boxes along each,
 #   `PAD_THICKNESS_M` thick (the face: 67 mm long, 11 to 24 mm deep, flat; the convex hull of the whole finger, the first
 #   try, tipped the bottles over);
 PAD_SEGMENTS = 4
 PAD_THICKNESS_M = 0.002
 PAD_TORSIONAL_FRICTION, PAD_ROLLING_FRICTION = 0.005, 0.0001
-# - not modeled yet: the fingers' give. The real stall moved ~13 units (~16 deg) from first touch to 15 past contact as
+# - the fingers' give: each finger pivots at its base about the hinge's axis on a spring (`FINGER_STIFFNESS_NM_PER_RAD`;
+#   one joint for the Fin Ray's bending). The real stall moved ~13 units (~16 deg of the jaw) from first touch to 15
+#   past contact as the load rose 12 -> 23 % (0.37 N m): with the force ~6 cm from the hinge and ~3.8 cm from each
+#   finger's base, two fingers in series, ~1 N m/rad each. Fitted (`grip_sim`) to the 45 mm bottle, the stiffer one: at
+#   1.0-1.4 its five stalls within 0.2-0.3 gripper.pos units (RMS) and its loads 1.4-2.5 %; the 53 mm one gave more at
+#   less load (its own give, a softer bottle: an object's, not the gripper's);
+FINGER_STIFFNESS_NM_PER_RAD = 1.2
+FINGER_DAMPING = 0.005  # (about critical for a finger's ~15 g, 3 cm)
+FINGER_GIVE_RANGE_RAD = 0.6
+FINGER_PIVOT_Z_MM = (
+    12.0  # the pivot across the hinge: the face's middle at the finger's base (it is 24 mm deep there)
+)
+# - not modeled: the Fin Ray's wrapping along its length (one joint, not a chain). The real stall moved ~13 units (~16 deg) from first touch to 15 past contact as
 #   the load rose 12 -> 23 % (the Fin Ray fingers bending, the bottle squeezed); the hulls here are rigid.
 VISUAL_GROUP = 2  # the SO-101's group for what is drawn
 # the camera module's drawn and collided geoms, moved out of those groups: the wrist camera's renders leave them out
 OWN_MODULE_GROUPS = {VISUAL_GROUP: 4, COLLISION_GROUP: 5}
 FINGER_FIXED, FINGER_MOVING = "finger_fixed", "finger_moving"
+FINGER_BODIES = {
+    FINGER_FIXED: "finger_fixed_body",
+    FINGER_MOVING: "finger_moving_body",
+}  # (on the jaws, sprung)
 FINGER_STL = Path(__file__).parent / "meshes" / "xlerobot_finger.stl"  # the XLeRobot's (`meshes/README.md`)
 LFS_POINTER = b"version https://git-lfs"  # what a git LFS file holds until `git lfs pull`
 # the XLeRobot finger's STL, in its own coordinates (mm, an assembly's): x from the tip to the base, y out of the
@@ -240,13 +260,28 @@ def _add_fingers(spec: "mujoco.MjSpec", model: XleRobotModel, arm: str, q: np.nd
         body_pose = model.frame_pose(f"{arm}_{link}", q)
         body_from_finger = np.linalg.inv(body_pose) @ pinch @ placed
         _cut_jaw(spec, body, body_from_finger)
-        pos, quat = _pos_quat(body_from_finger)
-        spec.body(body).add_geom(
+        # the finger on its own body, pivoting at its base about the hinge's axis (the STL's z) on a spring: the Fin Ray's
+        # give (`FINGER_STIFFNESS_NM_PER_RAD`); its geoms in that body's frame, the STL's axes, the pivot at its origin
+        pivot = np.array([FINGER_BASE_MM, FINGER_TIP_MM[1], FINGER_PIVOT_Z_MM]) / 1000.0
+        hinge = body_from_finger.copy()
+        hinge[:3, 3] = (body_from_finger @ np.r_[pivot, 1.0])[:3]
+        hinge_pos, hinge_quat = _pos_quat(hinge)
+        finger = spec.body(body).add_body(name=FINGER_BODIES[name], pos=hinge_pos, quat=hinge_quat)
+        finger.add_joint(
+            name=f"{name}_give",
+            type=mujoco.mjtJoint.mjJNT_HINGE,
+            axis=[0.0, 0.0, 1.0],
+            stiffness=FINGER_STIFFNESS_NM_PER_RAD,
+            damping=FINGER_DAMPING,
+            range=[-FINGER_GIVE_RANGE_RAD, FINGER_GIVE_RANGE_RAD],
+            limited=mujoco.mjtLimited.mjLIMITED_TRUE,
+        )
+        finger.add_geom(
             name=name,
             type=mujoco.mjtGeom.mjGEOM_MESH,
             meshname="finger",
-            pos=pos,
-            quat=quat,
+            pos=(-pivot).tolist(),
+            quat=[1.0, 0.0, 0.0, 0.0],
             group=VISUAL_GROUP,
             contype=0,
             conaffinity=0,
@@ -256,13 +291,12 @@ def _add_fingers(spec: "mujoco.MjSpec", model: XleRobotModel, arm: str, q: np.nd
         # hull takes in the ribbed body behind the face (up to 22 mm thick): bottles tipped over on it (grip_sim,
         # 2026-11-17)
         for k, (center, half) in enumerate(finger_pads(stl)):
-            pad = body_from_finger @ np.r_[center, 1.0]
-            spec.body(body).add_geom(
+            finger.add_geom(
                 name=f"{name}_pad{k}",
                 type=mujoco.mjtGeom.mjGEOM_BOX,
                 size=list(half),
-                pos=pad[:3].tolist(),
-                quat=quat,  # (the STL's axes: the box's half sizes are along them)
+                pos=(center - pivot).tolist(),
+                quat=[1.0, 0.0, 0.0, 0.0],  # (the STL's axes: the box's half sizes are along them)
                 group=COLLISION_GROUP,
                 density=0.0,  # (the finger's mass is the drawn mesh's)
                 friction=[FINGER_FRICTION, PAD_TORSIONAL_FRICTION, PAD_ROLLING_FRICTION],
