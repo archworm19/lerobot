@@ -157,18 +157,95 @@ servo's (its calibrated range); only `pos_closed`, where the tips meet, was fitt
 - **Not calibrated: the contact pads** (next step 2): design geometry, the same for both arms, constants in
   `sim2real/robot.py` on the jaw bodies, checked with `view --collision`.
 
+## The grip, measured and simulated (2026-11-17)
+
+**Measured on the robot** (`calibration.grip_test`, the right arm, results in `calibration/scratch/grip_right_1117/`):
+upright bottles gripped from the side (the fingers 30-45 deg below level, the tips at half the bottle's height), the
+bottle stood where the wrist picture's outline showed (`--depth-mm`, or wholly between the fingers by default), the jaw
+closed to the map's contact and 2, 5, 10, 15 `gripper.pos` units past it (2 s each, the servo's position, load and
+current sampled: the server's `grip`, protocol 6), a 30 s hold, a 4 cm lift.
+
+| bottle | first stall (map's contact) | stalls, 0 -> 15 past | load, 0 -> 15 past | 30 s hold at 10 past | lift |
+| --- | --- | --- | --- | --- | --- |
+| pyri, 45 mm, 80 g, 27.5 mm in (5 trials) | 25.1 (23.2) | 25.1, 23.5, 20.7, 16.3, 12.0 | 12 -> 23 % | 16.4 %, steady | held |
+| feno, 53 mm, 116 g, pushed fully in (~40 mm) | 29.4 (27.7) | 29.4, 27.9, 25.1, 20.8, 16.7 | 11 -> 24 % | 16.0 %, steady | slipped after ~2 s |
+
+- **The stalls repeat** to 0.1-0.3 units over five trials of one bottle: the curve is the gripper's and the bottle's.
+- **The fingers give:** the jaw goes on closing ~13 units (~16 deg) past first touch as the load rises 12 -> 23 %.
+- **The overload protection** (`tuning_notes.md` 3.10): over ~20 % load for ~2 s it trips (the close to 0 at ~33 %
+  tripped in 2.2 s; 15 past contact, 23 %, tripped 0.2 s into its hold); 10 past contact (~20 %) holds.
+- **A grip near the tips pushes the bottle out:** feno at 15 mm in, mostly beyond the tips, popped out at the close
+  to 0; at 27.5 mm in, pyri held through every close.
+
+**In the simulator** (`sim2real/robot.py` has every value with what set it; `sim2real.grip_sim` replays a trial,
+`sim2real.finger_models` compares the finger models):
+
+- **The fingers collide as pads on their straight inner faces** (`finger_pads`: 4 boxes 2 mm thick on the 67 mm face,
+  11 to 24 mm deep), not the mesh: its convex hull takes in the ribbed body (22 mm behind the face), and a bottle
+  gripped on it tipped over. Torsional friction (`condim` 4), the pads' contact parameters first (`priority`), an
+  elliptic friction cone, `impratio` 10, no-slip iterations.
+- **The gripper's servo as measured:** its gain 8.8 N m/rad (the stalls 1.9-3.8 units short at 12-23 %; the stock
+  SO-101 model's 998 is ~100 times stiffer), its torque capped at the servo's limit, 50 % of 3.35 N m (what it keeps:
+  20 %; the protection's trip is not modeled).
+- **The fingers' give:** each finger on a hinge at its base with a spring, 1.2 N m/rad, fitted to pyri's stalls. The
+  joints' armature is the SO-101 default the fit was made with (0.005 kg m^2: an explicit 0 moved the stalls 0.8).
+- **Friction 0.31**, fitted to the lifts (feno slips below 0.33, pyri holds from 0.30). Two bottles: a first value.
+
+The four finger models (`robot.FINGER_MODELS`), each fitted to pyri's stalls, both trials replayed (single
+environment, CPU, the scene's build included):
+
+| model | pyri stall / load RMS | feno stall / load RMS | lifts right | x real time |
+| --- | --- | --- | --- | --- |
+| **sprung** (default): one sprung hinge a finger | **0.1** / 2.1 | 0.7 / 4.5 | both | **15-20** |
+| chain: the face's 4 pads hinged base to tip, 2.0 N m/rad each | 0.3 / **1.3** | 0.8 / 4.7 | both | 12-14 |
+| soft: rigid pads, soft contact (best of 8: `solimp` width 3 cm) | 0.8 / 5.3 | 2.2 / 11.5 | feno wrong | 8-13 |
+| rigid: no give (the jaw stops at first touch, at the cap) | 10.0 / 28.6 | 9.6 / 28.6 | feno wrong | 16-18 |
+
+(stall RMS in `gripper.pos` units, load RMS in %.) The chain fits as well as the one hinge, slower: nothing in the
+numbers yet says the fingers' wrapping matters for these bottles. **But by eye the chain looks closest to the real
+fingers** (the video: its pads curl around the bottle as the Fin Ray does; the one hinge swings the face stiff). In
+every model only the pads move: the drawn finger is one rigid body (a skin over the pads, as dexdesigner blends one,
+would make it follow). To make that a number: each model's pads against the real fingers' inner edge in the wrist
+frames saved at every close (the sweep's outline agreement, `calibration.gripper_sweep`). Feno's loads are off by ~5 % in every model: a softer bottle (an object's
+give, which none of them has). Videos: `finger_models --video`, `grip_sim`'s replays (`on_frame`).
+
+**Not tried** (from a survey of Fin Ray models in MuJoCo, 2026-11-17), and what each would take:
+
+- **The full beam lattice** (rails and ribs as hinged box chains, closed with weld or connect equalities; stiffness
+  `E I / l` per joint: RakshinEgor/FinRay_MuJoCo, BE2R-Lab-RND-AI-Grasping/finray_synthesis, and the cleaner
+  uksangyoo/dexdesigner `hands/finray/`, TPU's E ~9 MPa "provisional"). The real wrapping, still rigid bodies, but
+  stiff loop closures: a 1e-5 s step in one, chatter at 1 ms in another. Worth it if a trial that stresses wrapping
+  (below) is missed by "sprung" and "chain".
+- **A 2D flex skeleton** (MuJoCo's own `model/flex/gripper_2d.xml`, "Gripper 2D Fin Ray": a `flexcomp` `dim=2`,
+  `dof="2d"`, inextensible edges, the base vertices pinned, at 2 ms). The most native; planar. Needs a newer MuJoCo
+  than ours (3.8.1; the survey ran 4.0.1) and a training pipeline that supports flex: a dependency change to ask about.
+- **Volumetric FEM or elastic rods** (a `flexcomp dim=3` from the finger's STL with `<elasticity young poisson>`, as
+  `gripper_trilinear.xml`; or the rails as 1D flex / the cable plugin with the ribs on connect equalities). The most
+  faithful (out-of-plane twist too), costly with thin ribs; no Fin Ray example found. A reference to calibrate the
+  others against, not for training.
+- **A Cosserat-rod solver outside MuJoCo** (bleebron/finray-sim, after Sheikh Sofla et al. 2025): an indentation-curve
+  reference for the finger alone.
+- For training at scale, the common practice (real-stanford/scalingup and others) is the soft-contact model with its
+  contact parameters randomized; here the sprung hinge fits better at about the same cost, so it is the one randomized.
+
+**To tell the models apart next:** trials where the wrapping should matter: a small bottle (2-3 cm), a grip near the
+tips (`grip_test --depth-mm 15`), an off-center grip; and the friction pinned directly: pyri with water added until it
+slips. Each replays into `finger_models` as it is.
+
 ## Next
 
 1. **The gripper sweep on both arms** (`gripper_sweep --arm both --out <urdf>`): the left arm's fitted twice, the
    right's to run; a few sweeps per arm to average the hinge.
-2. **The jaws' contacts:** pads (boxes, capsules) where the real claw touches, the meshes' hulls left to the rest;
-   `view --collision` shows them.
+2. ~~**The jaws' contacts:** pads (boxes, capsules) where the real claw touches, the meshes' hulls left to the rest;
+   `view --collision` shows them.~~ **Done (2026-11-17):** pads on the fingers' faces, the fingers sprung (above).
 3. **A grasp check before any RL:** open, approach a cylinder, close, lift: does it hold, as the real claw holds a
    bottle? Tune the friction, the contacts' softness (`solref`, `solimp`) and the gripper servo's force. **The real
    data for it: `calibration.grip_test`** (2026-11-17): bottles of known diameter and mass, gripped from the side,
    the closes sampled (where the jaw stalls past the map's contact, the servo's load and current: the server's `grip`,
    protocol 6), a 30 s hold (the overload protection), a lift (held, slipped or dropped), wrist frames throughout
-   (the fingers' give, against the sim's rigid outline). The simulator's grip is then fitted to it.
+   (the fingers' give, against the sim's rigid outline). The simulator's grip is then fitted to it. **Done for two bottles
+   (2026-11-17, above):** the stalls within 0.1-0.7 units, both lifts as on the robot. Still: the trials that stress
+   the fingers' wrapping, and the friction pinned directly (above).
 4. **The grasp environment:** starts near an attack pose (as the head's plan leaves it), the robot's errors
    randomized, the wrist camera's pose on the gripper among them (about half a degree, a millimeter or two: the mounts
    move, `hardware_risks.md`); then the teacher.

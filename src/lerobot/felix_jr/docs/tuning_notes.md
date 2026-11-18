@@ -217,6 +217,23 @@ limit for a while, the firmware drops the torque to 25 %). So:
 
 Not measured: the load at a few overshoots, how long until protection trips, the pages' friction.
 
+### 3.10 The gripper's overload protection trips at ~20 % load for ~2 s; stop a grasp ~10 units past contact *(measured; grip_test)*
+
+`calibration.grip_test` (2026-11-17, right arm, upright bottles from the side; `sim2real_grasp.md` has the table):
+the jaw closed to the map's contact, then 2, 5, 10 and 15 `gripper.pos` units past it, 2 s each, the servo sampled.
+
+- **The load past contact:** ~12 % at contact, 15 % at 2 past, 16 % at 5, 20 % at 10, 23 % at 15; ~33 % closing to 0
+  on a 45 mm bottle. The stall itself moves ~13 units over those (the Fin Ray fingers bend): the overshoot sets the
+  force through the fingers' give, not only the servo's error (3.9's "P times the error" is half of it).
+- **The protection trips over ~20 % for ~2 s,** counted across a close and the hold after: the close to 0 (33 %)
+  tripped 2.2 s in; 15 past (23 %) held its 2 s close, then tripped 0.2 s into the hold at the same target; resting at
+  15 past also tripped. 10 past (19.6 % at the stall, 16.4 % after settling) held 30 s, five times. The registers were
+  not read: ~20 % / ~2 s is what every trial agrees with (the anti-burnout setup sets `Protection_Current`, not
+  read either). Once tripped, every reply carries the overload flag (`bus.read` raises on it: the server now reads
+  past it, `server/hardware._tolerant_read`, and opens the jaw a little).
+- **So:** close a grasp to ~10 units past the object's contact (in servo units, as 3.9 says), not to 0; that is a grip
+  the servo keeps. It lifted the 80 g bottle; the 116 g, slipperier one slipped (friction, `sim2real_grasp.md`).
+
 ## 4. Open questions
 
 - **Joint-speed limit feel.** Logged numbers look good (section 3.7); the subjective result is not recorded.
