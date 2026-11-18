@@ -24,6 +24,13 @@ recorded with the reason (`Rejected`), and each stage is timed (`GraspCandidates
   `TableEstimate`, other objects; without any, a level plane at the target's lower end) at the attack point and the
   grasp, through the model (`wrist_camera_position`). With the gripper upside down the camera hangs ~5 cm below the
   pinch point: ruler1 put it on the table. Not checked without the camera's pose on the gripper.
+- **lift:** the arm reaches the lift (`GraspSettings.lift` above the grasp, as `plan_pick` lifts), from the grasp's
+  joints, its joints `min_joint_margin_deg` from their bounds too.
+- **paths:** the moves attack point -> grasp -> lift, straight in the joints as the arm makes them, keep the arm's links,
+  both fingertips and the wrist camera's board (`path_points`) `GraspSettings.path_clearance` from every obstacle, or
+  no nearer than a pose that is already nearer (a grasp low over the table). The joint session's wrist camera hit
+  the table on a move no pose checked (2026-11-17). On bowl1's jar the two add ~3 % (1.9 of 60 s: they run on the few
+  that pass the rest).
 
 Whether the grasp is seen is not checked here: the head camera, behind the gripper, could not judge it (bowl3, bowl4),
 and the wrist cameras will (`docs/object_grasping.md`, section 6).
@@ -75,7 +82,20 @@ STAGES = (
     "grasp",
     "joints",
     "wrist camera",
+    "lift",
+    "paths",
 )  # in order: cheap first, each after its needs
+LIFT_M = 0.03  # the lift after the close (bowl1: 3 cm, then hold and look)
+# the moves attack point -> grasp -> lift (straight in the joints, as the arm makes them) keep the arm this far from
+# every obstacle, or, where a pose is already nearer (a grasp low over the table), no nearer than it: the arm's links,
+# both fingertips (the jaws as they are on that move) and the wrist camera's board (`path_points`). The joint session's
+# camera hit the table on a move no pose checked (2026-11-17)
+PATH_CLEARANCE_M = 0.01
+PATH_STEPS = 12  # each move checked at this many poses along it
+PATH_LINKS = ("upper_arm_link", "lower_arm_link", "wrist_link", "gripper_link")  # their origins
+CAMERA_BOARD_HALF_M = (
+    0.0225  # the wrist camera's board, 45 mm square about the lens (`docs/hardware_risks.md`)
+)
 
 
 def _cm(value: float) -> str:
@@ -107,8 +127,12 @@ class GraspSettings:
     sag_lift: float = SAG_LIFT_M
     # the wrist camera's optics this far from every obstacle, at least
     camera_clearance: float = CAMERA_CLEARANCE_M
-    # every joint this far from its bound at the attack point and the grasp (deg)
+    # every joint this far from its bound at the attack point, the grasp and the lift (deg)
     min_joint_margin_deg: float = MIN_JOINT_MARGIN_DEG
+    # the lift after the close, solved and checked with the rest (`plan_pick` lifts as much)
+    lift: float = LIFT_M
+    # the moves between the poses kept clear of the obstacles (`PATH_CLEARANCE_M`)
+    path_clearance: float = PATH_CLEARANCE_M
     # rank by the target's `approach_preference` (after how antipodal; e.g. a cylinder from the side), in the steps of
     # `rank_step_deg`; False: not at all
     prefer_approach: bool = True
@@ -266,6 +290,12 @@ class GraspCandidate:
     camera_clearance_m: float = float("nan")
     # how far (deg) the solved gripper axis is from the target's best way in (`Primitive.approach_preference`)
     approach_preference_deg: float = 0.0
+    lift: FrameSolution | None = (
+        None  # the arm's solved pose at the lift (`GraspSettings.lift` above the grasp)
+    )
+    # the moves' nearest approach to an obstacle (m: the arm's links, the fingertips, the wrist camera's board; nan:
+    # not checked)
+    path_clearance_m: float = float("nan")
 
     @property
     def antipodal_error_deg(self) -> float:
@@ -514,6 +544,34 @@ def _evaluate(
             f"{_cm(clearance)} cm from {nearest.describe() if nearest is not None else 'it'}",
         )
 
+    start = time.perf_counter()
+    lift_target = claw.root_from_pinch.copy()
+    lift_target[2, 3] += settings.lift
+    at_lift = _solve(ik, claw, lift_target, settings, init=at_grasp.x)
+    timed("lift", start)
+    reason = _rejection(at_lift, "lift", settings)
+    lift_margin = _limit_margin_deg(ik, at_lift)
+    if reason is None and lift_margin < settings.min_joint_margin_deg:
+        reason = "a joint too near its bound at the lift"
+    if reason is not None:
+        return Rejected(
+            grasp, arm, fixed_side, "lift", reason, claw, at_attack, at_grasp, f"{lift_margin:.0f} deg"
+        )
+
+    start = time.perf_counter()
+    path_clearance = float("nan")
+    if obstacles:
+        open_deg = _opening_deg(model, arm, claw.open_apart)
+        closed_deg = _opening_deg(model, arm, claw.close_apart)
+        moves = ((at_attack, at_grasp, open_deg), (at_grasp, at_lift, closed_deg))
+        path_clearance, why = _paths_clear(model, arm, moves, obstacles, settings.path_clearance)
+        timed("paths", start)
+        if why is not None:
+            return Rejected(
+                grasp, arm, fixed_side, "paths", why, claw, at_attack, at_grasp, f"{_cm(path_clearance)} cm"
+            )
+    limit_margin = min(limit_margin, lift_margin)
+
     cost = sum(
         (s.position_error_m / POSITION_TOL_M) ** 2
         + float(np.sum((np.asarray(s.rotation_error_deg) / np.asarray(ROTATION_SCALES_DEG)) ** 2))
@@ -530,7 +588,67 @@ def _evaluate(
         settings,
         clearance,
         preference,
+        at_lift,
+        path_clearance,
     )
+
+
+def _opening_deg(model: XleRobotModel, arm: str, apart: float) -> float | None:
+    """The jaws' opening (deg) with the tips `apart` m apart; None without the arm's gripper map."""
+    if arm not in model.gripper_maps:
+        return None
+    return float(model.opening_for_width(arm, min(apart, 2 * model.jaw_radius(arm))))
+
+
+def path_points(
+    model: XleRobotModel, arm: str, joints: Mapping[str, float], opening_deg: float | None
+) -> np.ndarray:
+    """The arm's points kept clear of obstacles on a move (root frame, (N, 3)) at `joints` (LeRobot degrees).
+
+    The origins of its links (`PATH_LINKS`), the fixed fingertip and, with the jaws' opening known, the moving one, and
+    the wrist camera's board's four corners (with its pose calibrated).
+    """
+    q = model.joint_vector({arm: dict(joints)})
+    points = [model.frame_pose(f"{arm}_{link}", q)[:3, 3] for link in PATH_LINKS]
+    points.append(model.pinch_point(arm, q))
+    if opening_deg is not None:
+        points.append(model.moving_tip(arm, q, opening_deg))
+    if arm in model.wrist_cameras:
+        camera = model.wrist_camera_pose(arm, q)
+        h = CAMERA_BOARD_HALF_M
+        corners = np.array([[x, y, 0.0] for x in (-h, h) for y in (-h, h)])
+        points.extend(corners @ camera[:3, :3].T + camera[:3, 3])
+    return np.array(points)
+
+
+def _clearance(points: np.ndarray, obstacles: Sequence[Surface]) -> float:
+    return float(min(np.min(o.surface_distance(points)) for o in obstacles))
+
+
+def _paths_clear(
+    model: XleRobotModel,
+    arm: str,
+    moves: Sequence[tuple[FrameSolution, FrameSolution, float | None]],
+    obstacles: Sequence[Surface],
+    clearance: float,
+) -> tuple[float, str | None]:
+    """The moves' nearest approach to the obstacles (m), and why a move fails (None: none does).
+
+    Each move straight in the joints (`PATH_STEPS` poses), its points (`path_points`, the jaws at its opening) kept
+    `clearance` from every obstacle, or no nearer than the nearer of its two ends where that is already less.
+    """
+    nearest = np.inf
+    for a, b, opening in moves:
+        ends = [_clearance(path_points(model, arm, s.joints, opening), obstacles) for s in (a, b)]
+        floor = min(clearance, *ends) - 1e-3
+        for t in np.linspace(0.0, 1.0, PATH_STEPS + 1)[1:-1]:
+            joints = {k: a.joints[k] + t * (b.joints[k] - a.joints[k]) for k in a.joints}
+            here = _clearance(path_points(model, arm, joints, opening), obstacles)
+            nearest = min(nearest, here)
+            if here < floor:
+                return nearest, "a move passes too near an obstacle"
+        nearest = min(nearest, *ends)
+    return float(nearest), None
 
 
 def _ranked(passed: Sequence[GraspCandidate], n: int) -> tuple[GraspCandidate, ...]:
@@ -609,7 +727,6 @@ def grasp_candidates(
 
 
 STAGE_UP_M = 0.06  # the staging pose: this far above the attack point (bowl1: 6 cm, every pick landed)
-LIFT_M = 0.03  # the lift after the close (bowl1: 3 cm, then hold and look)
 PICK_GRIP = {"start": "open", "pick": "close"}  # `execute.prepare_execution`'s grip for a whole `plan_pick`
 
 

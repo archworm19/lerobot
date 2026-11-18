@@ -14,6 +14,7 @@ from lerobot.felix_jr.calibration.xle_robot_model import (  # noqa: E402
     GripperMap,
     XleRobotModel,
 )
+from lerobot.felix_jr.harness import grasping  # noqa: E402
 from lerobot.felix_jr.harness.execute import prepare_execution  # noqa: E402
 from lerobot.felix_jr.harness.grasping import (  # noqa: E402
     ATTACK_M,
@@ -364,7 +365,9 @@ def test_the_joints_keep_a_margin_from_their_bounds(model):
         n=50,
         settings=GraspSettings(min_joint_margin_deg=0.0),
     )
-    assert loose.passed == found.passed + len(near)
+    # (the lift's joints too, since the lift is a stage: `GraspSettings.lift`)
+    near_at_lift = [r for r in found.rejected if r.stage == "lift" and "bound" in r.reason]
+    assert loose.passed == found.passed + len(near) + len(near_at_lift)
     nothing = grasp_candidates(
         JAR,
         model,
@@ -405,3 +408,35 @@ def test_obstacles_are_surfaces_and_each_counts():
     )
     assert blocked.passed < plain.passed
     assert all(c.camera_clearance_m >= GraspSettings().camera_clearance for c in blocked.candidates)
+
+
+def test_a_move_that_passes_an_obstacle_its_poses_clear_is_rejected(model):
+    """The paths stage (`_paths_clear`): a small sphere where the fingertip passes halfway from the attack point to the
+    grasp, clear of both ends, rejects the move; the same sphere well away does not. The lift is solved with the rest."""
+    from lerobot.felix_jr.harness.grasping import _paths_clear, path_points
+
+    found = grasp_candidates(JAR, model, BOWL1_CAPTURE, arms=("right",), where={"psi": (0.0, 10.0)}, n=1)
+    c = found.candidates[0]
+    assert c.lift is not None and np.isfinite(c.path_clearance_m)
+    a, b = c.attack, c.grasp
+    halfway = {k: (a.joints[k] + b.joints[k]) / 2 for k in a.joints}
+    tip = path_points(model, "right", halfway, None)[len(grasping.PATH_LINKS)]  # the fixed fingertip, halfway
+
+    class Sphere:
+        def __init__(self, center, radius=0.004):
+            self.center, self.radius = np.asarray(center), radius
+
+        def surface_distance(self, points):
+            return np.linalg.norm(np.atleast_2d(points) - self.center, axis=1) - self.radius
+
+        def describe(self):
+            return "a sphere"
+
+    ends = [
+        float(np.min(Sphere(tip).surface_distance(path_points(model, "right", s.joints, None))))
+        for s in (a, b)
+    ]
+    assert min(ends) > 0.01  # both poses clear of it
+    clearance, why = _paths_clear(model, "right", [(a, b, None)], [Sphere(tip)], 0.01)
+    assert why is not None and clearance < 0.01  # (it stops at the first pose too near: on the way in)
+    assert _paths_clear(model, "right", [(a, b, None)], [Sphere(tip + [0.0, 0.0, 0.3])], 0.01)[1] is None
