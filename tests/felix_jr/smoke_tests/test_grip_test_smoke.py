@@ -37,7 +37,7 @@ def test_a_bottle_is_gripped_held_and_lifted_and_saved(tmp_path, monkeypatch):
     }
     contact = model.gripper_pos_for("right", model.opening_for_width("right", 0.065))
     hardware.arm_backend.object_pos["right_arm"] = contact
-    answers = iter(["water", "65", "200", "500", "", "y", "", "y", "held", "y", ""])
+    answers = iter(["water", "65", "200", "500", "y", "", "y", "held", "y", ""])
     asked = []
 
     def ask(prompt):
@@ -46,9 +46,13 @@ def test_a_bottle_is_gripped_held_and_lifted_and_saved(tmp_path, monkeypatch):
 
     try:
         with FelixClient(address, timeout_s=10.0) as client, client.session():
-            test = grip_test.GripTest(client, "right", tmp_path, model, table_height(model, "right"), ask=ask)
+            test = grip_test.GripTest(
+                client, "right", tmp_path, model, table_height(model, "right"), ask=ask, window=False
+            )
             bottle = test.ask_bottle()
-            assert bottle == grip_test.Bottle("water", 65.0, 200.0, 500.0, grip_test.DEPTH_MM)
+            assert bottle == grip_test.Bottle(
+                "water", 65.0, 200.0, 500.0, 32.5 + 1000 * grip_test.DEPTH_MARGIN_M
+            )
             assert test.trial(bottle), asked
     finally:
         server.shutdown()
@@ -66,3 +70,90 @@ def test_a_bottle_is_gripped_held_and_lifted_and_saved(tmp_path, monkeypatch):
     assert trial["hold"]["samples"] and trial["lift"]["result"] == "held"
     assert all((tmp_path / c["frame"]).is_file() for c in trial["closes"])
     assert "water" in test.summary()
+    # where the outline is drawn: the bottle's rings in the wrist picture, around the model's grasp point
+    q = model.joint_vector({"right": trial["pose"]})
+    rings = test.bottle_outline(bottle, q)
+    assert set(rings) == {"bottom", "tips", "top"} and all(r.shape == (48, 2) for r in rings.values())
+
+
+def test_a_bottle_that_slips_out_is_marked_and_not_lifted(tmp_path, monkeypatch):
+    """Nothing stops the fake's jaw (the bottle gone): at the hold to 0 it passes `SLIP_UNITS` beyond contact, the trial
+    is marked slipped, the lift is not asked for, and the frames are numbered by their trial."""
+    monkeypatch.setattr(grip_test, "HOLD_S", 2.0)
+    hardware = FakeHardware(arm_time_scale=0.02)
+    server = RobotServer(hardware)
+    address = server.bind("tcp://127.0.0.1:*")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    model = XleRobotModel.load(api.MODEL)
+    robot = hardware.arm_backend.calibration()
+    model.arm_calibration = {arm: arm_record(robot[f"{arm}_arm"]) for arm in ("left", "right")}
+    model.gripper_maps = {
+        arm: replace(m, calibration=motor_record(robot[f"{arm}_arm"]["gripper"]))
+        for arm, m in model.gripper_maps.items()
+    }
+    answers = iter(["feno", "52", "114", "116", "y", "", ""])
+    asked = []
+
+    def ask(prompt):
+        asked.append(prompt)
+        return next(answers)
+
+    try:
+        with FelixClient(address, timeout_s=10.0) as client, client.session():
+            test = grip_test.GripTest(
+                client, "right", tmp_path, model, table_height(model, "right"), ask=ask, window=False
+            )
+            assert test.trial(test.ask_bottle()), asked
+    finally:
+        server.shutdown()
+        thread.join(timeout=3.0)
+        server.close()
+    trial = json.loads((tmp_path / "results.json").read_text())[0]
+    assert trial["slipped"]["during"] == "the hold at 0" and "lift" not in trial
+    assert not any("lift" in a for a in asked)
+    assert all(c["frame"].startswith("frames/00_") for c in trial["closes"])
+    assert "slipped" in test.summary()
+
+
+def test_an_overload_is_recorded_the_jaw_relieved_and_nothing_lifted(tmp_path, monkeypatch):
+    """The servo's overload protection trips at the hold to 0 (the fake's past 50 % load): the grip returns the samples
+    with the flag (not an error), the jaw opened a little; the trial records when, and the lift is not asked for."""
+    monkeypatch.setattr(grip_test, "HOLD_S", 2.0)
+    hardware = FakeHardware(arm_time_scale=0.02)
+    hardware.arm_backend.overload_above = 50.0
+    server = RobotServer(hardware)
+    address = server.bind("tcp://127.0.0.1:*")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    model = XleRobotModel.load(api.MODEL)
+    robot = hardware.arm_backend.calibration()
+    model.arm_calibration = {arm: arm_record(robot[f"{arm}_arm"]) for arm in ("left", "right")}
+    model.gripper_maps = {
+        arm: replace(m, calibration=motor_record(robot[f"{arm}_arm"]["gripper"]))
+        for arm, m in model.gripper_maps.items()
+    }
+    contact = model.gripper_pos_for("right", model.opening_for_width("right", 0.045))
+    hardware.arm_backend.object_pos["right_arm"] = contact
+    answers = iter(["pyri", "45", "130", "80", "y", "", ""])
+    asked = []
+
+    def ask(prompt):
+        asked.append(prompt)
+        return next(answers)
+
+    try:
+        with FelixClient(address, timeout_s=10.0) as client, client.session():
+            test = grip_test.GripTest(
+                client, "right", tmp_path, model, table_height(model, "right"), ask=ask, window=False
+            )
+            assert test.trial(test.ask_bottle()), asked
+    finally:
+        server.shutdown()
+        thread.join(timeout=3.0)
+        server.close()
+    trial = json.loads((tmp_path / "results.json").read_text())[0]
+    assert trial["overload"]["during"] == "the hold at 0" and "lift" not in trial and "slipped" not in trial
+    assert len(trial["closes"]) == len(grip_test.PAST_CONTACT)  # (10 past contact: 40 %, under the limit)
+    assert not any("lift" in a for a in asked)
+    assert "overload" in test.summary()

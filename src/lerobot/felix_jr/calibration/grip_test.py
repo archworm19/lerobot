@@ -10,18 +10,21 @@ change over a hold (the servo's overload protection), and whether it holds throu
 
 Per bottle, in the terminal (the arm moves first, the bottle is placed after, so the arm never sweeps into it):
 
-1. **The bottle:** a label, its diameter (calipers, mm), height (mm), mass (g, the kitchen scale), and how deep in the
-   jaws it will stand (mm from the tips to its axis; default `DEPTH_MM`). Enter on a number keeps the last bottle's.
+1. **The bottle:** a label, its diameter (calipers, mm), height (mm) and mass (g, the kitchen scale). Enter on a
+   number keeps the last bottle's. Its depth in the jaws (the fingertips to its axis) is its radius and
+   `DEPTH_MARGIN_M`, the bottle wholly between the fingers (`--depth-mm` sets one for every bottle instead).
 2. **The grip pose:** from the side (the jaws closing across, horizontally, the wrist camera on top), the fingers as
    near level as reachable (`GRIP_TILTS_DEG`) `GRIP_AHEAD_M` ahead of the arm's base, the tips at `TIP_HEIGHT` of the bottle's height. The sim checks the way there and
    the pose (the gripper's lowest over the table, `MIN_CLEARANCE_M`); it asks before moving. The jaws open to the
    bottle's width plus `OPEN_MARGIN_M` (the gripper map).
-3. **Stand the bottle** against the fixed finger (the one that does not move), its axis the depth in from the tips;
-   Enter.
+3. **Stand the bottle** where its outline is drawn on the live wrist picture (`place`: its circle on the table, at
+   the tips' height and at its top, from the model's grasp point for its width moved back by the depth); Enter in
+   that window (`--no-window`: in the terminal, by eye).
 4. **The closes:** to the map's contact for that width, then `PAST_CONTACT` units past it, then to 0, each sampled
    for `CLOSE_S` (position, load, current) with a wrist frame at the end; the stall (the last half second's median)
    printed as it goes.
-5. **The hold:** at 0 for `HOLD_S`, sampled: a protection that drops the torque shows as the load falling.
+5. **The hold:** at 0 for `HOLD_S`, sampled. The servo's overload protection can trip (it did at once on a 45 mm
+   bottle, 2026-11-17): the server opens the jaw a little and says so (`"overload"`), and the trial records when.
 6. **The lift:** up `LIFT_M` (the gripper level, the jaws as they are), wrist frames at once and after `LIFT_HOLD_S`;
    you say whether it held, slipped or dropped. Back down, the jaws open: take the bottle out.
 
@@ -44,7 +47,11 @@ from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, pinch_fr
 from lerobot.felix_jr.server.client import FelixClient
 from lerobot.felix_jr.server.protocol import DEFAULT_PORT
 
-DEPTH_MM = 15.0  # the bottle's axis this far in from the tips, by default
+# the bottle's axis this far in from the tips, by default: its radius and this margin, the bottle wholly between the
+# fingers (a 52 mm bottle at 15 mm, mostly beyond the tips, was pushed out as the claw closed: 2026-11-17)
+DEPTH_MARGIN_M = 0.005
+PREVIEW_PERIOD_S = 0.15  # the placement window's refresh
+OUTLINE_COLORS = {"bottom": (255, 160, 0), "tips": (255, 64, 255), "top": (0, 255, 255)}  # RGB
 GRIP_AHEAD_M = (0.25, 0.21, 0.17)  # the grip pose's pinch point ahead of the arm's base: the first reached
 GRIP_TILTS_DEG = (0.0, 15.0, 30.0, 45.0)  # the fingers' tilt below level: the first reached (level, ideally)
 TIP_HEIGHT = 0.5  # the tips at this fraction of the bottle's height ...
@@ -59,6 +66,9 @@ SAMPLE_S = 0.05
 MIN_CLEARANCE_M = 0.02  # the gripper's lowest over the table, on the way and at the pose
 MAX_VEL = 20.0
 STALL_S = 0.5  # a close's stall: the median of its last this-many seconds
+# the jaw this far (gripper.pos units) past the map's contact: the bottle is gone from between the fingers (a 52 mm
+# bottle at 15 mm deep popped out at the close to 0, 2026-11-17; held, the jaw closed 9 units past contact at most)
+SLIP_UNITS = 15.0
 
 
 @dataclass
@@ -135,6 +145,16 @@ def grip_pose(
     return None
 
 
+def slipped(samples: list[dict[str, float]], contact: float) -> float | None:
+    """When (s) the jaw went `SLIP_UNITS` past `contact`: the bottle slipped out; None if it did not."""
+    return next((s["t"] for s in samples if s["pos"] < contact - SLIP_UNITS), None)
+
+
+def overloaded(samples: list[dict[str, float]]) -> float | None:
+    """When (s) the servo's overload protection tripped (`RealArms.grip` opened the jaw a little then); None if not."""
+    return next((s["t"] for s in samples if s.get("overload")), None)
+
+
 def stall(samples: list[dict[str, float]]) -> dict[str, float]:
     """A close's end: the median of its last `STALL_S` seconds (position, load, current)."""
     if not samples:
@@ -148,9 +168,22 @@ class GripTest:
     """One arm's grip trials on the robot (the module docstring)."""
 
     def __init__(
-        self, client: FelixClient, arm: str, out_dir: Path, model: XleRobotModel, table_z: float, ask=input
+        self,
+        client: FelixClient,
+        arm: str,
+        out_dir: Path,
+        model: XleRobotModel,
+        table_z: float,
+        ask=input,
+        window: bool = True,
+        depth_mm: float | None = None,
     ):
-        """The model must have the arm's gripper map; checked against the robot."""
+        """The model must have the arm's gripper map; checked against the robot.
+
+        `window`: the placement shown on the wrist camera (`place`; else asked in the terminal). `depth_mm`: every
+        bottle's axis this far in from the tips (None: its radius and `DEPTH_MARGIN_M`).
+        """
+        self.window, self.depth_mm = window, depth_mm
         self.client, self.arm, self.arm_id, self.out_dir, self.model = (
             client,
             arm,
@@ -169,12 +202,13 @@ class GripTest:
         )
         self.rest = {k: float(v) for k, v in client.get_homes()[self.arm_id].items()}
         self.last: Bottle | None = None
+        self.trial_index = len(self.results)  # the trial under way (its frames' prefix)
 
     def _save(self) -> None:
         self.results_path.write_text(json.dumps(self.results, indent=1))
 
     def _frame(self, name: str) -> str:
-        path = f"frames/{len(self.results):02d}_{name}.png"
+        path = f"frames/{self.trial_index:02d}_{name}.png"
         frame = self.client.wrist_capture(self.arm, color_format="png")
         cv2.imwrite(str(self.out_dir / path), cv2.cvtColor(frame.color, cv2.COLOR_RGB2BGR))
         return path
@@ -202,14 +236,90 @@ class GripTest:
             ("diameter mm", "diameter_mm"),
             ("height mm", "height_mm"),
             ("mass g", "mass_g"),
-            ("depth in the jaws, mm from the tips", "depth_mm"),
         ):
-            default = getattr(last, field) if last else (DEPTH_MM if field == "depth_mm" else None)
-            value = self._number(f"  {prompt}", default)
+            value = self._number(f"  {prompt}", getattr(last, field) if last else None)
             if value is None:
                 return None
             values.append(value)
-        return Bottle(label or (last.label if last else "bottle"), *values)
+        depth = self.depth_mm if self.depth_mm is not None else values[0] / 2 + 1000.0 * DEPTH_MARGIN_M
+        return Bottle(label or (last.label if last else "bottle"), *values, depth)
+
+    def bottle_outline(self, bottle: Bottle, q: np.ndarray) -> dict[str, np.ndarray]:
+        """Where the bottle should stand, in the wrist picture at `q` (raw pixels; NaN where behind the camera).
+
+        Its circle at the table, at the tips' height and at its top. Its axis vertical through the model's grasp point for its width (`XleRobotModel.grasp_offset`: midway between
+        the tips closed on it), moved back along the fingers by its depth.
+        """
+        model, arm = self.model, self.arm
+        pinch = model.frame_pose(pinch_frame(arm), q)
+        center = (
+            pinch
+            @ np.r_[
+                model.grasp_offset(arm, bottle.diameter_mm / 1000.0) - [0.0, 0.0, bottle.depth_mm / 1000.0],
+                1.0,
+            ]
+        )
+        r = bottle.diameter_mm / 2000.0
+        angles = np.linspace(0.0, 2 * np.pi, 48)
+        ring = np.c_[center[0] + r * np.cos(angles), center[1] + r * np.sin(angles)]
+        heights = {"bottom": self.table_z, "tips": center[2], "top": self.table_z + bottle.height_mm / 1000.0}
+        return {
+            name: jv.wrist_pixels(model, arm, q, np.c_[ring, np.full(len(ring), z)])
+            for name, z in heights.items()
+        }
+
+    def place(self, bottle: Bottle) -> bool:
+        """The person stands the bottle where its outline is drawn on the live wrist picture; False: stopped.
+
+        Enter (or space) in the window when it matches; `q` stops. Without `window`, asked in the terminal. The
+        picture with the outline is kept (`frames/<trial>_placed.png`).
+        """
+        prompt = (
+            f"  stand the bottle between the jaws, its axis {bottle.depth_mm:g} mm in from the tips (the moving jaw "
+            "sweeps it onto the fixed one)"
+        )
+        if not self.window:
+            return self.ask(prompt + "; Enter (q stops) ").strip().lower() != "q"
+        print(prompt + ": line it up with the outline in the window, then Enter there (q stops)")
+        state = self.client.get_state()[self.arm_id]
+        q = self.model.joint_vector({self.arm: {k: float(v) for k, v in state.items()}})
+        outline = self.bottle_outline(bottle, q)
+        name = "grip_test: stand the bottle on the outline (Enter: placed, q: stop)"
+        try:
+            while True:
+                picture = self.client.wrist_capture(self.arm, color_format="jpeg").color.copy()
+                for part, uv in outline.items():
+                    ok = np.isfinite(uv).all(axis=1)
+                    if ok.sum() > 2:
+                        cv2.polylines(
+                            picture,
+                            [np.round(uv[ok]).astype(np.int32)],
+                            True,
+                            OUTLINE_COLORS[part],
+                            2,
+                            cv2.LINE_AA,
+                        )
+                cv2.putText(
+                    picture,
+                    "orange: on the table  magenta: at the tips  cyan: its top",
+                    (10, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.imshow(name, cv2.cvtColor(picture, cv2.COLOR_RGB2BGR))
+                key = cv2.waitKey(int(1000 * PREVIEW_PERIOD_S)) & 0xFF
+                if key in (13, 10, 32):
+                    path = f"frames/{self.trial_index:02d}_placed.png"
+                    cv2.imwrite(str(self.out_dir / path), cv2.cvtColor(picture, cv2.COLOR_RGB2BGR))
+                    return True
+                if key in (ord("q"), 27):
+                    return False
+        finally:
+            cv2.destroyWindow(name)
+            cv2.waitKey(1)
 
     def _move(self, pose: dict[str, float], why: str) -> bool:
         """Move the arm to `pose` (the gripper not touched) after the sim's check and the person's yes."""
@@ -235,6 +345,7 @@ class GripTest:
     def trial(self, bottle: Bottle) -> bool:
         """One bottle's closes, hold and lift (the module docstring); False: stopped."""
         model, arm = self.model, self.arm
+        self.trial_index = len(self.results)
         tip = float(np.clip(TIP_HEIGHT * bottle.height_mm / 1000.0, *TIP_HEIGHT_M))
         found = grip_pose(model, arm, self.rest, self.table_z, tip)
         lifted = (
@@ -267,15 +378,7 @@ class GripTest:
             "contact_pos": contact,
             "closes": [],
         }
-        if (
-            self.ask(
-                f"  stand the bottle against the fixed finger, its axis {bottle.depth_mm:g} mm in from the tips; Enter "
-                "(q stops) "
-            )
-            .strip()
-            .lower()
-            == "q"
-        ):
+        if not self.place(bottle):
             return False
         record["frame_open"] = self._frame("open")
         self.results.append(record)  # (saved as it fills)
@@ -297,12 +400,36 @@ class GripTest:
                 f"load {end['load_pct']:+.1f} %, {end['current_ma']:.0f} mA"
             )
             self._save()
-        samples = self.client.grip(self.arm_id, 0.0, seconds=HOLD_S, period=0.2)
-        loads = [s["load_pct"] for s in samples]
-        record["hold"] = {"samples": samples, "first": stall(samples[:5]), "last": stall(samples)}
-        print(f"  hold {HOLD_S:g} s at 0: load {np.median(loads[:5]):+.1f} -> {np.median(loads[-5:]):+.1f} %")
-        self._save()
-        if self._move(lift, f"the lift, {100 * LIFT_M:.0f} cm up"):
+            if (t := overloaded(samples)) is not None:
+                record["overload"] = {"during": f"close {past:g} past contact", "t": t}
+                break
+            if (t := slipped(samples, contact)) is not None:
+                record["slipped"] = {"during": f"close {past:g} past contact", "t": t}
+                break
+        if "slipped" not in record and "overload" not in record:
+            samples = self.client.grip(self.arm_id, 0.0, seconds=HOLD_S, period=0.2)
+            loads = [s["load_pct"] for s in samples]
+            record["hold"] = {"samples": samples, "first": stall(samples[:5]), "last": stall(samples)}
+            print(
+                f"  hold {HOLD_S:g} s at 0: load {np.median(loads[:5]):+.1f} -> {np.median(loads[-5:]):+.1f} %"
+            )
+            if (t := overloaded(samples)) is not None:
+                record["overload"] = {"during": "the hold at 0", "t": t}
+            elif (t := slipped(samples, contact)) is not None:
+                record["slipped"] = {"during": "the hold at 0", "t": t}
+            self._save()
+        if "overload" in record:
+            print(
+                f"  OVERLOAD: the servo's protection tripped during {record['overload']['during']} "
+                f"({record['overload']['t']:.1f} s in; the jaw opened a little): no lift"
+            )
+            self._save()
+        elif "slipped" in record:
+            print(
+                f"  SLIPPED OUT during {record['slipped']['during']} ({record['slipped']['t']:.1f} s in): no lift"
+            )
+            self._save()
+        elif self._move(lift, f"the lift, {100 * LIFT_M:.0f} cm up"):
             record["lift"] = {"frame_up": self._frame("lift0")}
             time.sleep(LIFT_HOLD_S)
             record["lift"]["frame_after"] = self._frame(f"lift{LIFT_HOLD_S:g}")
@@ -331,7 +458,11 @@ class GripTest:
             held = f"{hold['first']['load_pct']:+.0f} -> {hold['last']['load_pct']:+.0f}" if hold else ""
             lines.append(
                 f"| {b['label']} | {b['diameter_mm']:g} | {b['mass_g']:g} | {r['contact_pos']:.1f} | {stalls} | {held} | "
-                f"{r.get('lift', {}).get('result', '')} |"
+                f"{
+                    r.get('lift', {}).get('result', '')
+                    or ('slipped: ' + r['slipped']['during'] if 'slipped' in r else '')
+                    or ('overload: ' + r['overload']['during'] if 'overload' in r else '')
+                } |"
             )
         return "\n".join(lines)
 
@@ -352,11 +483,26 @@ def main() -> None:
     parser.add_argument(
         "--table-z", type=float, default=None, help="the table's height in the root frame (m)"
     )
+    parser.add_argument(
+        "--depth-mm",
+        type=float,
+        default=None,
+        help="every bottle's axis this far in from the tips (default: its radius + 5)",
+    )
+    parser.add_argument("--no-window", action="store_true", help="place the bottles by eye, no wrist picture")
     args = parser.parse_args()
     model = XleRobotModel.load(args.model)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     with FelixClient(args.endpoint, timeout_s=20.0) as client, client.session():
-        test = GripTest(client, args.arm, args.out_dir, model, table_height(model, args.arm, args.table_z))
+        test = GripTest(
+            client,
+            args.arm,
+            args.out_dir,
+            model,
+            table_height(model, args.arm, args.table_z),
+            window=not args.no_window,
+            depth_mm=args.depth_mm,
+        )
         print(f"{args.arm} arm: the table at {100 * test.table_z:.1f} cm; {len(test.results)} trials so far")
         try:
             while (bottle := test.ask_bottle()) is not None and test.trial(bottle):

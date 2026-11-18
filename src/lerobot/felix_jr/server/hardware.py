@@ -188,9 +188,9 @@ class FakeArms:
         self.trajectories: list[tuple[dict, float, float]] = []
         self.wheels = (0.0, 0.0)
         self._active: int | None = None  # id of the thread running a trajectory
-        self.object_pos: dict[
-            str, float
-        ] = {}  # per arm, the gripper.pos an object between its jaws stalls it at
+        # per arm, the gripper.pos an object between its jaws stalls it at
+        self.object_pos: dict[str, float] = {}
+        self.overload_above: float | None = None  # a grip's load past this trips the (simulated) overload
 
     def _use_bus(self) -> None:
         if self._active is not None and self._active != threading.get_ident():
@@ -264,6 +264,11 @@ class FakeArms:
                 samples.append(
                     {"t": t / self.time_scale, "pos": pos, "load_pct": load, "current_ma": 6.5 * abs(load)}
                 )
+                if self.overload_above is not None and load > self.overload_above:  # as `RealArms.grip`
+                    samples[-1]["overload"] = 1
+                    self.object_pos.pop(arm_id, None)
+                    self.pos[arm_id]["gripper.pos"] = pos + RELIEVE_UNITS
+                    return samples
                 on_tick()
                 time.sleep(period * self.time_scale)
             return samples
@@ -288,6 +293,41 @@ class FakeArms:
         """See `ArmBackend.stop_base`."""
         self._use_bus()
         self.wheels = (0.0, 0.0)
+
+
+RELIEVE_UNITS = 5.0  # an overloaded gripper opened this much (gripper.pos units) from where it is
+RELIEVE_S = 0.5  # and sampled this long after
+
+
+def _tolerant_read(bus, data_name: str, motor: str, normalize: bool = True) -> tuple[float, int]:
+    """`bus.read`, but the servo's error flags returned rather than raised (an overloaded servo still answers).
+
+    (value, error bits). A failed exchange still raises.
+    """
+    from lerobot.motors.motors_bus import get_address
+
+    id_, model = bus.motors[motor].id, bus.motors[motor].model
+    addr, length = get_address(bus.model_ctrl_table, model, data_name)
+    value, comm, error = bus._read(addr, length, id_, raise_on_error=False)
+    if not bus._is_comm_success(comm):
+        raise ConnectionError(
+            f"failed to read {data_name!r} on {motor}: {bus.packet_handler.getTxRxResult(comm)}"
+        )
+    decoded = bus._decode_sign(data_name, {id_: value})
+    if normalize and data_name in bus.normalized_data:
+        return float(bus._normalize(decoded)[id_]), int(error)
+    return float(decoded[id_]), int(error)
+
+
+def _tolerant_write(bus, data_name: str, motor: str, value: float) -> None:
+    """`bus.write` (normalized), the servo's error flags ignored (an overloaded servo still takes a goal)."""
+    from lerobot.motors.motors_bus import get_address
+
+    id_, model = bus.motors[motor].id, bus.motors[motor].model
+    addr, length = get_address(bus.model_ctrl_table, model, data_name)
+    raw = bus._unnormalize({id_: value})[id_] if data_name in bus.normalized_data else int(value)
+    raw = bus._encode_sign(data_name, {id_: raw})[id_]
+    bus._write(addr, length, id_, raw, raise_on_error=False)
 
 
 class RealArms:
@@ -340,19 +380,49 @@ class RealArms:
         )
 
     def grip(self, arm_id, target, seconds, period, should_stop, on_tick) -> list[dict[str, float]]:
-        """See `ArmBackend.grip`: the goal written to the gripper alone, then its registers read every `period`."""
+        """See `ArmBackend.grip`: the goal written to the gripper alone, then its registers read every `period`.
+
+        The servo's overload protection (it trips pressing hard on a bottle: 2026-11-17) flags every reply, which
+        `bus.read` raises on: read here past the flag (`_tolerant_read`), the samples marked `"overload": 1`; at the
+        first, the jaw is opened `RELIEVE_UNITS` from where it is (the load gone, the flag clears) and sampled
+        `RELIEVE_S` more.
+        """
         from lerobot.felix_jr.home import update_goal
 
         bus = self.robots[arm_id].bus
         bus.write("Goal_Position", "gripper", float(target))  # gripper.pos units (the bus normalizes)
         update_goal(arm_id, {"gripper.pos": float(target)})  # a later move starts the gripper from it
-        samples, t0 = [], time.monotonic()
+        samples: list[dict[str, float]] = []
+        t0, relieved_at = time.monotonic(), None
         while (t := time.monotonic() - t0) < seconds and not should_stop():
-            pos = float(bus.read("Present_Position", "gripper"))
-            load = float(bus.read("Present_Load", "gripper", normalize=False))
-            current = float(bus.read("Present_Current", "gripper", normalize=False))
+            if relieved_at is not None and t - relieved_at > RELIEVE_S:
+                break
+            pos, e1 = _tolerant_read(bus, "Present_Position", "gripper")
+            load, e2 = _tolerant_read(bus, "Present_Load", "gripper", normalize=False)
+            current, e3 = _tolerant_read(bus, "Present_Current", "gripper", normalize=False)
+            overload = any("Overload" in bus.packet_handler.getRxPacketError(e) for e in (e1, e2, e3) if e)
             # 0.1 % of the maximum, signed by direction; 6.5 mA per step (`diagnostics.lift_test`)
-            samples.append({"t": t, "pos": pos, "load_pct": load / 10.0, "current_ma": current * 6.5})
+            sample = {
+                "t": t,
+                "pos": float(pos),
+                "load_pct": float(load) / 10.0,
+                "current_ma": float(current) * 6.5,
+            }
+            if overload:
+                sample["overload"] = 1
+            samples.append(sample)
+            if overload and relieved_at is None:
+                relieve = float(min(100.0, pos + RELIEVE_UNITS))
+                _tolerant_write(bus, "Goal_Position", "gripper", relieve)
+                update_goal(arm_id, {"gripper.pos": relieve})
+                relieved_at = t
+                log.warning(
+                    "%s gripper overloaded at %.1f s (gripper.pos %.1f): opened to %.1f",
+                    arm_id,
+                    t,
+                    pos,
+                    relieve,
+                )
             on_tick()
             time.sleep(max(0.0, period - (time.monotonic() - t0 - t)))
         return samples
