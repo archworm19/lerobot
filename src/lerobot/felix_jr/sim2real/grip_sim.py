@@ -64,6 +64,7 @@ def replay(
     force_nm: float = FORCE_NM,
     friction: float = FINGER_FRICTION,
     on_frame: "Callable[[Scene, str], None] | None" = None,
+    finger_model: str = "sprung",
     frame_period_s: float = 1 / 30,
 ) -> dict[str, Any]:
     """One trial in the simulator, against the real one.
@@ -91,7 +92,7 @@ def replay(
         bottle.height_mm / 1000.0,
         bottle.mass_g / 1000.0,
     )
-    scene = build(model, arm, [cylinder], table_z=table_z)
+    scene = build(model, arm, [cylinder], table_z=table_z, finger_model=finger_model)
     m, d = scene.m, scene.d
     gripper = m.actuator(GRIPPER).id
     m.actuator_gainprm[gripper, 0] = kp
@@ -199,6 +200,7 @@ def main() -> None:
     parser.add_argument("--kp", type=float, default=KP_NM_PER_RAD)
     parser.add_argument("--force-nm", type=float, default=FORCE_NM)
     parser.add_argument("--friction", type=float, default=FINGER_FRICTION)
+    parser.add_argument("--finger-model", default="sprung", help="how the fingers give (robot.FINGER_MODELS)")
     args = parser.parse_args()
     model = XleRobotModel.load(args.model)
     trials = json.loads(args.results.read_text())
@@ -208,7 +210,14 @@ def main() -> None:
         if "tilt_deg" not in trial:  # (the first trials, before the pose's tilt was recorded)
             continue
         result = replay(
-            model, args.arm, trial, table_height(model, args.arm), args.kp, args.force_nm, args.friction
+            model,
+            args.arm,
+            trial,
+            table_height(model, args.arm),
+            args.kp,
+            args.force_nm,
+            args.friction,
+            finger_model=args.finger_model,
         )
         print(report(result))
 

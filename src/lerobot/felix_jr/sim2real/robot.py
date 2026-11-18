@@ -33,7 +33,7 @@ Whether the real moving finger is at the map's opening: `calibration.gripper_swe
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -105,11 +105,26 @@ PAD_TORSIONAL_FRICTION, PAD_ROLLING_FRICTION = 0.005, 0.0001
 #   less load (its own give, a softer bottle: an object's, not the gripper's);
 FINGER_STIFFNESS_NM_PER_RAD = 1.2
 FINGER_DAMPING = 0.005  # (about critical for a finger's ~15 g, 3 cm)
+# the give joints' armature (kg m^2): the SO-101 model's joint default, which they inherited when the stiffness and the
+# friction were fitted (an explicit 0 changed the stalls by up to 0.8 units); it also keeps the chain's 0.6 g segments
+# stable at 2 ms
+FINGER_ARMATURE = 0.005
 FINGER_GIVE_RANGE_RAD = 0.6
 FINGER_PIVOT_Z_MM = (
     12.0  # the pivot across the hinge: the face's middle at the finger's base (it is 24 mm deep there)
 )
-# - not modeled: the Fin Ray's wrapping along its length (one joint, not a chain). The real stall moved ~13 units (~16 deg) from first touch to 15 past contact as
+# - the Fin Ray's wrapping along its length is not in the default model (one joint). The finger models to compare
+#   (`finger_model`; `sim2real.finger_models` times and draws them), each fitted to the 45 mm bottle's stalls:
+#   "sprung" (the default: the one joint above), "rigid" (no give: the jaw stops dead at first touch), "soft" (option 1
+#   of the common Fin Ray models: rigid pads, a soft contact), "chain" (option 2 cut down: the face's pads hinged to one
+#   another base to tip, sprung, so they can wrap).
+FINGER_MODELS = ("sprung", "rigid", "soft", "chain")
+FINGER_SOFT_SOLREF = (0.01, 1.0)  # (timeconst s, damping ratio): MuJoCo's default stiffness is 0.02
+FINGER_SOFT_SOLIMP = (0.9, 0.95, 0.01, 0.5, 2.0)  # the impedance over a penetration `width` (m, the third)
+# each of the chain's joints: fitted to the 45 mm bottle (`finger_models`: 2.0, its stalls within 0.3 units, loads
+# 1.3 %; the 53 mm one within 0.8 / 4.7, as "sprung" fits it)
+FINGER_CHAIN_STIFFNESS_NM_PER_RAD = 2.0
+PAD_DENSITY = 1200.0  # (kg/m^3: a chain segment's mass, the printed TPU's about) The real stall moved ~13 units (~16 deg) from first touch to 15 past contact as
 #   the load rose 12 -> 23 % (the Fin Ray fingers bending, the bottle squeezed); the hulls here are rigid.
 VISUAL_GROUP = 2  # the SO-101's group for what is drawn
 # the camera module's drawn and collided geoms, moved out of those groups: the wrist camera's renders leave them out
@@ -235,8 +250,20 @@ def finger_pads(stl: Path) -> list[tuple[np.ndarray, np.ndarray]]:
     return pads
 
 
-def _add_fingers(spec: "mujoco.MjSpec", model: XleRobotModel, arm: str, q: np.ndarray, stl: Path) -> None:
-    """The finger STL on both jaws, the jaws cut off at its base (module docstring); the fingers drawn only."""
+def _add_fingers(
+    spec: "mujoco.MjSpec",
+    model: XleRobotModel,
+    arm: str,
+    q: np.ndarray,
+    stl: Path,
+    finger_model: str = "sprung",
+) -> None:
+    """The finger STL on both jaws, the jaws cut off at its base (module docstring), and its contact pads.
+
+    `finger_model` (`FINGER_MODELS`): how the finger gives.
+    """
+    if finger_model not in FINGER_MODELS:
+        raise ValueError(f"finger_model: one of {FINGER_MODELS}, not {finger_model!r}")
     if Path(stl).read_bytes()[: len(LFS_POINTER)] == LFS_POINTER:
         raise FileNotFoundError(f"{stl} is a git LFS pointer, not the mesh: run `git lfs pull`")
     spec.add_mesh(name="finger", file=str(Path(stl).resolve()), scale=[0.001] * 3)
@@ -261,21 +288,18 @@ def _add_fingers(spec: "mujoco.MjSpec", model: XleRobotModel, arm: str, q: np.nd
         body_from_finger = np.linalg.inv(body_pose) @ pinch @ placed
         _cut_jaw(spec, body, body_from_finger)
         # the finger on its own body, pivoting at its base about the hinge's axis (the STL's z) on a spring: the Fin Ray's
-        # give (`FINGER_STIFFNESS_NM_PER_RAD`); its geoms in that body's frame, the STL's axes, the pivot at its origin
+        # give (`FINGER_STIFFNESS_NM_PER_RAD`, `finger_model` "sprung"); its geoms in that body's frame, the STL's axes,
+        # the pivot at its origin
         pivot = np.array([FINGER_BASE_MM, FINGER_TIP_MM[1], FINGER_PIVOT_Z_MM]) / 1000.0
         hinge = body_from_finger.copy()
         hinge[:3, 3] = (body_from_finger @ np.r_[pivot, 1.0])[:3]
         hinge_pos, hinge_quat = _pos_quat(hinge)
         finger = spec.body(body).add_body(name=FINGER_BODIES[name], pos=hinge_pos, quat=hinge_quat)
-        finger.add_joint(
-            name=f"{name}_give",
-            type=mujoco.mjtJoint.mjJNT_HINGE,
-            axis=[0.0, 0.0, 1.0],
-            stiffness=FINGER_STIFFNESS_NM_PER_RAD,
-            damping=FINGER_DAMPING,
-            range=[-FINGER_GIVE_RANGE_RAD, FINGER_GIVE_RANGE_RAD],
-            limited=mujoco.mjtLimited.mjLIMITED_TRUE,
+        give = {"sprung": FINGER_STIFFNESS_NM_PER_RAD, "chain": FINGER_CHAIN_STIFFNESS_NM_PER_RAD}.get(
+            finger_model
         )
+        if give is not None:
+            _give_joint(finger, f"{name}_give", give)
         finger.add_geom(
             name=name,
             type=mujoco.mjtGeom.mjGEOM_MESH,
@@ -290,20 +314,65 @@ def _add_fingers(spec: "mujoco.MjSpec", model: XleRobotModel, arm: str, q: np.nd
         # what the finger collides with: pads on its straight inner face (`finger_pads`), not the mesh, whose convex
         # hull takes in the ribbed body behind the face (up to 22 mm thick): bottles tipped over on it (grip_sim,
         # 2026-11-17)
-        for k, (center, half) in enumerate(finger_pads(stl)):
-            finger.add_geom(
+        pad_args: dict[str, Any] = {
+            "type": mujoco.mjtGeom.mjGEOM_BOX,
+            "quat": [1.0, 0.0, 0.0, 0.0],  # (the STL's axes: the box's half sizes are along them)
+            "group": COLLISION_GROUP,
+            "friction": [FINGER_FRICTION, PAD_TORSIONAL_FRICTION, PAD_ROLLING_FRICTION],
+            "condim": 4,  # torsional friction too: a bottle held between two pads cannot spin in place
+            "priority": 1,  # the pads' friction and softness govern their contacts (else the larger of the two)
+            "rgba": [0.9, 0.3, 0.3, 0.6],
+        }
+        if (
+            finger_model == "soft"
+        ):  # the give as the contact's softness (option 1: a rigid finger, a soft contact)
+            pad_args |= {"solref": list(FINGER_SOFT_SOLREF), "solimp": list(FINGER_SOFT_SOLIMP)}
+        pads = finger_pads(stl)
+        if finger_model != "chain":
+            for k, (center, half) in enumerate(pads):
+                finger.add_geom(
+                    name=f"{name}_pad{k}",
+                    size=list(half),
+                    pos=(center - pivot).tolist(),
+                    density=0.0,
+                    **pad_args,
+                )
+            continue
+        # "chain": the pads base to tip, each on its own body, hinged to the one before at their boundary on the face
+        # (option 2, the face only: it can wrap)
+        parent, origin = finger, pivot
+        for k, (center, half) in reversed(list(enumerate(pads))):
+            boundary = np.array([center[0] + half[0], FINGER_TIP_MM[1] / 1000.0, FINGER_PIVOT_Z_MM / 1000.0])
+            if k == len(pads) - 1:  # the base pad: on the finger's body
+                segment, segment_origin = finger, pivot
+            else:
+                segment = parent.add_body(
+                    name=f"{FINGER_BODIES[name]}_seg{k}", pos=(boundary - origin).tolist()
+                )
+                _give_joint(segment, f"{name}_give{k}", FINGER_CHAIN_STIFFNESS_NM_PER_RAD)
+                segment_origin = boundary
+            segment.add_geom(
                 name=f"{name}_pad{k}",
-                type=mujoco.mjtGeom.mjGEOM_BOX,
                 size=list(half),
-                pos=(center - pivot).tolist(),
-                quat=[1.0, 0.0, 0.0, 0.0],  # (the STL's axes: the box's half sizes are along them)
-                group=COLLISION_GROUP,
-                density=0.0,  # (the finger's mass is the drawn mesh's)
-                friction=[FINGER_FRICTION, PAD_TORSIONAL_FRICTION, PAD_ROLLING_FRICTION],
-                condim=4,  # torsional friction too: a bottle held between two pads cannot spin in place
-                priority=1,  # the pads' friction and softness govern their contacts (else the larger of the two)
-                rgba=[0.9, 0.3, 0.3, 0.6],
+                pos=(center - segment_origin).tolist(),
+                density=PAD_DENSITY,
+                **pad_args,
             )
+            parent, origin = segment, segment_origin
+
+
+def _give_joint(body: "mujoco.MjsBody", name: str, stiffness: float) -> None:
+    """A finger's (or a chain segment's) sprung hinge about the hinge's axis (the STL's z), at the body's origin."""
+    body.add_joint(
+        name=name,
+        type=mujoco.mjtJoint.mjJNT_HINGE,
+        axis=[0.0, 0.0, 1.0],
+        stiffness=stiffness,
+        damping=FINGER_DAMPING,
+        armature=FINGER_ARMATURE,
+        range=[-FINGER_GIVE_RANGE_RAD, FINGER_GIVE_RANGE_RAD],
+        limited=mujoco.mjtLimited.mjLIMITED_TRUE,
+    )
 
 
 def arm_spec(
@@ -312,11 +381,13 @@ def arm_spec(
     head_ticks: Mapping[str, int] | None = None,
     mjcf: Path | None = None,
     fingers: Path | None = FINGER_STL,
+    finger_model: str = "sprung",
 ) -> "mujoco.MjSpec":
     """The SO-101's spec, posed as `model`'s `arm`, with the pinch site and the wrist and head cameras (module docstring).
 
     `head_ticks`: where the head looks from (its servos' ticks; None: its recorded home). `fingers`: the XLeRobot
-    finger's STL, drawn on both jaws in place of their tips (None: the SO-101's own jaws).
+    finger's STL, drawn on both jaws in place of their tips (None: the SO-101's own jaws). `finger_model`: how the
+    fingers give (`FINGER_MODELS`; "sprung", fitted to the real grips, by default).
     """
     require_package("mujoco", extra="felix_jr_sim")
     path = mjcf or so101_model()
@@ -348,7 +419,7 @@ def arm_spec(
             camera.ppy,
         )
     if fingers is not None:
-        _add_fingers(spec, model, arm, q, fingers)
+        _add_fingers(spec, model, arm, q, fingers, finger_model)
     # friction that holds without creeping, for a grasp (MuJoCo's advice: an elliptic cone, a high impratio, no-slip)
     spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
     spec.option.impratio = 10.0

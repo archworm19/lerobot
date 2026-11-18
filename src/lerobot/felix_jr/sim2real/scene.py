@@ -85,10 +85,14 @@ def scene_spec(
     table_z: float = TABLE_Z,
     head_ticks: Mapping[str, int] | None = None,
     fingers: Path | None = FINGER_STL,
+    finger_model: str = "sprung",
 ) -> "mujoco.MjSpec":
-    """The arm's spec (`arm_spec`, with `fingers` if given) with the table, the objects and lights."""
+    """The arm's spec (`arm_spec`) with the table, the objects and lights.
+
+    `fingers` if given, giving as `finger_model` (`robot.FINGER_MODELS`).
+    """
     require_package("mujoco", extra="felix_jr_sim")
-    spec = arm_spec(model, arm, head_ticks, fingers=fingers)
+    spec = arm_spec(model, arm, head_ticks, fingers=fingers, finger_model=finger_model)
     base = np.array(spec.body("base").pos)
     lx, ly, lz = TABLE_SIZE_M
     near = base[0] - TABLE_NEAR_M
@@ -116,9 +120,10 @@ def build(
     table_z: float = TABLE_Z,
     head_ticks: Mapping[str, int] | None = None,
     fingers: Path | None = FINGER_STL,
+    finger_model: str = "sprung",
 ) -> Scene:
     """The compiled scene (`scene_spec`), the arm at all-zero readings."""
-    m = scene_spec(model, arm, objects, table_z, head_ticks, fingers).compile()
+    m = scene_spec(model, arm, objects, table_z, head_ticks, fingers, finger_model).compile()
     d = mujoco.MjData(m)
     mujoco.mj_forward(m, d)
     return Scene(model, arm, m, d)
