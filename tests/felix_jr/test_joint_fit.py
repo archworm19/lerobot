@@ -30,7 +30,9 @@ def session():
     rng = np.random.default_rng(1)
     world = World(model, draw_truth(model, rng), CharucoBoard(9, 7, 0.025, 0.018, "DICT_4X4_50"), rng)
     world.joint_noise_deg = world.board_noise_px = world.click_noise_px = 0.0
-    sightings, clicks = world.collect(Scenario(1, 4, 3, True, "", 3))  # low poses: the head's clicks
+    sightings, clicks = world.collect(
+        Scenario(1, 4, 3, True, "", 3, tip_views=True)
+    )  # tip views: the head's clicks
     return world, JointProblem(model, world.board, {ARM: world.camera}, sightings, clicks)
 
 

@@ -123,7 +123,7 @@ def test_every_mismatch_is_listed(client):
     assert lines[3].startswith(
         "right gripper map: gripper recalibrated on the robot: range_min 2046 (was 2000)"
     )
-    assert "gripper_step" in lines[3] and len(lines) == 4
+    assert "joint session" in lines[3] and len(lines) == 4
 
 
 def test_an_arm_the_robot_lacks_is_not_checked():

@@ -29,7 +29,9 @@ def test_a_simulated_session_is_fitted():
     world = World(
         model, draw_truth(model, rng, scale=0.3), CharucoBoard(9, 7, 0.025, 0.018, "DICT_4X4_50"), rng
     )
-    sightings, clicks = world.collect(Scenario(2, 8, 4, True, "", 6))  # the low poses: the head's clicks
+    sightings, clicks = world.collect(
+        Scenario(2, 8, 4, True, "", 6, tip_views=True)
+    )  # tip views: the head's clicks
     fit = fit_staged(JointProblem(model, world.board, {ARM: world.camera}, sightings, clicks))
     assert fit.rms_px[f"{ARM} board"] < 1.0 and fit.rms_px["head board"] < 1.0, fit.rms_px
     poses = world.grasp_poses(8)
