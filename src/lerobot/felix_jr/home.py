@@ -144,6 +144,11 @@ def remember_goal(robot_id: str, goal: dict[str, float]) -> None:
     _last_goal[robot_id] = dict(goal)
 
 
+def update_goal(robot_id: str, joints: dict[str, float]) -> None:
+    """Merge `joints` into the last goal `move_all` remembers for an arm (a goal written for some joints only)."""
+    _last_goal[robot_id] = {**_last_goal.get(robot_id, {}), **joints}
+
+
 def move_all(
     robots: dict[str, SO101Follower],  # mapping from robot_id to SO101Follower object
     targets: dict[str, RobotAction],  # mapping from robot_id to joint actions

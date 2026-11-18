@@ -164,7 +164,11 @@ servo's (its calibrated range); only `pos_closed`, where the tips meet, was fitt
 2. **The jaws' contacts:** pads (boxes, capsules) where the real claw touches, the meshes' hulls left to the rest;
    `view --collision` shows them.
 3. **A grasp check before any RL:** open, approach a cylinder, close, lift: does it hold, as the real claw holds a
-   bottle? Tune the friction, the contacts' softness (`solref`, `solimp`) and the gripper servo's force.
+   bottle? Tune the friction, the contacts' softness (`solref`, `solimp`) and the gripper servo's force. **The real
+   data for it: `calibration.grip_test`** (2026-11-17): bottles of known diameter and mass, gripped from the side,
+   the closes sampled (where the jaw stalls past the map's contact, the servo's load and current: the server's `grip`,
+   protocol 6), a 30 s hold (the overload protection), a lift (held, slipped or dropped), wrist frames throughout
+   (the fingers' give, against the sim's rigid outline). The simulator's grip is then fitted to it.
 4. **The grasp environment:** starts near an attack pose (as the head's plan leaves it), the robot's errors
    randomized, the wrist camera's pose on the gripper among them (about half a degree, a millimeter or two: the mounts
    move, `hardware_risks.md`); then the teacher.

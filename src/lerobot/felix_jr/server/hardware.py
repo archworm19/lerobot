@@ -169,6 +169,8 @@ class FakeArms:
     that would corrupt the packets on a real serial bus. `trajectories` records every request.
     """
 
+    GRIP_SPEED = 50.0  # gripper.pos units per second, closing or opening
+    GRIP_LOAD_PER_UNIT = 4.0  # % load per unit the jaw is short of its goal (pressing on an object)
     HOME = {
         "shoulder_pan.pos": 0.0,
         "shoulder_lift.pos": -100.0,
@@ -186,6 +188,9 @@ class FakeArms:
         self.trajectories: list[tuple[dict, float, float]] = []
         self.wheels = (0.0, 0.0)
         self._active: int | None = None  # id of the thread running a trajectory
+        self.object_pos: dict[
+            str, float
+        ] = {}  # per arm, the gripper.pos an object between its jaws stalls it at
 
     def _use_bus(self) -> None:
         if self._active is not None and self._active != threading.get_ident():
@@ -236,6 +241,32 @@ class FakeArms:
             for i, joints in targets.items():
                 self.pos[i].update(joints)
             return True
+        finally:
+            self._active = None
+
+    def grip(self, arm_id, target, seconds, period, should_stop, on_tick) -> list[dict[str, float]]:
+        """See `ArmBackend.grip`, simulated.
+
+        The jaw moves at `GRIP_SPEED` units/s, stalls on `object_pos` (if set, when closing past it), and presses with
+        a load of `GRIP_LOAD_PER_UNIT` % per unit of `gripper.pos` short of its goal.
+        """
+        self._active = threading.get_ident()
+        try:
+            start, samples, t0 = self.pos[arm_id]["gripper.pos"], [], time.monotonic()
+            while (t := time.monotonic() - t0) < seconds * self.time_scale and not should_stop():
+                travel = min(abs(target - start), self.GRIP_SPEED * t / self.time_scale)
+                pos = start + np.sign(target - start) * travel
+                stop = self.object_pos.get(arm_id)
+                if stop is not None and target < stop <= start:
+                    pos = max(pos, stop)
+                self.pos[arm_id]["gripper.pos"] = pos
+                load = self.GRIP_LOAD_PER_UNIT * (pos - target) if abs(pos - target) > 1e-9 else 0.0
+                samples.append(
+                    {"t": t / self.time_scale, "pos": pos, "load_pct": load, "current_ma": 6.5 * abs(load)}
+                )
+                on_tick()
+                time.sleep(period * self.time_scale)
+            return samples
         finally:
             self._active = None
 
@@ -307,6 +338,24 @@ class RealArms:
             should_stop=should_stop,
             on_tick=on_tick,
         )
+
+    def grip(self, arm_id, target, seconds, period, should_stop, on_tick) -> list[dict[str, float]]:
+        """See `ArmBackend.grip`: the goal written to the gripper alone, then its registers read every `period`."""
+        from lerobot.felix_jr.home import update_goal
+
+        bus = self.robots[arm_id].bus
+        bus.write("Goal_Position", "gripper", float(target))  # gripper.pos units (the bus normalizes)
+        update_goal(arm_id, {"gripper.pos": float(target)})  # a later move starts the gripper from it
+        samples, t0 = [], time.monotonic()
+        while (t := time.monotonic() - t0) < seconds and not should_stop():
+            pos = float(bus.read("Present_Position", "gripper"))
+            load = float(bus.read("Present_Load", "gripper", normalize=False))
+            current = float(bus.read("Present_Current", "gripper", normalize=False))
+            # 0.1 % of the maximum, signed by direction; 6.5 mA per step (`diagnostics.lift_test`)
+            samples.append({"t": t, "pos": pos, "load_pct": load / 10.0, "current_ma": current * 6.5})
+            on_tick()
+            time.sleep(max(0.0, period - (time.monotonic() - t0 - t)))
+        return samples
 
     def _base_robot(self):
         return next((r for r in self.robots.values() if getattr(r, "with_base", False)), None)

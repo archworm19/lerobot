@@ -304,6 +304,17 @@ class FelixClient:
         """Abort the running motion. The arms hold where they are. Returns `{was_moving}`."""
         return self._call("stop")[0]
 
+    def grip(
+        self, arm: str, target: float, seconds: float = 2.0, period: float = 0.05
+    ) -> list[dict[str, float]]:
+        """Send `arm`'s gripper ("right_arm") to `target` (`gripper.pos`) and return its servo's samples over `seconds`.
+
+        Each `{"t", "pos", "load_pct", "current_ma"}` (`MotionController.grip`). Waits for it; the gripper keeps holding
+        `target` after, and the other joints are not touched.
+        """
+        self._call("grip", arm=arm, target=target, seconds=seconds, period=period)
+        return self.wait_motion(timeout_s=seconds + 30.0)["result"]["samples"]
+
     def arm_calibration(self) -> dict[str, dict[str, dict[str, int]]]:
         """Each arm's LeRobot motor calibration on the robot: `{"right_arm": {"gripper": {"range_min": ticks, ...}}}`.
 

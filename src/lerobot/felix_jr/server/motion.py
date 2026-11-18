@@ -68,6 +68,9 @@ def unroll_first(
     return out
 
 
+MAX_GRIP_S = 60.0  # a grip's sampling, at most (a hold long enough for the servo's overload protection)
+
+
 class MotionBusyError(RuntimeError):
     """A motion is already running (or the bus is in use), so this request cannot start."""
 
@@ -83,6 +86,22 @@ class ArmBackend(Protocol):
 
     def homes(self) -> dict[str, dict[str, float]]:
         """The recorded home pose of every arm that has one."""
+
+    def grip(
+        self,
+        arm_id: str,
+        target: float,
+        seconds: float,
+        period: float,
+        should_stop: Callable[[], bool],
+        on_tick: Callable[[], None],
+    ) -> list[dict[str, float]]:
+        """Send `arm_id`'s gripper to `target` (`gripper.pos`, 0-100) and sample its servo for `seconds`.
+
+        Every `period` s: `{"t": s since the goal was sent, "pos": gripper.pos, "load_pct": Present_Load in % of the
+        servo's maximum (signed by direction), "current_ma": Present_Current}`. The other joints are not touched; the
+        gripper keeps holding `target` after.
+        """
 
     def run_trajectory(
         self,
@@ -369,6 +388,28 @@ class MotionController:
         limits = _limits(max_vel, max_accel)
         return self._start(
             "move_joints", lambda: self._trajectory_job(clean, **limits, tol=tol, timeout=timeout)
+        )
+
+    def grip(self, arm: str, target: float, seconds: float = 2.0, period: float = 0.05) -> dict[str, Any]:
+        """Start closing (or opening) `arm`'s gripper to `target` (`gripper.pos`), sampling its servo meanwhile.
+
+        A motion like the others (one at a time, `stop` ends it, the watchdog applies): its result is
+        `{"samples": [...]}` (`ArmBackend.grip`). For measuring a grip: where the jaw stalls on an object, the load
+        and current it presses with, and how they change over a hold (`calibration.grip_test`).
+        """
+        if arm not in self.arms.arm_ids():
+            raise ValueError(f"no arm {arm!r}: one of {self.arms.arm_ids()}")
+        if arm not in self.arms.homes():
+            raise ValueError(f"{arm} has no recorded home; run setup.record_home first")
+        if not 0.0 <= target <= 100.0:
+            raise ValueError(f"gripper.pos {target} outside 0-100")
+        if not 0.0 < seconds <= MAX_GRIP_S or not 0.01 <= period <= 1.0:
+            raise ValueError(f"seconds in (0, {MAX_GRIP_S}], period in [0.01, 1]")
+        return self._start(
+            "grip",
+            lambda: {
+                "samples": self.arms.grip(arm, target, seconds, period, self._stop.is_set, self._on_tick)
+            },
         )
 
     def _trajectory_job(

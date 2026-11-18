@@ -127,3 +127,34 @@ def test_server_check_reports_and_saves_a_loadable_capture(client, tmp_path):
     assert any("fake=True" in line for line in lines)
     scene = Scene.from_saved(tmp_path / "cap")
     assert scene.pixel_to_xyz(np.array([[160, 120]]))[0, 2] == pytest.approx(0.6, abs=0.01)
+
+
+def test_a_grip_samples_the_gripper_until_it_stalls_on_an_object_and_holds_there():
+    """`grip`: the gripper alone sent to its target, its servo sampled meanwhile (the fake's jaw stalls on an object at
+    gripper.pos 20 and presses by how far short of its goal it is); the other joints untouched; then it holds."""
+    hardware = FakeHardware()
+    hardware.arm_backend.object_pos["right_arm"] = 20.0
+    server = RobotServer(hardware)
+    address = server.bind("tcp://127.0.0.1:*")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with FelixClient(address, timeout_s=5.0) as client, client.session():
+            client.grip("right_arm", 60.0, seconds=1.0)  # open first (nothing in the way)
+            before = client.get_state()["right_arm"]
+            samples = client.grip("right_arm", 0.0, seconds=2.0, period=0.05)
+            assert len(samples) > 10 and samples[0]["t"] < samples[-1]["t"]
+            assert set(samples[0]) == {"t", "pos", "load_pct", "current_ma"}
+            assert samples[-1]["pos"] == pytest.approx(20.0)  # stalled on the object
+            assert samples[-1]["load_pct"] == pytest.approx(80.0)  # 20 units short of its goal
+            after = client.get_state()["right_arm"]
+            assert after["gripper.pos"] == pytest.approx(20.0)
+            assert {k: v for k, v in after.items() if k != "gripper.pos"} == {
+                k: v for k, v in before.items() if k != "gripper.pos"
+            }
+            with pytest.raises(ServerError):
+                client.grip("right_arm", 120.0)
+    finally:
+        server.shutdown()
+        thread.join(timeout=3.0)
+        server.close()

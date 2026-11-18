@@ -214,6 +214,12 @@ class RobotServer:
         """Abort the running motion; the arms hold where they are."""
         return self.hardware.motion.stop(), []
 
+    def cmd_grip(
+        self, arm: str, target: float, seconds: float = 2.0, period: float = 0.05
+    ) -> tuple[dict[str, Any], list[dict]]:
+        """Start a gripper close (or open) that samples the servo; see `MotionController.grip`."""
+        return self.hardware.motion.grip(arm, target, seconds, period), []
+
     def cmd_arm_calibration(self) -> tuple[dict[str, Any], list[dict]]:
         """Each arm's LeRobot motor calibration (ranges in raw ticks)."""
         return {"arms": self.hardware.arm_calibration()}, []
