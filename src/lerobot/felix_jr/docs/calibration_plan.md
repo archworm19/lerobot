@@ -138,6 +138,18 @@ older map's into the parameters (left -16.5 / +3.0 deg, right -18.0 / +0.5 deg, 
 - ~~The low-pose planner drops poses with the fingers edge-on to the head (`EDGE_ON_DEG`).~~ **Already so:**
   `low_poses` keeps a roll only within `HEAD_FACE_MAX_DEG` (75, where `EDGE_ON_DEG` starts); now a test says so
   (`test_joint_views`). The arm views do not (the board's views come first; their head clicks are optional).
+- **The tip views (2026-11-17, from the first robot session, `joint_right_1117`):** the head hardly saw the tips. At
+  the arm views the wrist camera sits between them; at the low poses the fingers pointed down, away from it (140-163
+  deg from it, all 40 planned), and the wrist roll cannot turn them across its view (with 5 joints the fingers point in
+  the arm's vertical plane). 6 head clicks in all; the fit traded the wrist camera's turn for the wrist roll's zero
+  (0.98), 3 deg. The simulator had counted those clicks (its head saw through the gripper). Now: `joint_views.head_sees`
+  (the pinch face within `HEAD_SEES_DEG`, 50, of the head: the click calibration's rule), `head_views` (the fingers
+  about level, the wrist rolled so the head looks down onto the jaws' face, 4-28 cm over the table), the session's
+  last phase "tips" (`--tip-views`; `--low-views` still read), and the simulator's head seeing only `head_sees`
+  (`Scenario.tip_views`). Honest simulator, the procedure decided, 3 seeds: low poses: 11 clicks, the camera 3.4 mm /
+  0.45 deg off, the head 4.3 px held out (as on the robot); 10 tip views: 30 clicks, 0.84 mm / 0.10 deg, 1.5 px; 20:
+  50 clicks, 0.64 mm, 0.77 mm hinge, 1.2 px. The grasp region is still the board's: the arm views are kept near the
+  low poses (`arm_views`' region).
 - Rehearsed against the fake robot (`server.server --fake`) and the smoke test (`test_joint_collect_smoke`). **The
   smoke tests done (2026-11-17)**: a session clicking both tips (4+ moving-tip clicks, the fit as near the truth), the
   sweep first (declined, gone on), the drift check's three answers. **Rehearsed by hand on the fake (2026-11-17)**
@@ -186,8 +198,11 @@ Newest first. Each commit that changes the calibration adds its entry here, titl
 name its own hash, so the next one fills it in. Before the plan (2026-11-16) the work is in `camera_calibration.md`
 and git's log.
 
-- **The run book for the new procedure; a stale gripper map replaced at a session's start** (2026-11-17, hash in the
-  next entry). Item 7: `README.md` sections 6-9 in the procedure's order (the lenses, the joint session, the
+- **The head clicks the tips at tip views, not low poses; the simulator's head sees what a real one can** (2026-11-17,
+  hash in the next entry). Item 4's tip views (above): `joint_views.head_sees`, `head_views`; `joint_collect`'s
+  "tips" phase (`--tip-views`); `joint_sim`'s head and `Scenario.tip_views`; the README's step 7. Tests:
+  `test_joint_views` (the tip views, the low poses never face-on), the collection smoke tests.
+- **`acd0f8e68`: The run book for the new procedure; a stale gripper map replaced at a session's start** (2026-11-17). Item 7: `README.md` sections 6-9 in the procedure's order (the lenses, the joint session, the
   calipers optional, the check), the section pointers in `check_robot`'s and `gripper_step`'s messages and the other
   docs. `joint_collect`: a start's map made under another LeRobot calibration of the gripper is replaced by the
   servo's. Tests: the collection smoke test from a measured, a missing and a stale map.

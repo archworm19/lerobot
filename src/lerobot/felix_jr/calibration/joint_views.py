@@ -10,7 +10,10 @@ the true robot in a simulation (`theta`, the wrist camera's pose among its param
   ChArUco board), spread over the arm's joints within the region it works in (near `low_poses`): many looks at it
   drawn at random (`look_at`), the farthest apart kept. A fit from views that differ little learns the arm near one
   pose only (jnt3: 23 mm apart at a held-out pose unlike the others); views far from the grasps spend the fit there.
-- `low_poses`: the gripper low over the table, as for a grasp: only the fingertips clicked there.
+- `low_poses`: the gripper low over the table, as for a grasp: the region the arm views are kept near.
+- `head_views`: where the head clicks the fingertips: the fingers about level, the wrist rolled so the head looks
+  down onto the jaws' face (`head_sees`), at heights from just over the table up. The head cannot see the tips at the
+  arm views (the wrist camera sits between) or at `low_poses` (the fingers point down, away from it: 2026-11-17).
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -87,6 +90,15 @@ VIEW_OPENINGS = (20.0, 35.0, 50.0)
 TIP_CLEARANCE_M = (
     0.02  # a pose keeps both fingertips this far above the table (the moving one at its opening)
 )
+# the head sees the fingertips only with the face it clicks turned this near to it: past it, the gripper's body and the
+# wrist camera hide them (the click calibration's views, 30-60 clicks an arm; joint_right_1117's low poses, 56-72 deg
+# from the head, showed the tips hardly at all)
+HEAD_SEES_DEG = 50.0
+# the head views' pinch point (ahead of the arm's base, to its side, over the table) and the fingers' tilt below level
+HEAD_VIEW_AHEAD_M, HEAD_VIEW_SIDE_M, HEAD_VIEW_UP_M = (0.10, 0.32), (-0.25, 0.25), (0.04, 0.28)
+HEAD_VIEW_TILT_DEG = (-10.0, 30.0)
+HEAD_VIEW_TRIES = 15  # targets drawn per view returned (one in ten is kept: 8 of 10 views from 8 a view)
+HEAD_VIEW_LIMITS_DEG = {"elbow_flex": (0.0, None)}
 HEAD_FACE_MAX_DEG = 75.0  # a low pose shows the head the fingertip's face it clicks within this (90: edge on)
 LOW_TILT_DEG = (
     45.0,
@@ -278,6 +290,11 @@ def head_face_angle(model: XleRobotModel, arm: str, q: np.ndarray) -> float:
     to_head = model.camera_pose(q)[:3, 3] - pinch[:3, 3]
     cos = face @ to_head / (np.linalg.norm(face) * np.linalg.norm(to_head))
     return float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))
+
+
+def head_sees(model: XleRobotModel, arm: str, q: np.ndarray) -> bool:
+    """Whether the head can see `arm`'s fingertips at `q`: their pinch face within `HEAD_SEES_DEG` of facing it."""
+    return head_face_angle(model, arm, q) < HEAD_SEES_DEG
 
 
 def camera_clear_of_arm(model: XleRobotModel, arm: str, pose: Mapping[str, float]) -> bool:
@@ -559,3 +576,66 @@ def low_poses(
         if best is not None:
             out.append(best[1])
     return out
+
+
+def head_views(
+    model: XleRobotModel,
+    arm: str,
+    rest: Mapping[str, float],
+    n: int,
+    table_z: float,
+    rng: np.random.Generator,
+) -> list[dict[str, float]]:
+    """Up to `n` arm poses at which the head sees the fingertips (`head_sees`), spread apart in the joints.
+
+    Each solved for (`_arm_solve`): the pinch point at a target drawn ahead of the arm (`HEAD_VIEW_*`: from just over
+    the table to ~30 cm up), the fingers at a tilt below level, the pinch face turned to the head. With 5 joints the
+    fingers point in the arm's vertical plane, so the head (above the arm's base) sees them face-on only near level,
+    the wrist rolled so the hinge points up at it. Kept: the target reached (1.5 cm), the head sees the tips, within the
+    joints' limits and off their bounds, the wrist camera clear of the arm, both tips clear of the table at every
+    opening (`tips_clear`). `HEAD_VIEW_TRIES` targets per view, the `n` farthest apart in the joints kept.
+    """
+    base = model.frame_pose(f"{arm}_base_link", model.joint_vector())[:3, 3]
+    face = model.wrist_face(arm) / np.linalg.norm(model.wrist_face(arm))
+    candidates: list[dict[str, float]] = []
+    for _ in range(HEAD_VIEW_TRIES * n):
+        target = np.array(
+            [
+                base[0] - rng.uniform(*HEAD_VIEW_AHEAD_M),
+                base[1] + rng.uniform(*HEAD_VIEW_SIDE_M),
+                table_z + rng.uniform(*HEAD_VIEW_UP_M),
+            ]
+        )
+        down = np.radians(rng.uniform(*HEAD_VIEW_TILT_DEG))
+
+        def residual(q: np.ndarray, target: np.ndarray = target, down: float = down) -> np.ndarray:
+            pinch = model.frame_pose(pinch_frame(arm), q)
+            to_head = model.camera_pose(q)[:3, 3] - pinch[:3, 3]
+            to_head /= np.linalg.norm(to_head)
+            return np.r_[
+                (pinch[:3, 3] - target) / 0.01,
+                (pinch[2, 2] + np.sin(down)) / 0.05,  # the pinch z (toward the tips) that far below level
+                (-pinch[:3, :3] @ face - to_head) / 0.3,  # the pinch face's outward normal toward the head
+            ]
+
+        start = np.array([0.0, 0.0, 30.0, 0.0, 0.0]) + rng.normal(0.0, 30.0, 5)
+        pose = _arm_solve(model, arm, rest, residual, start, HEAD_VIEW_LIMITS_DEG)
+        q = model.joint_vector({arm: pose})
+        if np.linalg.norm(model.frame_pose(pinch_frame(arm), q)[:3, 3] - target) > 0.015:
+            continue
+        if not head_sees(model, arm, q) or not within_limits(model, arm, pose):
+            continue
+        if on_a_bound(model, arm, pose, HEAD_VIEW_LIMITS_DEG) or not camera_clear_of_arm(model, arm, pose):
+            continue
+        if tips_clear(model, arm, pose, table_z):
+            candidates.append(pose)
+    if not candidates:
+        return []
+    joints = np.array([[pose[f"{j}.pos"] for j in SO101_JOINTS] for pose in candidates])
+    picked = [0]
+    nearest = np.linalg.norm(joints - joints[0], axis=1)
+    while len(picked) < min(n, len(candidates)):
+        k = int(np.argmax(nearest))
+        picked.append(k)
+        nearest = np.minimum(nearest, np.linalg.norm(joints - joints[k], axis=1))
+    return [candidates[k] for k in picked]

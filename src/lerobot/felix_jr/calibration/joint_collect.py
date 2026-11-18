@@ -2,7 +2,7 @@
 
   uv run --extra felix_jr --extra felix_jr_sim --extra pyzmq-dep python -m lerobot.felix_jr.calibration.joint_collect \
       tcp://<pi>:5555 --arm right --out-dir <scratch folder> --start-from <calibration.urdf>
-      [--board charuco:9x7:0.025:0.018:DICT_4X4_50] [--placements 2] [--arm-views 10] [--head-views 6] [--low-views 10]
+      [--board charuco:9x7:0.025:0.018:DICT_4X4_50] [--placements 2] [--arm-views 10] [--head-views 6] [--tip-views 10]
       [--max-vel 20] [--wrist-tip sweep|click] [--openings 20 35 50] [--resume]
 
 `docs/calibration_plan.md` (the procedure). Start the server on the Pi with the arm and the head. `--start-from` must
@@ -33,16 +33,17 @@ the wrist pane takes none. Per board placement:
    the board: a moment both cameras see it at ties the head to the arm. Click both fingertips in the head's panes if
    they show.
 
-**The jaws open** at the arm views and the low poses, `gripper.pos` 20, 35, 50 in turn (`--openings`;
+**The jaws open** at the arm views and the tip views, `gripper.pos` 20, 35, 50 in turn (`--openings`;
 `joint_views.VIEW_OPENINGS`; `--openings` alone keeps them closed): the moving tip's arc about the hinge is what fixes the
 hinge and the opening's offset (`joint_sim`). Both tips are kept 2 cm over the table at every opening
 (`joint_views.tips_clear`).
 
-Then **low poses**: each `n` moves the gripper low over the table, as for a grasp, and the head looks at the fingertip:
-click both tips. The head's clicks matter: a wrist click fixes only the direction from its camera to the fingertip, the
-head's the distance along it. Leave the board where it is: a picture that shows it is one more sighting. The planner
-keeps the fingers short of edge-on to the head here; at an arm view the status line says when they are nearly
-edge-on (click only if you can see the tips).
+Then **the tip views** (`joint_views.head_views`): each `n` moves the arm to a pose where the head sees the
+fingertips, the fingers about level and the wrist rolled so the head looks down onto the jaws' face, from just over
+the table to ~30 cm up, and the head looks at them: click both tips. The head's clicks matter: a wrist click fixes
+only the direction from its camera to the fingertip, the head's the distance along it. At the arm views the head
+rarely sees the tips (the wrist camera sits between): click them there only if they show. (Until 2026-11-17 these
+were poses low over the table, the fingers pointing down, away from the head: it hardly saw the tips.)
 
 Keys: `n` next, arrows turn the head (if the board is cut off), `u` undo the last click, `q` stop and
 fit. Everything is saved as you go (`joint_session.json`, `images/`), `--resume` continues. At the end the session
@@ -228,7 +229,7 @@ class JointCollect:
         placements: int = 2,
         arm_views: int = 10,
         head_views: int = 6,
-        low_views: int = 10,
+        tip_views: int = 10,
         max_vel: float = 20.0,
         head_step_deg: float = 2.0,
         resume: bool = False,
@@ -239,7 +240,7 @@ class JointCollect:
         """Load the start, check it against the robot, and send the arms to rest for the first placement."""
         self.client, self.arm, self.arm_id, self.out_dir, self.show = client, arm, f"{arm}_arm", out_dir, show
         self.board, self.n_placements, self.n_arm_views = board, placements, arm_views
-        self.n_head_views, self.n_low_views, self.max_vel = head_views, low_views, max_vel
+        self.n_head_views, self.n_tip_views, self.max_vel = head_views, tip_views, max_vel
         self.head_step_deg = head_step_deg
         self.rng = np.random.default_rng(seed)
         if wrist_tip not in WRIST_TIPS:
@@ -292,7 +293,7 @@ class JointCollect:
                 record,
             )
         self.placement = len(self.session.placements)  # the next placement's index
-        self.phase = "place" if self.placement < placements else "low"
+        self.phase = "place" if self.placement < placements else "tips"
         self.views: list[dict[str, float]] = []
         self.view_index = 0
         self.root_board: np.ndarray | None = None
@@ -327,7 +328,7 @@ class JointCollect:
         elif self.phase == "place":
             self._start_placement()
         else:
-            self._start_low()
+            self._start_tips()
 
     # ---- the robot ---------------------------------------------------------------------------------------------
 
@@ -408,9 +409,7 @@ class JointCollect:
         found = self.board.detect(capture.color)
         if found is None:
             return None
-        name = (
-            f"p{self.placement - (self.phase == 'low')}"  # low poses: the board still at the last placement
-        )
+        name = f"p{self.placement - (self.phase == 'tips')}"  # the tip views: the board still at the last placement
         image = self._image(capture, "head" if camera == HEAD else "wrist")
         self.detected["head" if camera == HEAD else "wrist"] = found.pixels
         if camera == HEAD and self.board_known and self.root_board is not None:
@@ -523,7 +522,7 @@ class JointCollect:
             if self.placement < self.n_placements:
                 self._start_placement()
             else:
-                self._start_low()
+                self._start_tips()
             return
         pose = self.views[self.view_index]
         self.view_index += 1
@@ -540,21 +539,24 @@ class JointCollect:
         )
         self.render()
 
-    def _start_low(self) -> None:
+    def _start_tips(self) -> None:
         self.views = jv.with_openings(
             self.model,
             self.arm,
-            jv.low_poses(self.model, self.arm, self.rest, self.n_low_views, self.table_z, self.rng),
+            jv.head_views(self.model, self.arm, self.rest, self.n_tip_views, self.table_z, self.rng),
             self.openings,
         )
         self.view_index = 0
-        self.phase = "low"
-        self.message = f"{len(self.views)} poses low over the table: n moves the arm there (watch it)"
+        self.phase = "tips"
+        self.message = (
+            f"{len(self.views)} views of the fingertips for the head (the fingers about level): n moves the arm there "
+            "(watch it)"
+        )
         if self.head is None:
             self._capture()
         self.render()
 
-    def _next_low(self) -> None:
+    def _next_tips(self) -> None:
         if self.view_index >= len(self.views):
             self.phase = "done"
             self.message = "all views done: q to fit"
@@ -571,7 +573,7 @@ class JointCollect:
         if self.board_known:  # the board still lies where the arm views saw it: sightings, if it shows
             wrist, head = self._sight(self.arm) is not None, self._sight(HEAD) is not None
             seen = f" (the board seen: wrist {'yes' if wrist else 'no'}, head {'yes' if head else 'no'})"
-        self.message = f"low pose {self.view_index}/{len(self.views)}{seen}: click the fingertips, then n"
+        self.message = f"tip view {self.view_index}/{len(self.views)}{seen}: click both fingertips, then n"
         self.render()
 
     # ---- actions -----------------------------------------------------------------------------------------------
@@ -584,8 +586,8 @@ class JointCollect:
             self._confirm_placement()
         elif self.phase == "arm":
             self._next_arm_view()
-        elif self.phase == "low":
-            self._next_low()
+        elif self.phase == "tips":
+            self._next_tips()
         else:
             self.message = "all views done: q to fit"
             self.render()
@@ -722,8 +724,8 @@ class JointCollect:
         self.sweep_pending = False
         if self.phase == "sweep":
             self._start_placement()
-        elif self.phase == "low":
-            self._start_low()
+        elif self.phase == "tips":
+            self._start_tips()
         return True
 
     def measure_wrist_tip(self, window: bool = True, ask: Callable[[str], str] = input) -> int:
@@ -888,7 +890,14 @@ def main() -> None:
     parser.add_argument("--placements", type=int, default=2)
     parser.add_argument("--arm-views", type=int, default=10, help="arm views per placement")
     parser.add_argument("--head-views", type=int, default=6, help="head views per placement, the arms folded")
-    parser.add_argument("--low-views", type=int, default=10, help="poses low over the table")
+    parser.add_argument(
+        "--tip-views",
+        "--low-views",
+        dest="tip_views",
+        type=int,
+        default=10,
+        help="views of the fingertips for the head (joint_views.head_views)",
+    )
     parser.add_argument("--max-vel", type=float, default=20.0, help="arm speed limit, deg/s (20)")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
@@ -934,7 +943,7 @@ def main() -> None:
             args.placements,
             args.arm_views,
             args.head_views,
-            args.low_views,
+            args.tip_views,
             args.max_vel,
             resume=args.resume,
             wrist_tip=args.wrist_tip,

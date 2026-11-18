@@ -233,7 +233,7 @@ the servo's and fits it.
    stiff, as in section 6):
    `uv run --extra felix_jr --extra felix_jr_sim --extra pyzmq-dep python -m lerobot.felix_jr.calibration.joint_collect
    tcp://<pi>:5555 --arm right --out-dir <a scratch folder> --start-from <calibration.urdf>`
-   (`--placements 2 --arm-views 10 --low-views 10` by default; `--max-vel` the arm's speed, 20 deg/s).
+   (`--placements 2 --arm-views 10 --tip-views 10` by default; `--max-vel` the arm's speed, 20 deg/s).
 3. **The gripper sweep, first**, in the terminal, the board not yet down: it prints the sim's checks of the sweep
    pose (how near the table the gripper comes), asks (Enter to start, `q` to skip), moves the arm over the table and
    shows a live preview of the fingers found (Enter sweeps, `q` stops), then opens the jaws in steps. Then the **drift
@@ -253,13 +253,16 @@ the servo's and fits it.
    - **head: MOVING fingertip** (yellow): click the moving finger's tip (declined with the jaws closed);
    - **wrist camera** (cyan): no clicks (the sweep has its tips).
 
-   Each head pane circles where the model has its tip and names the face to click on (the pane's title): at the arm
-   views the head looks down on the fingers' wrist-camera side, at the low poses it sees the pinch face (the side
-   away from the wrist camera). Click the tip on that face, where you see it: the picture over the circle. Skip a tip
-   you cannot see (hidden, out of the picture, or the status line's NEARLY EDGE-ON). `u` undoes the last click.
+   Each head pane circles where the model has its tip and names the face to click on (the pane's title). At the arm
+   views the head looks down on the wrist camera, which mostly hides the tips: click only a tip you can see; most
+   views have none, and that is expected (the tip views, 7, are for them). `u` undoes the last click.
 6. **The next placement** (`--placements`, 2): the arm rests, lay the board on the new outline, as in 4-5.
-7. **Low poses** (`n` each): the gripper low over the table as for a grasp, the head on the fingertips; click both
-   again. Leave the board where it is.
+7. **Tip views** (`n` each; `--tip-views`, 10): the arm turns the fingers to the head, about level, the wrist rolled
+   so the head looks down onto the jaws' face (the pinch face, the side away from the wrist camera), at heights from
+   just over the table to ~30 cm up; the head on the fingertips. Click both tips, every view. Leave the board where it
+   is. (These replaced poses low over the table on 2026-11-17: the fingers pointed down, away from the head, which
+   hardly saw the tips; the simulator, made to see only what the head can, agrees: the camera 3.4 mm off with those,
+   0.8 mm with 10 tip views, 0.6 with 20.)
 8. **`q`** fits and writes `calibration.urdf` and `calibration.md` in the folder (a minute or a few). Read the report:
    - **the residuals**: the boards ~0.1-0.5 px, the clicks ~1-2 px;
    - **mis-clicks**: clicks more than 30 px from the fitted tip are named, with pictures (`misclicks/`), and left

@@ -144,7 +144,7 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup, gripper_map):
             placements=1,
             arm_views=5,
             head_views=3,
-            low_views=2,
+            tip_views=2,
             wrist_tip="click",  # (clicked here: the fake robot's wrist frames have no fingers for a sweep to find)
         )
         assert session.phase == "place" and shown, session.message
@@ -188,9 +188,9 @@ def test_a_session_collects_sightings_and_clicks_and_fits(setup, gripper_map):
                 click_truth()
         assert sum(s.camera == ARM for s in session.session.sightings) >= 3, session.message
         assert not session.board_warning  # the board stayed where it was placed
-        while session.phase == "low":
+        while session.phase == "tips":
             session.next()
-            if session.phase == "low":
+            if session.phase == "tips":
                 click_truth()
         assert session.phase == "done"
         path = session.finish(holdout_every=0)

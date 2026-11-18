@@ -108,6 +108,9 @@ class Scenario:
     end_sweep: bool = False
     # with `wrist_auto`: the wrist's tips found at the views too (else only in the end sweep)
     wrist_at_views: bool = True
+    # the `low_views` planned for the head to see the tips (`joint_views.head_views`: the fingers about level, at
+    # heights) instead of low over the table (`low_poses`, the fingers pointing down: the head hardly sees them)
+    tip_views: bool = False
 
 
 @dataclass
@@ -357,9 +360,14 @@ class World:
                     )
         last = f"p{scenario.placements - 1}"  # the board left where the last placement put it
         points = jv.board_points(self.board, self.boards[last]) if scenario.placements else None
+        clicking = (
+            jv.head_views(self.model, ARM, REST, scenario.low_views, self.table_z, self.rng)
+            if scenario.tip_views
+            else self.grasp_poses(scenario.low_views)
+        )
         for arm in map(
-            opened, self.grasp_poses(scenario.low_views)
-        ):  # the gripper low over the table, the head on the fingertip
+            opened, clicking
+        ):  # the gripper low over the table or at a tip view, the head on the tips
             q_plan = self.model.joint_vector({ARM: arm}, self.home_ticks)
             ticks, _ = aim_head(self.model, self.home_ticks, self.model.pinch_point(ARM, q_plan))
             ticks = self.nudge_head(arm, ticks, self.tips(self.true_q(arm, ticks))[0][None])
@@ -406,7 +414,9 @@ class World:
         seen = [(ARM, wrist_tip, "wrist", noise)] if wrist else []
         if auto and wrist and pos is not None:
             seen.append((ARM, self.moving_tip(q, pos, MOVING), MOVING, AUTO_NOISE_PX))
-        if head and jv.head_face_angle(self.model, ARM, q) < 90.0:  # else the jaw hides its tip from the head
+        # the head sees the tips only nearly face-on (`joint_views.head_sees`; until 2026-11-17 this was 90 deg, and
+        # the low poses' clicks the simulator counted were hardly ever there on the robot: joint_right_1117)
+        if head and jv.head_sees(self.model, ARM, q):
             seen.append((HEAD, head_tip, "pinch", self.click_noise_px))
             if open_ and pos is not None and scenario is not None and scenario.head_moving:
                 seen.append((HEAD, self.moving_tip(q, pos, MOVING_PINCH), MOVING_PINCH, self.click_noise_px))
@@ -653,6 +663,34 @@ FINGER_SCENARIOS = (
     ),
     Scenario(
         2, 10, 6, True, "  the same, 20 low poses", 20, openings=OPEN, wrist_auto=True, head_moving=True
+    ),
+    Scenario(
+        2,
+        10,
+        6,
+        True,
+        "  the end sweep only, 10 tip views",
+        10,
+        openings=OPEN,
+        wrist_auto=True,
+        head_moving=True,
+        end_sweep=True,
+        wrist_at_views=False,
+        tip_views=True,
+    ),
+    Scenario(
+        2,
+        10,
+        6,
+        True,
+        "  the end sweep only, 20 tip views",
+        20,
+        openings=OPEN,
+        wrist_auto=True,
+        head_moving=True,
+        end_sweep=True,
+        wrist_at_views=False,
+        tip_views=True,
     ),
 )
 

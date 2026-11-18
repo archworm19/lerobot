@@ -62,3 +62,22 @@ def test_a_pose_whose_open_jaw_would_touch_the_table_is_refused(model, table_z):
     no_map = XleRobotModel.load(api.MODEL)
     no_map.gripper_maps = {}
     assert jv.tips_clear(no_map, ARM, pose, table)  # the jaws then stay closed: the fixed tip is all there is
+
+
+def test_the_tip_views_show_the_head_the_tips_at_heights(model, table_z):
+    """`head_views`: the fingers about level, the pinch face toward the head (`head_sees`), both tips over the table
+    at every opening, from low to well above it; the old low poses never showed it face-on (`HEAD_SEES_DEG`)."""
+    from lerobot.felix_jr.calibration.xle_robot_model import pinch_frame
+
+    poses = jv.head_views(model, ARM, REST, 10, table_z, np.random.default_rng(0))
+    assert len(poses) >= 6
+    heights = []
+    for pose in poses:
+        q = model.joint_vector({ARM: pose})
+        assert jv.head_sees(model, ARM, q) and jv.tips_clear(model, ARM, pose, table_z)
+        pinch = model.frame_pose(pinch_frame(ARM), q)
+        assert abs(np.degrees(np.arcsin(-pinch[2, 2]))) < 35.0  # about level
+        heights.append(pinch[2, 3] - table_z)
+    assert max(heights) - min(heights) > 0.08  # a spread of heights
+    low = jv.low_poses(model, ARM, REST, 8, table_z, np.random.default_rng(0))
+    assert not any(jv.head_sees(model, ARM, model.joint_vector({ARM: p})) for p in low)
