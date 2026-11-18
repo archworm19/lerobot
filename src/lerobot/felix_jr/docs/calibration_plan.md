@@ -198,8 +198,18 @@ Newest first. Each commit that changes the calibration adds its entry here, titl
 name its own hash, so the next one fills it in. Before the plan (2026-11-16) the work is in `camera_calibration.md`
 and git's log.
 
-- **The head clicks the tips at tip views, not low poses; the simulator's head sees what a real one can** (2026-11-17,
-  hash in the next entry). Item 4's tip views (above): `joint_views.head_sees`, `head_views`; `joint_collect`'s
+- **The wrist camera kept off the table, at every pose and along every move** (2026-11-17, hash in the next entry).
+  The second robot session (`joint_right_1117b`): at a tip view the pinch face is up, so the wrist camera faces the
+  table, and it hit it (3 of its tip views put the camera's board 1-3 cm into the table in the model; nothing
+  checked it). `joint_views.camera_clear_of_table` (the 45 mm board's corners, 2 cm), in `clear_of_table`,
+  `low_poses` and `head_views`; `table_margin` and `path_clear` (a move's straight path in the joints, never nearer
+  the table than its start: the rest pose folds the tips within 2 cm of it); `joint_collect` goes through the rest
+  pose when the straight way is not clear, and skips a view neither way reaches. `head_views` tries at least 100
+  targets. That session itself: 20 head clicks (6 the first time), the wrist camera's change 1.7 deg (3.0), its
+  correlation with the wrist roll's zero 0.93 (0.98); its board sightings all before the tip views (the robot was
+  turned by hand during them: no harm).
+- **`b358b641e`: The head clicks the tips at tip views, not low poses; the simulator's head sees what a real one can**
+  (2026-11-17). Item 4's tip views (above): `joint_views.head_sees`, `head_views`; `joint_collect`'s
   "tips" phase (`--tip-views`); `joint_sim`'s head and `Scenario.tip_views`; the README's step 7. Tests:
   `test_joint_views` (the tip views, the low poses never face-on), the collection smoke tests.
 - **`acd0f8e68`: The run book for the new procedure; a stale gripper map replaced at a session's start** (2026-11-17). Item 7: `README.md` sections 6-9 in the procedure's order (the lenses, the joint session, the

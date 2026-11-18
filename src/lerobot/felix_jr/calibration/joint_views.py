@@ -87,6 +87,11 @@ PLACEMENT_SIDES_M = (-0.24, -0.06)  # ... and toward the robot's middle (negativ
 # the jaws at the arm views and low poses, `gripper.pos` in turn (`with_openings`): the moving tip's arc about the
 # hinge, clicked by the head, fixes the hinge and the opening's offset (`joint_sim`: the hinge 1.7 -> 0.8 mm)
 VIEW_OPENINGS = (20.0, 35.0, 50.0)
+# the wrist camera's board (45 mm square around the lens: `hardware_risks.md`) kept this far over the table: at a tip
+# view the pinch face is up, so the camera, on the gripper's other side, faces the table (it hit it: joint_right_1117b)
+CAMERA_BOARD_HALF_M = 0.0225
+CAMERA_TABLE_CLEARANCE_M = 0.02
+PATH_STEPS = 12  # a move's straight path in the joints, checked at this many poses
 TIP_CLEARANCE_M = (
     0.02  # a pose keeps both fingertips this far above the table (the moving one at its opening)
 )
@@ -97,6 +102,7 @@ HEAD_SEES_DEG = 50.0
 # the head views' pinch point (ahead of the arm's base, to its side, over the table) and the fingers' tilt below level
 HEAD_VIEW_AHEAD_M, HEAD_VIEW_SIDE_M, HEAD_VIEW_UP_M = (0.10, 0.32), (-0.25, 0.25), (0.04, 0.28)
 HEAD_VIEW_TILT_DEG = (-10.0, 30.0)
+HEAD_VIEW_MIN_TRIES = 100  # ... and this many at least (a few views from few tries: none, at times)
 HEAD_VIEW_TRIES = 15  # targets drawn per view returned (one in ten is kept: 8 of 10 views from 8 a view)
 HEAD_VIEW_LIMITS_DEG = {"elbow_flex": (0.0, None)}
 HEAD_FACE_MAX_DEG = 75.0  # a low pose shows the head the fingertip's face it clicks within this (90: edge on)
@@ -321,12 +327,63 @@ def camera_clear_of_arm(model: XleRobotModel, arm: str, pose: Mapping[str, float
 def clear_of_table(model: XleRobotModel, arm: str, pose: Mapping[str, float], table_z: float) -> bool:
     """Whether the arm is clear of the table: its links and its fingertips.
 
-    Every link (`ARM_LINKS`, their origins) `LINK_CLEARANCE_M` above it, the fingertips `TIP_CLEARANCE_M` (`tips_clear`).
+    Every link (`ARM_LINKS`, their origins) `LINK_CLEARANCE_M` above it, the fingertips `TIP_CLEARANCE_M` (`tips_clear`),
+    the wrist camera's board `CAMERA_TABLE_CLEARANCE_M` (`camera_clear_of_table`).
     """
     q = model.joint_vector({arm: dict(pose)})
-    return all(
-        model.frame_pose(f"{arm}_{link}", q)[2, 3] > table_z + LINK_CLEARANCE_M for link in ARM_LINKS
-    ) and tips_clear(model, arm, pose, table_z)
+    return (
+        all(model.frame_pose(f"{arm}_{link}", q)[2, 3] > table_z + LINK_CLEARANCE_M for link in ARM_LINKS)
+        and tips_clear(model, arm, pose, table_z)
+        and camera_clear_of_table(model, arm, pose, table_z)
+    )
+
+
+def camera_clear_of_table(model: XleRobotModel, arm: str, pose: Mapping[str, float], table_z: float) -> bool:
+    """Whether `arm`'s wrist camera's board is `CAMERA_TABLE_CLEARANCE_M` over the table at `pose`.
+
+    Its four corners, `CAMERA_BOARD_HALF_M` around the lens.
+    """
+    q = model.joint_vector({arm: dict(pose)})
+    camera = model.frame_pose(wrist_camera_frame(arm), q)
+    h = CAMERA_BOARD_HALF_M
+    corners = np.array([[x, y, 0.0] for x in (-h, h) for y in (-h, h)]) @ camera[:3, :3].T + camera[:3, 3]
+    return bool((corners[:, 2] > table_z + CAMERA_TABLE_CLEARANCE_M).all())
+
+
+def table_margin(model: XleRobotModel, arm: str, pose: Mapping[str, float], table_z: float) -> float:
+    """How far (m) the arm at `pose` is inside its clearances over the table, at the tightest (negative: within one).
+
+    Its links (`LINK_CLEARANCE_M`), both fingertips at every opening (`TIP_CLEARANCE_M`, `tips_clear`) and the wrist
+    camera's board (`CAMERA_TABLE_CLEARANCE_M`, `camera_clear_of_table`).
+    """
+    q = model.joint_vector({arm: dict(pose)})
+    margins = [model.frame_pose(f"{arm}_{link}", q)[2, 3] - table_z - LINK_CLEARANCE_M for link in ARM_LINKS]
+    tips = [model.pinch_point(arm, q)]
+    if arm in model.gripper_maps:
+        tips += [model.moving_tip(arm, q, model.opening_deg(arm, pos)) for pos in VIEW_OPENINGS]
+    margins += [tip[2] - table_z - TIP_CLEARANCE_M for tip in tips]
+    camera = model.frame_pose(wrist_camera_frame(arm), q)
+    h = CAMERA_BOARD_HALF_M
+    corners = np.array([[x, y, 0.0] for x in (-h, h) for y in (-h, h)]) @ camera[:3, :3].T + camera[:3, 3]
+    margins += list(corners[:, 2] - table_z - CAMERA_TABLE_CLEARANCE_M)
+    return float(min(margins))
+
+
+def path_clear(
+    model: XleRobotModel, arm: str, start: Mapping[str, float], end: Mapping[str, float], table_z: float
+) -> bool:
+    """Whether the arm's straight move in the joints from `start` to `end` stays clear of the table.
+
+    As `move_joints` makes it, at `PATH_STEPS` poses: none within the clearances (`table_margin`) more than the start
+    is (the rest pose folds the fingertips within 2 cm of the table: a move may start there, not go nearer).
+    """
+    joints = [f"{j}.pos" for j in SO101_JOINTS]
+    floor = min(0.0, table_margin(model, arm, start, table_z)) - 1e-3
+    for t in np.linspace(0.0, 1.0, PATH_STEPS + 1)[1:]:
+        pose = {k: start[k] + t * (end[k] - start[k]) for k in joints}
+        if table_margin(model, arm, pose, table_z) < floor:
+            return False
+    return True
 
 
 def tips_clear(model: XleRobotModel, arm: str, pose: Mapping[str, float], table_z: float) -> bool:
@@ -566,6 +623,8 @@ def low_poses(
             q = model.joint_vector({arm: pose})
             if not tips_clear(model, arm, pose, table_z) or not within_limits(model, arm, pose):
                 continue
+            if not camera_clear_of_table(model, arm, pose, table_z):
+                continue
             if not camera_clear_of_arm(model, arm, pose) or on_a_bound(
                 model, arm, pose, LOW_JOINT_LIMITS_DEG
             ):
@@ -593,12 +652,12 @@ def head_views(
     fingers point in the arm's vertical plane, so the head (above the arm's base) sees them face-on only near level,
     the wrist rolled so the hinge points up at it. Kept: the target reached (1.5 cm), the head sees the tips, within the
     joints' limits and off their bounds, the wrist camera clear of the arm, both tips clear of the table at every
-    opening (`tips_clear`). `HEAD_VIEW_TRIES` targets per view, the `n` farthest apart in the joints kept.
+    opening (`tips_clear`) and the wrist camera's board too (`camera_clear_of_table`: it faces the table here). `HEAD_VIEW_TRIES` targets per view, the `n` farthest apart in the joints kept.
     """
     base = model.frame_pose(f"{arm}_base_link", model.joint_vector())[:3, 3]
     face = model.wrist_face(arm) / np.linalg.norm(model.wrist_face(arm))
     candidates: list[dict[str, float]] = []
-    for _ in range(HEAD_VIEW_TRIES * n):
+    for _ in range(max(HEAD_VIEW_TRIES * n, HEAD_VIEW_MIN_TRIES)):
         target = np.array(
             [
                 base[0] - rng.uniform(*HEAD_VIEW_AHEAD_M),
@@ -627,7 +686,7 @@ def head_views(
             continue
         if on_a_bound(model, arm, pose, HEAD_VIEW_LIMITS_DEG) or not camera_clear_of_arm(model, arm, pose):
             continue
-        if tips_clear(model, arm, pose, table_z):
+        if tips_clear(model, arm, pose, table_z) and camera_clear_of_table(model, arm, pose, table_z):
             candidates.append(pose)
     if not candidates:
         return []

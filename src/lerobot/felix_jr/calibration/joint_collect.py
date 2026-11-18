@@ -343,7 +343,21 @@ class JointCollect:
         return move_head_to(self.client, ticks)
 
     def _move_arm(self, pose: dict[str, float]) -> bool:
+        """Move to `pose`, the straight way if it keeps the arm off the table (`joint_views.path_clear`).
+
+        Else through the rest pose, and not at all if even that way would not.
+        """
         pose = {"gripper.pos": 0.0, **pose}  # (the jaws as planned: `joint_views.with_openings`)
+        here = {k: float(v) for k, v in self.client.get_state()[self.arm_id].items()}
+        if not jv.path_clear(self.model, self.arm, here, pose, self.table_z):
+            if not jv.path_clear(
+                self.model, self.arm, {**self.rest, "gripper.pos": here["gripper.pos"]}, pose, self.table_z
+            ):
+                self.message = (
+                    "this view's way there comes near the table even from rest: skipped; n for the next"
+                )
+                return False
+            self.client.home(max_vel=self.max_vel, arms=[self.arm_id])  # the way around: up, then out again
         status = self.client.move_joints({self.arm_id: pose}, max_vel=self.max_vel)
         if status["state"] != "done":
             self.message = f"the arm stopped ({status['state']}: {status['reason']}); n tries the next view"
