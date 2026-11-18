@@ -232,6 +232,77 @@ give, which none of them has). Videos: `finger_models --video`, `grip_sim`'s rep
 tips (`grip_test --depth-mm 15`), an off-center grip; and the friction pinned directly: pyri with water added until it
 slips. Each replays into `finger_models` as it is.
 
+## The grasp environment's starts (plan, 2026-11-18)
+
+**What the episodes start from.** The task: from an attack pose near an object, line the jaws up, close, lift. Success:
+the object 3-4 cm up and held 2 s (`grip_test`'s lift). Objects: upright cylinders first (the sizes and masses spread
+around the measured ones), through the harness's primitives (`harness/primitives.py`: any `Primitive` with antipodal
+grasps), so nothing below is specific to a cylinder.
+
+**Diverse starts** (after OmniReset, "Emergent Dexterity via Diverse Resets and Large-Scale Reinforcement Learning",
+arXiv 2603.15789, ICLR 2026: starts drawn from every stage of the task, not only its beginning; their policies learned to
+retry). Four pools, their shares a parameter (`pool_weights`; a first guess in brackets):
+
+| pool | starts at | teaches |
+| --- | --- | --- |
+| attack (0.5) | the attack pose, the gripper-to-object offset perturbed as the real robot misses | the whole grasp |
+| at the object (0.2) | the grasp pose, a few mm off, the jaws open | when and where to close |
+| in the jaws (0.2) | closed on the object, poor grips too (near the tips, off center) | the lift; a slip, a re-grip |
+| lifted (0.1) | the object partway up | holding through the lift |
+
+**The real misses, for the attack pool** (`sessions.md`, bowl5-bowl8, pen1-pen2): the gripper-to-object offset ~1 cm
+(up to ~2), biased ~1 cm short along the approach (moves fell short twice; bottles 0.3-2.3 cm ahead of the aim point)
+and ~0.5 cm low (the arm's sag at the attack holds: 0.4-0.9 cm); across the jaws 0.5-1.5 cm; the object's heading a few
+degrees (a pushed pen: ~15). A starting point to randomize around, not a fit.
+
+**The bank: the feasibility work offline, once per arm, table and object family** (OmniReset filters its resets
+offline too, but on a 6-joint arm; ours has 5, so reachability is most of the work):
+
+1. **Placements:** objects sampled over the reachable table, their sizes and masses.
+2. **Feasible grasp chains,** the harness's filters (`harness/grasping.py`: the jaws, attack and grasp by IK, joint
+   margins, the wrist camera's clearance), with four changes, the first three shared with the harness:
+   - **the jaws' width from the fingers' real faces:** the closed jaws are a V, narrower deeper in (`grip_sim`: a
+     bottle "wide enough" at the tips started inside the fingers); the open jaws checked at the depth the grasp puts
+     the object;
+   - **the lift, and the paths between** (attack -> grasp -> lift): the lift by IK from the grasp's joints, the table's
+     clearance along each move in the joints, the camera's board corners and the arm's links included
+     (`joint_views.table_margin`, `path_clear`: what hit the table in the joint session);
+   - **the object in the wrist camera's view** at the attack pose (in frame, not behind the fingers): the policy's
+     input;
+   - **reachable around the start, not just at it** (bank only, its cost to be measured): the attack pose solvable
+     ~2 cm off along a few axes (warm-started IK), or the Jacobian's manipulability bounded, so a start is not next
+     to a limit or a singularity the policy cannot correct from.
+
+   The harness's ranking (how antipodal, the approach's preference, the joint margin) is heuristics: not used. The
+   candidates are sampled from the filtered set, weighted only for coverage (mostly side grasps for cylinders).
+3. **Each grasp simulated before training** (`grip_sim`'s scripted grasp from the exact grasp pose: close 10 past
+   contact, hold, lift 4 cm; ~1 s each now, parallel over the cores), under a few draws of the physics around the
+   fitted values (friction, the fingers' stiffness): a success rate, not a pass. It answers whether the grasp is
+   physically possible at all, the setup's question; the real robot will not reach that ideal pose, and the attack
+   pool's offsets (the policy's job to close) and the in-jaws pool's poor grips are the real arrival. The same
+   rollouts are the bank's later pools: their states snapshotted (`mj_getState`) open at the grasp, closed on the
+   object, partway up. Every candidate keeps its label, successes and failures: the data for a learned grasp-quality
+   model, which could replace the harness's ranking at deployment.
+4. **The bank on disk:** per anchor the object, its pose, the grasp, the attack, grasp and lift joints, the success
+   rate, the snapshots.
+
+**At a reset** (no IK): a pool by `pool_weights`, an anchor; the attack pool's offset applied by moving the object (the
+arm stays at a pose known reachable; the offset clamped to the table and to the anchor's correctable range); the other
+pools a snapshot with a few mm of noise; a few settling steps, and the rare start that intersects or falls rejected.
+
+**Randomized around the fits:** the friction, the fingers' stiffness, the gripper's gain and torque cap, the objects'
+size, mass and softness (feno: a softer bottle), the attack offsets, the wrist camera's pose on the gripper (~0.5 deg,
+1-2 mm). How widely is the open question: the fits rest on two bottles.
+
+**Order of work:**
+
+1. The shared filter fixes in the harness (the jaws' width from the faces, the lift and the paths, the object in the
+   wrist camera's view), each tested on the harness's grasp tests and timed.
+2. The bank's generator: placements, the filters (and the neighbourhood check, timed), the simulated grasps under
+   physics draws, the snapshots, the file.
+3. The reset sampler and its pools.
+4. The environment around it (observations, actions, reward), then the teacher.
+
 ## Next
 
 1. **The gripper sweep on both arms** (`gripper_sweep --arm both --out <urdf>`): the left arm's fitted twice, the
@@ -248,4 +319,4 @@ slips. Each replays into `finger_models` as it is.
    the fingers' wrapping, and the friction pinned directly (above).
 4. **The grasp environment:** starts near an attack pose (as the head's plan leaves it), the robot's errors
    randomized, the wrist camera's pose on the gripper among them (about half a degree, a millimeter or two: the mounts
-   move, `hardware_risks.md`); then the teacher.
+   move, `hardware_risks.md`); then the teacher. **Planned (2026-11-18): "The grasp environment's starts", above.**
