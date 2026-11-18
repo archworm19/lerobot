@@ -20,11 +20,12 @@ Per bottle, in the terminal (the arm moves first, the bottle is placed after, so
 3. **Stand the bottle** where its outline is drawn on the live wrist picture (`place`: its circle on the table, at
    the tips' height and at its top, from the model's grasp point for its width moved back by the depth); Enter in
    that window (`--no-window`: in the terminal, by eye).
-4. **The closes:** to the map's contact for that width, then `PAST_CONTACT` units past it, then to 0, each sampled
+4. **The closes:** to the map's contact for that width, then `PAST_CONTACT` units past it (stopping at one that trips
+   the servo's overload protection, which the server relieves), each sampled
    for `CLOSE_S` (position, load, current) with a wrist frame at the end; the stall (the last half second's median)
    printed as it goes.
-5. **The hold:** at 0 for `HOLD_S`, sampled. The servo's overload protection can trip (it did at once on a 45 mm
-   bottle, 2026-11-17): the server opens the jaw a little and says so (`"overload"`), and the trial records when.
+5. **The hold:** at the deepest close that did not trip the protection, for `HOLD_S`, sampled (the close to 0 tripped
+   it in ~2 s on a 45 mm bottle, 2026-11-17: a grip that holds is one the servo can keep).
 6. **The lift:** up `LIFT_M` (the gripper level, the jaws as they are), wrist frames at once and after `LIFT_HOLD_S`;
    you say whether it held, slipped or dropped. Back down, the jaws open: take the bottle out.
 
@@ -57,7 +58,15 @@ GRIP_TILTS_DEG = (0.0, 15.0, 30.0, 45.0)  # the fingers' tilt below level: the f
 TIP_HEIGHT = 0.5  # the tips at this fraction of the bottle's height ...
 TIP_HEIGHT_M = (0.05, 0.12)  # ... within these heights over the table
 OPEN_MARGIN_M = 0.015  # the jaws opened this much wider than the bottle
-PAST_CONTACT = (0.0, 2.0, 5.0, 10.0)  # the closes: gripper.pos units past the map's contact, then 0
+# the closes: gripper.pos units past the map's contact. The close to 0 tripped the servo's overload protection in ~2 s
+# on a 45 mm bottle (load ~33 %; 10 past contact: ~20 %, 2026-11-17), so the hold and the lift are at the deepest close
+# that did not trip it
+PAST_CONTACT = (0.0, 2.0, 5.0, 10.0, 15.0)
+# the servo's protection: a load over ~20 % for ~2 s trips it (15 past contact, 23 %, tripped 0.2 s into its hold after
+# its 2 s close; 10 past, 20 %, held: 2026-11-17; inferred, the registers not read). The hold is under it
+SUSTAINED_LOAD_PCT = 20.0
+PROTECTION_REST_S = 2.0  # before a hold, the protection's count let down ...
+REST_PAST_CONTACT = 1.0  # ... the jaw eased to this past contact (a light load, the bottle still held)
 CLOSE_S = 2.0
 HOLD_S = 30.0
 LIFT_M = 0.04
@@ -400,24 +409,63 @@ class GripTest:
                 f"load {end['load_pct']:+.1f} %, {end['current_ma']:.0f} mA"
             )
             self._save()
-            if (t := overloaded(samples)) is not None:
-                record["overload"] = {"during": f"close {past:g} past contact", "t": t}
+            if (t := overloaded(samples)) is not None:  # the deepest close: the one before (the jaw relieved)
+                record["closes"][-1]["overload_t"] = t
+                print(
+                    f"  (the servo's overload protection tripped {t:.1f} s in: the hold at the close before)"
+                )
                 break
             if (t := slipped(samples, contact)) is not None:
                 record["slipped"] = {"during": f"close {past:g} past contact", "t": t}
                 break
-        if "slipped" not in record and "overload" not in record:
-            samples = self.client.grip(self.arm_id, 0.0, seconds=HOLD_S, period=0.2)
+        # the hold: at the deepest close whose load stayed under `SUSTAINED_LOAD_PCT` (above it the servo's protection
+        # trips within ~2 s, counted across the close and the hold), stepping back a close at each trip
+        held_closes = [c for c in record["closes"] if "overload_t" not in c]
+        under = [c for c in held_closes if c["stall"]["load_pct"] < SUSTAINED_LOAD_PCT] or held_closes[:1]
+        record["holds"] = []
+        for close in reversed(under) if "slipped" not in record else []:
+            target = close["target"]
+            # the protection's count let down first, the jaw eased to just past contact (resting where the last close
+            # left it, 23 % at 15 past, tripped it: 2026-11-17)
+            if PROTECTION_REST_S > 0:
+                self.client.grip(
+                    self.arm_id, contact - REST_PAST_CONTACT, seconds=PROTECTION_REST_S, period=0.2
+                )
+            samples = self.client.grip(self.arm_id, target, seconds=HOLD_S, period=0.2)
             loads = [s["load_pct"] for s in samples]
-            record["hold"] = {"samples": samples, "first": stall(samples[:5]), "last": stall(samples)}
+            hold = {
+                "target": target,
+                "past_contact": close["past_contact"],
+                "samples": samples,
+                "first": stall(samples[:5]),
+                "last": stall(samples),
+            }
+            record["holds"].append(hold)
             print(
-                f"  hold {HOLD_S:g} s at 0: load {np.median(loads[:5]):+.1f} -> {np.median(loads[-5:]):+.1f} %"
+                f"  hold at {target:.1f} ({close['past_contact']:g} past contact): load "
+                f"{np.median(loads[:5]):+.1f} -> {np.median(loads[-5:]):+.1f} % over {samples[-1]['t']:.0f} s"
             )
-            if (t := overloaded(samples)) is not None:
-                record["overload"] = {"during": "the hold at 0", "t": t}
-            elif (t := slipped(samples, contact)) is not None:
-                record["slipped"] = {"during": "the hold at 0", "t": t}
             self._save()
+            if (t := overloaded(samples)) is not None:
+                hold["overload_t"] = t
+                print(f"    the protection tripped {t:.1f} s in: a close back")
+                continue
+            if (t := slipped(samples, contact)) is not None:
+                record["slipped"] = {"during": f"the hold at {close['past_contact']:g} past contact", "t": t}
+            else:
+                record["hold"] = hold  # the one held: the lift is at it
+            break
+        if "hold" not in record and "slipped" not in record:
+            record["overload"] = {
+                "during": "every hold" if record["holds"] else "the first close",
+                "t": (
+                    record["holds"][-1].get("overload_t")
+                    if record["holds"]
+                    else overloaded(record["closes"][0]["samples"])
+                )
+                or 0.0,
+            }
+        self._save()
         if "overload" in record:
             print(
                 f"  OVERLOAD: the servo's protection tripped during {record['overload']['during']} "

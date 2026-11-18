@@ -257,16 +257,18 @@ class FakeArms:
                 travel = min(abs(target - start), self.GRIP_SPEED * t / self.time_scale)
                 pos = start + np.sign(target - start) * travel
                 stop = self.object_pos.get(arm_id)
-                if stop is not None and target < stop <= start:
-                    pos = max(pos, stop)
+                stalled = stop is not None and target < stop <= start and pos <= stop
+                if stalled:
+                    pos = stop
                 self.pos[arm_id]["gripper.pos"] = pos
-                load = self.GRIP_LOAD_PER_UNIT * (pos - target) if abs(pos - target) > 1e-9 else 0.0
+                load = (
+                    self.GRIP_LOAD_PER_UNIT * (pos - target) if stalled else 0.0
+                )  # pressing only once stalled
                 samples.append(
                     {"t": t / self.time_scale, "pos": pos, "load_pct": load, "current_ma": 6.5 * abs(load)}
                 )
                 if self.overload_above is not None and load > self.overload_above:  # as `RealArms.grip`
                     samples[-1]["overload"] = 1
-                    self.object_pos.pop(arm_id, None)
                     self.pos[arm_id]["gripper.pos"] = pos + RELIEVE_UNITS
                     return samples
                 on_tick()
@@ -390,7 +392,8 @@ class RealArms:
         from lerobot.felix_jr.home import update_goal
 
         bus = self.robots[arm_id].bus
-        bus.write("Goal_Position", "gripper", float(target))  # gripper.pos units (the bus normalizes)
+        # gripper.pos units (normalized); an overloaded servo takes the goal but flags its reply (2026-11-17)
+        _tolerant_write(bus, "Goal_Position", "gripper", float(target))
         update_goal(arm_id, {"gripper.pos": float(target)})  # a later move starts the gripper from it
         samples: list[dict[str, float]] = []
         t0, relieved_at = time.monotonic(), None

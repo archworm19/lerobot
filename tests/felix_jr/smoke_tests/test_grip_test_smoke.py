@@ -22,6 +22,7 @@ def test_a_bottle_is_gripped_held_and_lifted_and_saved(tmp_path, monkeypatch):
     """The fake's jaw stalls where the map puts the bottle's contact: every close stalls there, pressing harder the
     further past contact it was sent; the person's answers are scripted."""
     monkeypatch.setattr(grip_test, "HOLD_S", 2.0)
+    monkeypatch.setattr(grip_test, "PROTECTION_REST_S", 0.0)
     monkeypatch.setattr(grip_test, "LIFT_HOLD_S", 0.1)
     hardware = FakeHardware(arm_time_scale=0.02)
     server = RobotServer(hardware)
@@ -77,9 +78,11 @@ def test_a_bottle_is_gripped_held_and_lifted_and_saved(tmp_path, monkeypatch):
 
 
 def test_a_bottle_that_slips_out_is_marked_and_not_lifted(tmp_path, monkeypatch):
-    """Nothing stops the fake's jaw (the bottle gone): at the hold to 0 it passes `SLIP_UNITS` beyond contact, the trial
-    is marked slipped, the lift is not asked for, and the frames are numbered by their trial."""
+    """Nothing stops the fake's jaw (the bottle gone): at the close 10 past contact it passes `SLIP_UNITS` (8 here)
+    beyond it, the trial is marked slipped, no hold or lift, and the frames are numbered by their trial."""
     monkeypatch.setattr(grip_test, "HOLD_S", 2.0)
+    monkeypatch.setattr(grip_test, "PROTECTION_REST_S", 0.0)
+    monkeypatch.setattr(grip_test, "SLIP_UNITS", 8.0)
     hardware = FakeHardware(arm_time_scale=0.02)
     server = RobotServer(hardware)
     address = server.bind("tcp://127.0.0.1:*")
@@ -110,16 +113,21 @@ def test_a_bottle_that_slips_out_is_marked_and_not_lifted(tmp_path, monkeypatch)
         thread.join(timeout=3.0)
         server.close()
     trial = json.loads((tmp_path / "results.json").read_text())[0]
-    assert trial["slipped"]["during"] == "the hold at 0" and "lift" not in trial
+    assert (
+        trial["slipped"]["during"] == "close 10 past contact" and "lift" not in trial and "hold" not in trial
+    )
     assert not any("lift" in a for a in asked)
     assert all(c["frame"].startswith("frames/00_") for c in trial["closes"])
     assert "slipped" in test.summary()
 
 
 def test_an_overload_is_recorded_the_jaw_relieved_and_nothing_lifted(tmp_path, monkeypatch):
-    """The servo's overload protection trips at the hold to 0 (the fake's past 50 % load): the grip returns the samples
-    with the flag (not an error), the jaw opened a little; the trial records when, and the lift is not asked for."""
+    """The servo's overload protection trips at the close 15 past contact (the fake's past 50 % load: 4 % a unit): the
+    grip returns the samples with the flag (not an error), the jaw opened a little; the hold and the lift are at the
+    close before, 10 past contact (40 %: the fake's load is steeper than the real one's, so its sustainable limit too)."""
+    monkeypatch.setattr(grip_test, "SUSTAINED_LOAD_PCT", 45.0)
     monkeypatch.setattr(grip_test, "HOLD_S", 2.0)
+    monkeypatch.setattr(grip_test, "PROTECTION_REST_S", 0.0)
     hardware = FakeHardware(arm_time_scale=0.02)
     hardware.arm_backend.overload_above = 50.0
     server = RobotServer(hardware)
@@ -135,7 +143,7 @@ def test_an_overload_is_recorded_the_jaw_relieved_and_nothing_lifted(tmp_path, m
     }
     contact = model.gripper_pos_for("right", model.opening_for_width("right", 0.045))
     hardware.arm_backend.object_pos["right_arm"] = contact
-    answers = iter(["pyri", "45", "130", "80", "y", "", ""])
+    answers = iter(["pyri", "45", "130", "80", "y", "", "y", "held", "y", ""])
     asked = []
 
     def ask(prompt):
@@ -153,7 +161,6 @@ def test_an_overload_is_recorded_the_jaw_relieved_and_nothing_lifted(tmp_path, m
         thread.join(timeout=3.0)
         server.close()
     trial = json.loads((tmp_path / "results.json").read_text())[0]
-    assert trial["overload"]["during"] == "the hold at 0" and "lift" not in trial and "slipped" not in trial
-    assert len(trial["closes"]) == len(grip_test.PAST_CONTACT)  # (10 past contact: 40 %, under the limit)
-    assert not any("lift" in a for a in asked)
-    assert "overload" in test.summary()
+    assert "overload_t" in trial["closes"][-1] and trial["closes"][-1]["past_contact"] == 15.0
+    assert trial["hold"]["past_contact"] == 10.0 and "overload" not in trial and "slipped" not in trial
+    assert trial["lift"]["result"] == "held"
