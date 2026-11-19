@@ -522,3 +522,38 @@ def test_a_feasible_grasp_is_drawn_at_random_trying_targets_until_one_passes(mod
     far = Cylinder.upright(np.array([-1.5, 0.0, 0.714]), 0.079, 0.020)  # 1.5 m ahead: out of reach
     none = first_feasible(far, model, BOWL1_CAPTURE, np.random.default_rng(0), arms=("right",), max_tries=20)
     assert none.candidate is None and none.tried == 20
+
+
+def test_an_accept_check_is_the_last_stage_and_a_refused_target_is_passed_over(model):
+    """`first_feasible`'s `accept`: called only on targets every filter passes; one it refuses is passed over and
+    counted under "accept"; refusing all, None."""
+    from lerobot.felix_jr.harness.grasping import first_feasible
+
+    seen = []
+
+    def refuse_the_first(candidate):
+        seen.append(candidate)
+        assert candidate.lift is not None  # (after every filter)
+        return len(seen) > 1
+
+    drawn = first_feasible(
+        JAR,
+        model,
+        BOWL1_CAPTURE,
+        np.random.default_rng(3),
+        arms=("right",),
+        where={"psi": (0.0, 30.0)},
+        accept=refuse_the_first,
+    )
+    assert drawn.candidate is seen[1] and drawn.rejected_by_stage.get("accept") == 1
+    none = first_feasible(
+        JAR,
+        model,
+        BOWL1_CAPTURE,
+        np.random.default_rng(3),
+        arms=("right",),
+        where={"psi": (0.0, 30.0)},
+        accept=lambda c: False,
+        max_tries=40,
+    )
+    assert none.candidate is None and none.rejected_by_stage.get("accept", 0) >= 1

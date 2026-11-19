@@ -52,7 +52,7 @@ object up to `margin` onto the fixed jaw (`reach`'s module docstring: the same s
 
 import time
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 import numpy as np
@@ -816,30 +816,38 @@ def first_feasible(
     obstacles: Sequence[Surface] | None = None,
     depths: Sequence[float] | None = None,
     max_tries: int = 300,
+    accept: Callable[[GraspCandidate], bool] | None = None,
 ) -> FirstFeasible:
     """A feasible grasp drawn at random: the claw targets shuffled, each through every filter until one passes.
 
     The first to pass in a random order is a uniform draw from the feasible ones (`grasp_candidates` runs them all
     and ranks them: what the harness needs, and ~400 times the work on bowl1's jar, 377 of 5616 passing). For the
-    simulation's starts (`docs/sim2real_grasp.md`). `depths`: each target tried at one of them, drawn (None: the
-    settings'); `max_tries`: then None (a placement nothing reaches: draw another).
+    simulation's starts (`docs/sim2real_grasp.md`). `depths`: each target tried at each of them, the (target, depth)
+    pairs shuffled together (None: the settings'): a target is taken at whichever depth passes first, the others
+    still tried later in the shuffle. `max_tries`: then None (a placement nothing reaches: draw another).
+    `accept`: a last stage, after every filter here (the caller's: the simulation's grasp, `sim2real`), "accept" in
+    `rejected_by_stage`; a target it refuses is passed over like any other.
     """
     settings = GraspSettings() if settings is None else settings
     primitive = target.part(part) if isinstance(target, Object) else target
     grasps = primitive.antipodal_grasps(where, spacing)
     obstacles = tuple(_default_obstacles(primitive) if obstacles is None else obstacles)
-    targets = [(arm, k, side) for arm in arms for k in range(len(grasps)) for side in (0, 1)]
+    at = [settings.depth] if depths is None else [float(d) for d in depths]
+    targets = [(arm, k, side, d) for arm in arms for k in range(len(grasps)) for side in (0, 1) for d in at]
     order = rng.permutation(len(targets))
     timed, iks, stages = _Timer(), {}, Counter()
     started = time.perf_counter()
     for tried, index in enumerate(order[:max_tries], start=1):
-        arm, k, side = targets[index]
-        tried_settings = settings if depths is None else replace(settings, depth=float(rng.choice(depths)))
+        arm, k, side, depth = targets[index]
+        tried_settings = settings if depth == settings.depth else replace(settings, depth=depth)
         result = _evaluate_target(
             model, primitive, grasps[k], arm, side, tried_settings, capture, iks, timed, obstacles
         )
         if isinstance(result, GraspCandidate):
-            return FirstFeasible(result, tried, dict(stages), time.perf_counter() - started)
+            if accept is None or accept(result):
+                return FirstFeasible(result, tried, dict(stages), time.perf_counter() - started)
+            stages["accept"] += 1
+            continue
         stages[result.stage] += 1
     return FirstFeasible(None, min(len(order), max_tries), dict(stages), time.perf_counter() - started)
 

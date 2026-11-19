@@ -146,6 +146,14 @@ motion planner (`harness.md` 1.K). Avoiding obstacles is the model's job, from t
 `execute` is the check. The removed path check (`check_path`) also judged every surface in the depth as an obstacle,
 including the object being grasped. Revisit only if the model, given good renders, keeps planning into things.
 
+- **The gripper's body against the object being grasped is not checked** (found 2026-11-18, the simulation's grasp
+  check, `sim2real/grasp_check.py`). `grasp_candidates` checks the fingers' faces (`face_clearances`), the moves
+  against the table (`paths`) and the wrist camera, not whether the jaws, the camera's mount or the wrist end up inside
+  the object: a grasp from above partway down a tall cylinder puts them 15-30 mm in. The ranking (side approaches
+  first, the least-turned solves) has kept the harness's picks clear so far; random draws are not. The simulation
+  rejects these (one build, ~0.2 s); a geometric check would need a coarse point cloud of the gripper's body. Held off:
+  the harness will change.
+
 ## IK and pose choice
 
 4. **A free roll can land anywhere.** `solve_pose` with `roll_deg=None` puts the roll anywhere along its free
