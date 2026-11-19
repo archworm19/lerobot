@@ -24,6 +24,9 @@ recorded with the reason (`Rejected`), and each stage is timed (`GraspCandidates
   `TableEstimate`, other objects; without any, a level plane at the target's lower end) at the attack point and the
   grasp, through the model (`wrist_camera_position`). With the gripper upside down the camera hangs ~5 cm below the
   pinch point: ruler1 put it on the table. Not checked without the camera's pose on the gripper.
+- **wrist view:** the grasp's center and both contacts in the wrist camera's picture at the attack point, clear of the
+  fingers (`joint_views.wrist_sees`): a policy on the wrist camera steers by it (`GraspSettings.see_object`; skipped
+  without the arm's wrist camera).
 - **lift:** the arm reaches the lift (`GraspSettings.lift` above the grasp, as `plan_pick` lifts), from the grasp's
   joints, its joints `min_joint_margin_deg` from their bounds too.
 - **paths:** the moves attack point -> grasp -> lift, straight in the joints as the arm makes them, keep the arm's links,
@@ -82,6 +85,7 @@ STAGES = (
     "grasp",
     "joints",
     "wrist camera",
+    "wrist view",
     "lift",
     "paths",
 )  # in order: cheap first, each after its needs
@@ -129,6 +133,9 @@ class GraspSettings:
     camera_clearance: float = CAMERA_CLEARANCE_M
     # every joint this far from its bound at the attack point, the grasp and the lift (deg)
     min_joint_margin_deg: float = MIN_JOINT_MARGIN_DEG
+    # the object's grasp (its center and contacts) in the wrist camera's picture at the attack point, clear of the fingers:
+    # what a policy on the wrist camera steers by (skipped without the arm's wrist camera)
+    see_object: bool = True
     # the lift after the close, solved and checked with the rest (`plan_pick` lifts as much)
     lift: float = LIFT_M
     # the moves between the poses kept clear of the obstacles (`PATH_CLEARANCE_M`)
@@ -290,12 +297,13 @@ class GraspCandidate:
     camera_clearance_m: float = float("nan")
     # how far (deg) the solved gripper axis is from the target's best way in (`Primitive.approach_preference`)
     approach_preference_deg: float = 0.0
-    lift: FrameSolution | None = (
-        None  # the arm's solved pose at the lift (`GraspSettings.lift` above the grasp)
-    )
+    # the arm's solved pose at the lift (`GraspSettings.lift` above the grasp)
+    lift: FrameSolution | None = None
     # the moves' nearest approach to an obstacle (m: the arm's links, the fingertips, the wrist camera's board; nan:
     # not checked)
     path_clearance_m: float = float("nan")
+    # the grasp's points the wrist camera sees from the attack point, of its center and two contacts (-1: not checked)
+    wrist_view_points: int = -1
 
     @property
     def antipodal_error_deg(self) -> float:
@@ -545,6 +553,30 @@ def _evaluate(
         )
 
     start = time.perf_counter()
+    seen = -1
+    if settings.see_object and arm in model.wrist_cameras:
+        from lerobot.felix_jr.calibration.joint_views import wrist_sees
+
+        points = np.array([grasp.center_root, *grasp.contacts_root])
+        uv = wrist_sees(
+            model, arm, model.joint_vector({arm: dict(at_attack.joints)}), points, min_fraction=0.0
+        )
+        seen = int(np.isfinite(uv).all(axis=1).sum()) if uv is not None else 0
+    timed("wrist view", start)
+    if 0 <= seen < 3:
+        return Rejected(
+            grasp,
+            arm,
+            fixed_side,
+            "wrist view",
+            "the object out of the wrist camera's view at the attack point",
+            claw,
+            at_attack,
+            at_grasp,
+            f"{seen} of its 3 grasp points seen",
+        )
+
+    start = time.perf_counter()
     lift_target = claw.root_from_pinch.copy()
     lift_target[2, 3] += settings.lift
     at_lift = _solve(ik, claw, lift_target, settings, init=at_grasp.x)
@@ -590,6 +622,7 @@ def _evaluate(
         preference,
         at_lift,
         path_clearance,
+        seen,
     )
 
 

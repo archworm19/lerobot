@@ -440,3 +440,34 @@ def test_a_move_that_passes_an_obstacle_its_poses_clear_is_rejected(model):
     clearance, why = _paths_clear(model, "right", [(a, b, None)], [Sphere(tip)], 0.01)
     assert why is not None and clearance < 0.01  # (it stops at the first pose too near: on the way in)
     assert _paths_clear(model, "right", [(a, b, None)], [Sphere(tip + [0.0, 0.0, 0.3])], 0.01)[1] is None
+
+
+def test_the_object_is_in_the_wrist_cameras_view_at_the_attack_point():
+    """The wrist view stage: with the arm's wrist camera calibrated, every candidate sees the grasp's center and both
+    contacts from its attack point, clear of the fingers; the rest are rejected there, and pass without the check."""
+    from lerobot.felix_jr.calibration.joint_views import wrist_sees
+    from lerobot.felix_jr.harness import api
+
+    model = XleRobotModel.load(api.MODEL)  # (its wrist cameras calibrated)
+    where = {"psi": (0.0, 30.0)}
+    found = grasp_candidates(JAR, model, BOWL1_CAPTURE, arms=("right",), where=where, n=50)
+    assert found.candidates and all(c.wrist_view_points == 3 for c in found.candidates)
+    c = found.candidates[0]
+    points = np.array([c.claw.grasp.center_root, *c.claw.grasp.contacts_root])
+    assert np.isfinite(
+        wrist_sees(model, "right", model.joint_vector({"right": dict(c.attack.joints)}), points)
+    ).all()
+    out = [r for r in found.rejected if r.stage == "wrist view"]
+    assert out and all(r.detail.endswith("of its 3 grasp points seen") for r in out)
+    unchecked = grasp_candidates(
+        JAR,
+        model,
+        BOWL1_CAPTURE,
+        arms=("right",),
+        where=where,
+        n=50,
+        settings=GraspSettings(see_object=False),
+    )
+    assert unchecked.passed >= found.passed + len(out) - sum(
+        r.stage in ("lift", "paths") for r in unchecked.rejected
+    )
