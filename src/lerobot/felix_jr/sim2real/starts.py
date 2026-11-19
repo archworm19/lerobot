@@ -264,6 +264,18 @@ SCRIPTS = {
 }
 
 
+# why a pool's clip has no pair (`video`'s bottom half)
+POOL_NOTES = {
+    "attack": ["(a single attack start: --pairs shows one against its anchor)"],
+    "at_object": ["the anchor's snapshot, the object nudged a few mm (`at_object_mm`)"],
+    "in_jaws": [
+        "the anchor's snapshot exactly: this pool is not perturbed yet",
+        "(poor grips planned: the plan's pools)",
+    ],
+    "lifted": ["the anchor's snapshot exactly: this pool is not perturbed yet"],
+}
+
+
 def _text(image: np.ndarray, lines: Sequence[str]) -> None:
     for k, line in enumerate(lines):
         for color, width in (((0, 0, 0), 3), ((255, 255, 255), 1)):
@@ -403,7 +415,6 @@ def video(
     require_package("mujoco", extra="felix_jr_sim")
     model = sampler.model
     writer = cv2.VideoWriter(str(out), cv2.VideoWriter_fourcc(*"mp4v"), VIDEO_FPS, (2 * TILE[0], 2 * TILE[1]))
-    blank = np.zeros((TILE[1], 2 * TILE[0], 3), dtype=np.uint8)
     lines = []
     try:
         n = 0
@@ -444,7 +455,7 @@ def video(
                 shift = {j: start.joints_deg[j] - attack[f"{j}.pos"] for j in start.joints_deg}
                 run = _Run(model, start.scene, line, shift, title)
 
-                results = _play([run], SCRIPTS[pool], _Stacked(writer, blank))
+                results = _play([run], SCRIPTS[pool], _Stacked(writer, POOL_NOTES[pool]))
                 lines.append(f"{n}. {pool}, {_describe(line)}: {results[0]}")
                 run.close()
     finally:
@@ -453,10 +464,12 @@ def video(
 
 
 class _Stacked:
-    """A writer that pads a single run's frames (half height) with a blank bottom half."""
+    """A writer that pads a single run's frames (half height) with a bottom half saying why there is no pair."""
 
-    def __init__(self, writer: "cv2.VideoWriter", blank: np.ndarray) -> None:
-        self.writer, self.blank = writer, blank
+    def __init__(self, writer: "cv2.VideoWriter", note: Sequence[str]) -> None:
+        self.writer = writer
+        self.blank = np.zeros((TILE[1], 2 * TILE[0], 3), dtype=np.uint8)
+        _text(self.blank, ["no unperturbed run to compare:", *note])
 
     def write(self, frame: np.ndarray) -> None:
         self.writer.write(np.vstack([frame, self.blank]))

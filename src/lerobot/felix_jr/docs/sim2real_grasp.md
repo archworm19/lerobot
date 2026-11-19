@@ -357,7 +357,10 @@ anchors):
   perturbed one missed with no correction, even a small offset (-0.3 along, -0.5 across, -0.9 up, cm): most of this
   bank's anchors grasp at depth 0, the object's center at the tips, where a few mm short or low loses it. Deeper
   anchors would forgive the real misses more; for the environment, prefer them or let the policy learn to go deeper.
-  The other pools held as scripted.
+  The other pools held as scripted. **Not perturbed yet:** the in-jaws and lifted pools are the anchor's snapshot
+  exactly (the at-object pool's nudge only a few mm): the poor grips the plan has for the in-jaws pool (near the tips,
+  off center: re-simulated closes from a nudged pre-grasp, a snapshot cannot be shifted while gripped) and a joint
+  perturbation for the lifted one are for the environment's branch.
 
 **The arm's misses, from the sessions** (2026-11-19: every `execute(..., hold=True)` of 13 sessions, bowl1-8,
 container1, pen1-2, ruler1-2, both arms; the last move's commanded joints against the capture's read ones, the gripper's
