@@ -55,6 +55,7 @@ jobs:
       - name: Setup uv and Python
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
+          enable-cache: false # (nothing to cache: ruff runs through uvx)
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Ruff on the changed Python files
