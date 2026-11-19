@@ -1,6 +1,7 @@
 """The claw mapping: `to_claw` puts the fixed tip on its contact and the moving tip, at the grasp's opening, on the
 other, agreeing with `XleRobotModel.grasp_offset` (`docs/object_grasping.md`)."""
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -557,3 +558,23 @@ def test_an_accept_check_is_the_last_stage_and_a_refused_target_is_passed_over(m
         max_tries=40,
     )
     assert none.candidate is None and none.rejected_by_stage.get("accept", 0) >= 1
+
+
+def test_a_gripper_axis_out_of_the_arms_plane_is_skipped_before_any_ik(model):
+    """`GraspSettings.arm_plane_tol_deg`: the SO-101's gripper axis stays in the vertical plane through its pan axis,
+    so a claw whose axis leaves it is rejected at "arm plane", before the solves; off (None, the default), not checked;
+    every grasp that passes is within the tolerance."""
+    from lerobot.felix_jr.harness.grasping import _out_of_arm_plane_deg
+
+    tight = GraspSettings(rotation_bounds_deg=(15.0, 10.0, 10.0), arm_plane_tol_deg=15.0)
+    found = grasp_candidates(JAR, model, BOWL1_CAPTURE, arms=("right",), settings=tight, n=50)
+    skipped = [r for r in found.rejected if r.stage == "arm plane"]
+    assert skipped and all(r.attack is None and float(r.detail.split()[0]) >= 15.0 for r in skipped)  # (rounded)
+    assert all(
+        _out_of_arm_plane_deg(model, "right", c.claw.root_from_pinch) <= 15.0 for c in found.candidates
+    )
+    unchecked = grasp_candidates(
+        JAR, model, BOWL1_CAPTURE, arms=("right",), settings=replace(tight, arm_plane_tol_deg=None), n=50
+    )
+    assert not any(r.stage == "arm plane" for r in unchecked.rejected)
+    assert unchecked.passed == found.passed  # (it skipped only what the solves would have failed, here)

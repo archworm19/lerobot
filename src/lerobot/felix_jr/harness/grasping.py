@@ -81,6 +81,7 @@ AXIS_NAMES = ("closing line", "approach", "hinge")  # the grasp's axes (`ClawTar
 ROTATION_SCALES_DEG = (20.0, 5.0, 10.0)
 STAGES = (
     "jaws",
+    "arm plane",
     "attack point",
     "grasp",
     "joints",
@@ -126,6 +127,12 @@ class GraspSettings:
     margin: float = MARGIN_M  # the fixed jaw this far clear of its contact
     # the object's center this far back along the fingers from the tips (`to_claw`): 0, at the tips, the harness's way
     depth: float = 0.0
+    # the gripper's axis within this of the arm's plane (the vertical plane through the shoulder's pan axis and the
+    # grasp: the SO-101's pitch joints are parallel and its roll is about the gripper's axis, so the axis cannot leave
+    # it), checked before any IK (`_out_of_arm_plane_deg`); None: not checked. With the solves held near the ideal pose
+    # (rotation bounds 15/10/10 deg) every reachable grasp of a 45 mm cylinder was within 9 deg, and 15 skipped 56 % of
+    # the unreachable (2026-11-18); with 45 deg bounds the solves stray from the claw and it separates poorly
+    arm_plane_tol_deg: float | None = None
     attack: float = ATTACK_M  # the attack point this far back along the approach
     # the grasp and its attack point aimed this much higher than the object: the arm lands low (its sag; bowl6: the
     # elbow stopping 1.2-1.3 deg short under load), and the errors are not alike: too high grips higher on the
@@ -757,6 +764,27 @@ def _default_obstacles(primitive: Primitive) -> list[Surface]:
     return []
 
 
+_PAN_AXES: dict[
+    tuple[int, str], tuple[np.ndarray, np.ndarray]
+] = {}  # (the model, the arm): the pan axis's point, direction
+
+
+def _out_of_arm_plane_deg(model: XleRobotModel, arm: str, root_from_pinch: np.ndarray) -> float:
+    """How far (deg) the gripper's axis (the pinch z) is out of the arm's plane at the grasp point.
+
+    The plane: vertical through the shoulder's pan axis and the grasp point (`GraspSettings.arm_plane_tol_deg`).
+    """
+    key = (id(model), arm)
+    if key not in _PAN_AXES:
+        shoulder = model.frame_pose(f"{arm}_shoulder_link", model.joint_vector())
+        _PAN_AXES[key] = (shoulder[:3, 3].copy(), shoulder[:3, 2].copy())
+    point, axis = _PAN_AXES[key]
+    out = root_from_pinch[:3, 3] - point
+    radial = out - (out @ axis) * axis
+    normal = np.cross(axis, radial / np.linalg.norm(radial))
+    return float(np.degrees(np.arcsin(min(1.0, abs(float(root_from_pinch[:3, 2] @ normal))))))
+
+
 def _evaluate_target(
     model: XleRobotModel,
     primitive: Primitive,
@@ -784,6 +812,20 @@ def _evaluate_target(
     )
     if not claw.jaws_fit:  # (only deeper than the tips: the faces' V narrower there)
         return Rejected(grasp, arm, fixed_side, "jaws", "the open jaws do not clear it at that depth")
+    if settings.arm_plane_tol_deg is not None:
+        start = time.perf_counter()
+        off = _out_of_arm_plane_deg(model, arm, claw.root_from_pinch)
+        timed("arm plane", start)
+        if off > settings.arm_plane_tol_deg:
+            return Rejected(
+                grasp,
+                arm,
+                fixed_side,
+                "arm plane",
+                "the gripper's axis out of the arm's plane",
+                claw,
+                detail=f"{off:.0f} deg",
+            )
     key = (arm, grasp.opening)
     if key not in iks:
         iks[key] = ArmIK(model, arm, capture.arms, capture.head_ticks, grasp.opening, settings.margin)

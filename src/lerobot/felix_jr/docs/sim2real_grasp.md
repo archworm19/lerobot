@@ -286,6 +286,18 @@ offline too, but on a 6-joint arm; ours has 5, so reachability is most of the wo
 4. **The bank on disk:** per anchor the object, its pose, the grasp, the attack, grasp and lift joints, the success
    rate, the snapshots.
 
+**What the first builds found** (2026-11-18): `harness.grasping.first_feasible` draws a feasible grasp at random (the
+targets shuffled, each through the filters until one passes: a uniform draw, ~0.16 s against the full search's 60 s),
+its `accept` the simulation's check (`sim2real.grasp_check.SimAccept`: the grasp from its exact pose under physics
+draws; a one-build check first that the open gripper does not start inside the object: the harness checks the
+fingers' faces, not the gripper's body). Only ~1 % of a cylinder's generated grasps are reachable by this 5-joint arm:
+most need the gripper turned 55-147 deg about the closing line (no sixth joint), the rest a tilt the arm cannot reach
+there. Starting the IK from the sessions' real configurations (8 per arm, clustered from 2300 moves) or from random
+ones passed exactly the same targets: the failures are the arm's, not the search's (dropped). The gripper's axis stays
+in the vertical plane through the pan axis (`GraspSettings.arm_plane_tol_deg`): with the solves held near the ideal pose
+(rotation bounds 15/10/10 deg; loose ones put the gripper's body in the object), every reachable grasp was within 9 deg
+of it, and a 15 deg check before any IK halves the time (0.77 against 1.47 s a placement, the same grasps).
+
 **At a reset** (no IK): a pool by `pool_weights`, an anchor; the attack pool's offset applied by moving the object (the
 arm stays at a pose known reachable; the offset clamped to the table and to the anchor's correctable range); the other
 pools a snapshot with a few mm of noise; a few settling steps, and the rare start that intersects or falls rejected.
