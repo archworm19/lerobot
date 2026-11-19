@@ -467,6 +467,52 @@ class Execution:
         ]
 
 
+@dataclass(frozen=True)
+class MoveReading:
+    """One move of an execution as it ran: what was sent, what the server said, and where the arm was after it."""
+
+    label: str
+    targets: dict[str, float]  # LeRobot degrees; `gripper.pos` 0-100
+    tol: float
+    timeout: float
+    state: str  # the server's: "done", "stopped", "failed"
+    reached: bool | None  # every joint within `tol` (None: not known, a recorded session's move)
+    reading: dict[str, float] | None  # the arm's joints and `gripper.pos` after it (None: not read)
+
+
+@dataclass(frozen=True, eq=False)
+class ExecutionLog:
+    """What an execution did on the robot (`execute`): its start, each move's reading, how it ended.
+
+    Recorded by every `execute`, nothing simulated: the shadow tools replay it (`replay`, `compare`, `shadow_report`;
+    `docs/sim_harness.md`).
+    """
+
+    arm: str
+    max_vel: float
+    max_accel: float
+    start: dict[str, float]  # the arm's joints and `gripper.pos` before the first move
+    moves: tuple[MoveReading, ...]
+    ended: str  # "held", "home", or what stopped it
+    timestamp: float = 0.0
+
+    def describe(self) -> str:
+        """One line: the moves, how far each ended from its targets at worst, and how it ended."""
+        parts = []
+        for m in self.moves:
+            if m.reading is None:
+                parts.append(m.label)
+                continue
+            worst = max(
+                (abs(m.reading[k] - v) for k, v in m.targets.items() if k in m.reading and k != "gripper.pos"),
+                default=0.0,
+            )
+            parts.append(f"{m.label} ({worst:.1f} deg)")
+        return f"{self.arm} arm, {len(self.moves)} moves at {self.max_vel:g} deg/s, {self.ended}: " + ", ".join(
+            parts
+        )
+
+
 @dataclass(frozen=True, eq=False)
 class ArmPath:
     """The arm's body along an execution (`execute.arm_path`): skeletons, shoulder to pinch point, root frame.

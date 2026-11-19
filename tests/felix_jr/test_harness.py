@@ -620,6 +620,13 @@ class TestApi:
         assert name == "execute" and "at1: gripper close: gripper +1" in preview
         assert len(robot.sent) == 3 and robot.homed == 1
         assert h.ws.is_stale(execution) and not h.ws.is_stale(after)
+        # the log beside the capture: its parent the execution, every move with the server's status and the reading
+        ((log_id, node),) = [(i, n) for i, n in h.ws.nodes.items() if isinstance(n.obj, api.ExecutionLog)]
+        log = node.obj
+        assert node.parents == (h.ws.id_of(execution),) and log.ended == "home" and log.arm == "right"
+        assert [m.label for m in log.moves] == [m.label for m in execution.moves]
+        assert all(m.state == "done" and m.reading is not None for m in log.moves)
+        assert log.start == {k: float(v) for k, v in REST_POSE.items()}
         with pytest.raises(ValueError, match="before the arm last moved"):
             h.call("execute", execution)  # approved again, refused by the tool: it is stale now
 

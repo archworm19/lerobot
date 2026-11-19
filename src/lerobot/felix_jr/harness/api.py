@@ -51,9 +51,11 @@ from .objects import (
     ArmPath,
     Capture,
     Execution,
+    ExecutionLog,
     Focus,
     Grid,
     HeldObject,
+    MoveReading,
     Object,
     Points,
     Poses,
@@ -72,10 +74,8 @@ if TYPE_CHECKING:
 
 # The current learned calibration (`urdfs/`: it and the design, `design_xlerobot_so101.urdf`, are the only URDFs kept
 # there; older calibrations are in git's history, the ones tests start from in `tests/felix_jr/reference/`):
-# the joint calibration of the head, both arms and their wrist cameras (2026-11-14: joint_left_full4 + joint_right_full2;
-# docs/camera_calibration.md, "The rework"), the right arm's again after its camera's mount was tightened
-# (2026-11-15: joint_right_full4, its wrist fingertip from a gripper sweep, `calibration.auto_tips`), and both
-# grippers' geometry from three sweeps each (the hinges, the fingers' mounts, the maps: `calibration.gripper_sweep`)
+# both arms' joint sessions fitted as one, one head for both (2026-11-19: joint_right_1117b + joint_left_1119_2; checked
+# on the robot by `joint_collect --check`, 2.6 and 3.5 mm: `docs/calibration_plan.md`, "Changes, by commit")
 MODEL = Path(__file__).parents[1] / "urdfs" / "calib_20261119_joint.urdf"
 ENDPOINT = "tcp://ikeabot.local:5555"
 
@@ -1079,6 +1079,9 @@ def execute(
     If a move does not settle, the arm stops and holds there, and the error says which joints missed by how much and
     names the capture taken there: look, and re-plan from it. With `step`, a person confirms each move. Moves the
     arm: a person approves first, seeing every move.
+
+    Every execution's log is recorded too (`ExecutionLog`, its parent the execution, even when it stopped): each
+    move's reading on the robot, for the shadow tools (`replay`, `compare`, `shadow_report`).
     """
     capture = execution.poses.capture  # what it was solved from (see `prepare_execution`)
     if h.ws.is_stale(capture if h.ws.id_of(capture) is not None else execution):
@@ -1086,7 +1089,67 @@ def execute(
             "this execution comes from before the arm last moved: capture again and plan again"
         )
     confirm = h.confirm if step else None
-    return _execute.run_execution(h.client, h.model, execution, max_vel, confirm=confirm, hold=hold)
+    start = {k: float(v) for k, v in h.client.get_state()[f"{execution.poses.arm}_arm"].items()}
+    readings: list[MoveReading] = []
+    ended = "held" if hold else "home"
+    try:
+        return _execute.run_execution(
+            h.client, h.model, execution, max_vel, confirm=confirm, hold=hold, log=readings
+        )
+    except Exception as e:
+        ended = f"stopped: {type(e).__name__}: {e}"[:200]
+        raise
+    finally:
+        log = ExecutionLog(
+            execution.poses.arm, max_vel, 2 * max_vel, start, tuple(readings), ended, time.time()
+        )
+        parents = tuple(i for i in [h.ws.id_of(execution)] if i is not None)
+        h.ws.add(log, "execute", parents=parents, aging=())
+
+
+@tool(Effect.SOFTWARE)
+def replay(h: Harness, log: ExecutionLog) -> Any:
+    """Replay an execution's log in the simulator: every move as the robot server ran it, from the same start.
+
+    The shadow (`docs/sim_harness.md`): the arm's servos as fitted (they stop short of their command on the side they
+    came from), no objects yet. Returns the record (each move's simulated end); `compare` sets it against the robot's.
+    Needs the simulator (`--extra felix_jr_sim`).
+    """
+    from lerobot.felix_jr.sim2real import shadow
+
+    return shadow.replay(h.model, log)
+
+
+@tool(Effect.SOFTWARE, records=False)
+def compare(h: Harness, record: Any) -> str:
+    """A replay against the robot, move by move.
+
+    Each joint's read minus commanded (real / simulated, deg), the pinch points apart (mm), where each jaw stopped
+    (`gripper.pos`).
+    Where they differ, the simulator is wrong, or something on the robot was (a knock, a load, a slipped part).
+    """
+    from lerobot.felix_jr.sim2real import shadow
+
+    return shadow.compare(h.model, record)
+
+
+@tool(Effect.SOFTWARE, records=False)
+def shadow_report(h: Harness) -> str:
+    """Every execution of this session replayed and compared, summed per kind of pose.
+
+    The kinds: the attack, the grasp, loaded, other. Per kind, the real and simulated shortfalls' means, their
+    difference, the pinch points apart.
+    Replays the logs not replayed yet (each recorded, as `replay`).
+    """
+    from lerobot.felix_jr.sim2real import shadow
+
+    replayed = {id(n.obj.log): n.obj for n in h.ws.nodes.values() if isinstance(n.obj, shadow.ShadowRecord)}
+    records = []
+    for node in list(h.ws.nodes.values()):
+        if isinstance(node.obj, ExecutionLog):
+            record = replayed.get(id(node.obj))
+            records.append(record if record is not None else h.call("replay", node.obj))
+    return shadow.report(h.model, records) if records else "no execution logged in this session yet"
 
 
 @tool(Effect.MOVE_ARM)

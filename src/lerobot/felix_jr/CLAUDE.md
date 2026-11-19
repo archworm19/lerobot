@@ -25,6 +25,7 @@ running anything on the robot, and update it when what you do changes what it sa
   - `docs/camera_calibration.md`: the click calibration and `XleRobotModel`.
   - `docs/calibration_plan.md`: where the calibration is going (the procedure decided, the work in order).
   - `docs/sim2real_grasp.md`: the research branch for a grasp policy trained in simulation (MuJoCo, `sim2real/`): the idea, the simulator on this Mac, the robot model, next steps.
+  - `docs/sim_harness.md`: the simulator in the harness (plan): a shadow replay of every real execution first, then grasps planned and checked in the simulator.
   - `docs/server_plan.md`: the Pi / laptop split and the protocol.
   - `docs/head.md`: the head servos.
 - **Experiments** (what was tried, with numbers):

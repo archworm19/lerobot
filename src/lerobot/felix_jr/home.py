@@ -6,14 +6,22 @@ The home pose is saved next to the arm's calibration file as `<id>_home.json`, i
 
 import json
 import time
-import numpy as np
 from collections.abc import Callable
 from pathlib import Path
 
 from lerobot.felix_jr.base_follower import SO101FollowerWithBase
+from lerobot.felix_jr.trajectory import (  # (the trapezoids re-exported: `diagnostics/lift_test.py`)
+    DWELL_S,
+    WAYPOINT_HZ,
+    MovePlan,
+    Settler,
+    move_starts,
+    move_time_trap,  # noqa: F401
+    schedule_trapezoid,  # noqa: F401
+    trapezoid_offset,  # noqa: F401
+)
+from lerobot.lerobot_types import RobotAction  # aliases for dict[str, Any]
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
-from lerobot.lerobot_types import RobotAction, RobotObservation  # aliases for dict[str, Any]
-
 
 JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
 SETTLE_WINDOW = 0.5  # seconds a joint must stay still to count as settled
@@ -22,7 +30,6 @@ DEFAULT_MAX_VEL = 60.0  # deg/s (gripper: units/s)
 DEFAULT_MAX_ACCEL = 120.0  # deg/s^2
 CENTER = {f"{j}.pos": 0.0 for j in JOINTS}  # 0 deg = middle of the calibrated range
 CENTER["gripper.pos"] = 50.0  # gripper is 0-100
-STALE_GOAL = 10.0  # deg: if an arm is farther than this from its last commanded goal, start from where it is
 HOME_TOLERANCE = 15.0  # warn at startup if any joint is farther than this from the saved home
 
 
@@ -34,15 +41,22 @@ def make_follower(
     with_head: bool | None = None,
     calibration_dir: Path | None = None,
 ) -> SO101Follower:
-    """Build a follower. `with_base` / `with_head` = None auto-detects the extra servos on this arm's bus: the
+    """Build a follower.
+
+    `with_base` / `with_head` = None auto-detects the extra servos on this arm's bus: the
     wheels are present if setup.wheels has saved `<robot_id>_base.json`, the head if setup.head has saved
     `<robot_id>_head.json`. Pass True/False to override. `calibration_dir` overrides where the calibration,
-    home and sign files live (default: LeRobot's calibration folder)."""
+    home and sign files live (default: LeRobot's calibration folder).
+    """
     if max_relative_target is not None:
-        print(f"[{robot_id}] max_relative_target={max_relative_target} deg (per-command cap) set by lerobot controller")
+        print(
+            f"[{robot_id}] max_relative_target={max_relative_target} deg (per-command cap) set by lerobot controller"
+        )
     if max_relative_target is None:
         # safety check
-        raise ValueError("max_relative_target must be set to a positive number (degrees) to keep motion gentle")
+        raise ValueError(
+            "max_relative_target must be set to a positive number (degrees) to keep motion gentle"
+        )
     config = SO101FollowerConfig(
         port=port,
         id=robot_id,
@@ -64,21 +78,25 @@ def make_follower(
 
 
 def home_path(robot: SO101Follower) -> Path:
+    """Where an arm's home pose is saved: next to its calibration, `<id>_home.json`."""
     return robot.calibration_dir / f"{robot.id}_home.json"
 
 
 def save_home(robot: SO101Follower, pose: dict[str, float]) -> Path:
+    """Save `pose` as the arm's home (`home_path`); returns the file."""
     path = home_path(robot)
     path.write_text(json.dumps(pose, indent=2))
     return path
 
 
 def load_home(robot: SO101Follower) -> dict[str, float] | None:
+    """The arm's saved home pose, or None if none was recorded."""
     path = home_path(robot)
     return json.loads(path.read_text()) if path.is_file() else None
 
 
 def deviations(pose: dict[str, float], ref: dict[str, float]) -> dict[str, float]:
+    """Each of `ref`'s joints: `pose`'s value less `ref`'s."""
     return {k: pose[k] - ref[k] for k in ref}
 
 
@@ -89,49 +107,6 @@ def stuck_report(robot: SO101Follower, joints: list[str]) -> dict[str, dict[str,
     return {j: {r: int(data[r][j]) for r in regs} for j in joints}
 
 
-def move_time_trap(displacement: float, max_vel: float, max_accel: float) -> float:
-    """Minimum time for a trapezoidal velocity profile (accel = decel = `max_accel`) over `displacement`.
-
-    If the joint can't reach `max_vel` before it has to brake, the profile is a triangle.
-    With the same limits for every joint, only the largest displacement needs to be passed in.
-    """
-    d = abs(displacement)
-    t_cruise = d / max_vel - max_vel / max_accel
-    if t_cruise < 0:
-        return float(2 * np.sqrt(d / max_accel))  # triangle: never reaches max_vel
-    return float(t_cruise + 2 * max_vel / max_accel)
-
-
-def schedule_trapezoid(displacement: float, total_time: float, max_accel: float) -> tuple[float, float]:
-    """Stretch a joint's trapezoid so it takes exactly `total_time` (>= its own minimum time).
-
-    Acceleration stays at `max_accel`; the cruise speed is lowered instead. Solving
-    d = a*t1^2 + a*t1*(T - 2*t1) for t1 (the smaller root) gives the time spent accelerating.
-    Returns (t_accel, v_peak). The triangle case falls out when the discriminant is 0 (t1 = T/2).
-    """
-    d = abs(displacement)
-    if d == 0 or total_time <= 0:
-        return 0.0, 0.0
-    disc = max(0.0, total_time**2 - 4 * d / max_accel)  # clamp: float rounding at the limiting joint
-    t_accel = (total_time - np.sqrt(disc)) / 2
-    return float(t_accel), float(max_accel * t_accel)
-
-
-def trapezoid_offset(
-    t: float, displacement: float, total_time: float, t_accel: float, v_peak: float, max_accel: float
-) -> float:
-    """Signed distance travelled from the start after `t` seconds of a scheduled trapezoid."""
-    d = abs(displacement)
-    t = min(max(t, 0.0), total_time)
-    if t < t_accel:
-        s = 0.5 * max_accel * t**2
-    elif t < total_time - t_accel:
-        s = 0.5 * max_accel * t_accel**2 + v_peak * (t - t_accel)
-    else:
-        s = d - 0.5 * max_accel * (total_time - t) ** 2
-    return float(np.sign(displacement) * s)
-
-
 # Last goal commanded to each arm (by robot id). A new trajectory starts from here instead of the measured
 # pose: the arm rests a few degrees off its goal (gravity, P-only control), and starting from the measured
 # pose would snap the servo's goal to that sagging position and make the arm jump.
@@ -139,8 +114,10 @@ _last_goal: dict[str, dict[str, float]] = {}
 
 
 def remember_goal(robot_id: str, goal: dict[str, float]) -> None:
-    """Tell `move_all` the last goal sent to an arm by code other than `move_all` (e.g. teleop), so the
-    next trajectory starts from it."""
+    """Tell `move_all` the last goal sent to an arm by code other than `move_all` (e.g. teleop).
+
+    The next trajectory then starts from it.
+    """
     _last_goal[robot_id] = dict(goal)
 
 
@@ -155,10 +132,11 @@ def move_all(
     tol: float = 1.5,
     max_vel: float = DEFAULT_MAX_VEL,  # cruise speed limit, applied to every joint
     max_accel: float = DEFAULT_MAX_ACCEL,  # acceleration/deceleration limit, applied to every joint
-    rate_hz: float = 30.0,  # waypoint rate
+    rate_hz: float = WAYPOINT_HZ,  # waypoint rate
     timeout: float = 10.0,  # seconds allowed for the settle phase after the trajectory ends
-    min_dwell_time: float = 0.2,  # seconds all joints must stay within tolerance
-    should_stop: Callable[[], bool] | None = None,  # polled every tick; True aborts and holds the last waypoint
+    min_dwell_time: float = DWELL_S,  # seconds all joints must stay within tolerance
+    should_stop: Callable[[], bool]
+    | None = None,  # polled every tick; True aborts and holds the last waypoint
     on_tick: Callable[[], None] | None = None,  # called every tick (e.g. to publish a progress snapshot)
 ) -> bool:
     """Move several arms at once along synchronized trapezoidal trajectories.
@@ -174,23 +152,14 @@ def move_all(
     """
     period = 1.0 / rate_hz
 
-    # plan: per-joint displacement from the last commanded goal (or measured pose), one shared duration
-    starts: dict[str, dict[str, float]] = {}
-    disp: dict[str, dict[str, float]] = {}
-    for robot_id, robot in robots.items():
-        obs = robot.get_observation()
-        last = _last_goal.get(robot_id, {})
-        starts[robot_id] = {}
-        for k in targets[robot_id]:
-            use_last = k in last and abs(last[k] - obs[k]) <= STALE_GOAL  # else moved by hand / first move
-            starts[robot_id][k] = last[k] if use_last else obs[k]
-        disp[robot_id] = {k: targets[robot_id][k] - starts[robot_id][k] for k in targets[robot_id]}
-    biggest = max((abs(d) for per_robot in disp.values() for d in per_robot.values()), default=0.0)
-    total_time = move_time_trap(biggest, max_vel, max_accel)
-    plan = {
-        robot_id: {k: schedule_trapezoid(d, total_time, max_accel) for k, d in per_robot.items()}
-        for robot_id, per_robot in disp.items()
+    # plan: each joint from the last commanded goal (or the measured pose), one shared duration (`trajectory`, which
+    # the simulator's replays share: `sim2real.shadow`)
+    starts = {
+        robot_id: move_starts(targets[robot_id], _last_goal.get(robot_id, {}), robot.get_observation())
+        for robot_id, robot in robots.items()
     }
+    plan = MovePlan.plan(starts, targets, max_vel, max_accel)
+    total_time = plan.total_time
 
     # execute the trajectory at a fixed rate
     t0 = time.perf_counter()
@@ -199,12 +168,9 @@ def move_all(
             return False
         if on_tick is not None:
             on_tick()
+        waypoints = plan.waypoint(t)
         for robot_id, robot in robots.items():
-            waypoint = {
-                k: starts[robot_id][k]
-                + trapezoid_offset(t, disp[robot_id][k], total_time, *plan[robot_id][k], max_accel)
-                for k in disp[robot_id]
-            }
+            waypoint = waypoints[robot_id]
             robot.send_action(waypoint)
             _last_goal[robot_id] = waypoint  # so an interrupted move still hands off smoothly
         time.sleep(max(0.0, period - ((time.perf_counter() - t0) - t)))
@@ -212,8 +178,7 @@ def move_all(
     # hold the final targets until everything is within tolerance (or timeout)
     for robot_id in robots:
         _last_goal[robot_id] = dict(targets[robot_id])
-    settle_start = time.perf_counter()
-    dwell_start: float | None = None
+    settler = Settler(timeout, min_dwell_time, began=time.perf_counter())
     while True:
         if should_stop is not None and should_stop():
             return False
@@ -226,27 +191,21 @@ def move_all(
             for k, v in targets[robot_id].items():
                 if abs(obs[k] - v) >= tol:
                     off_target[f"{robot_id}.{k}"] = round(obs[k] - v, 1)
-        now = time.perf_counter()
-        if off_target:
-            dwell_start = None
-        elif dwell_start is None:
-            dwell_start = now
-        elif now - dwell_start >= min_dwell_time:
+        verdict = settler.update(time.perf_counter(), within=not off_target)
+        if verdict is True:
             return True
-        if now - settle_start >= timeout:
+        if verdict is False:
             print(f"  (timeout after {timeout:.0f}s; still off target by deg: {off_target})")
             for robot_id, robot in robots.items():
                 prefix = robot_id + "."
                 joints = [k.removeprefix(prefix).removesuffix(".pos") for k in off_target]
-                joints = [j for k, j in zip(off_target, joints) if k.startswith(prefix)]
+                joints = [j for k, j in zip(off_target, joints, strict=True) if k.startswith(prefix)]
                 if joints:
                     print(f"  [{robot_id}] servo status: {stuck_report(robot, joints)}")
             return False
         time.sleep(period)
 
 
-def move_to(
-    robot: SO101Follower, target: dict[str, float], tol: float = 1.5, timeout: float = 10.0
-) -> bool:
+def move_to(robot: SO101Follower, target: dict[str, float], tol: float = 1.5, timeout: float = 10.0) -> bool:
     """Move a single arm to `target`."""
     return move_all({robot.id: robot}, {robot.id: target}, tol=tol, timeout=timeout)

@@ -23,6 +23,7 @@ from .objects import (
     ArmPath,
     Capture,
     Execution,
+    ExecutionLog,
     Focus,
     Grid,
     HeldObject,
@@ -41,6 +42,7 @@ OBJECT_TYPES = (
     Focus,
     Poses,
     Execution,
+    ExecutionLog,
     ArmPath,
     HeldObject,
 )

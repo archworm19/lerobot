@@ -31,7 +31,7 @@ import numpy as np
 
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 
-from .objects import ArmPath, Capture, Execution, HeldObject, Move, Poses
+from .objects import ArmPath, Capture, Execution, HeldObject, Move, MoveReading, Poses
 from .reach import OPEN_CLEARANCE_M, SQUEEZE_UNITS, close_gripper_pos, solve_path
 
 if TYPE_CHECKING:
@@ -151,12 +151,14 @@ def run_execution(
     max_drift_deg: float = 3.0,
     confirm: Callable[[str], bool] | None = None,
     hold: bool = False,
+    log: list[MoveReading] | None = None,
 ) -> Capture:
     """Send `execution`'s moves (see the module docstring) and return a capture taken after.
 
     The capture is at home, or with `hold` at the last pose, which the arm then holds. A move that does not settle
     raises `StoppedError` (the arm holds there). `confirm(label)` is asked before each move when given; False stops, and the
-    robot goes home.
+    robot goes home. `log`: each move as it ran is appended to it (`MoveReading`: the server's status, the arm read
+    after it), the stopped one too (the `execute` tool's `ExecutionLog`).
     """
     arm, poses = execution.poses.arm, execution.poses
     key = f"{arm}_arm"
@@ -179,6 +181,19 @@ def run_execution(
                 tol=move.tol,
                 timeout=move.timeout,
             )
+            if log is not None:
+                after = client.get_state()[key]
+                log.append(
+                    MoveReading(
+                        move.label,
+                        dict(move.targets),
+                        move.tol,
+                        move.timeout,
+                        str(status["state"]),
+                        bool((status.get("result") or {}).get("reached")),
+                        {k: float(v) for k, v in after.items()},
+                    )
+                )
             if status["state"] != "done":  # stopped or failed on the server: not ours to re-plan
                 raise RuntimeError(
                     f"{move.label}: {status['state']} ({status.get('reason')}); the robot goes home"
