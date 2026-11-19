@@ -750,6 +750,100 @@ def _ranked(passed: Sequence[GraspCandidate], n: int) -> tuple[GraspCandidate, .
     return tuple(replace(c, name=chr(ord("A") + i)) for i, c in enumerate(ranked[: min(n, 26)]))
 
 
+def _default_obstacles(primitive: Primitive) -> list[Surface]:
+    """What a target standing on the table keeps clear of when none are given: a level plane at its lower end."""
+    if hasattr(primitive, "bottom_root") and hasattr(primitive, "top_root"):
+        return [HorizontalPlane(float(min(primitive.bottom_root[2], primitive.top_root[2])))]
+    return []
+
+
+def _evaluate_target(
+    model: XleRobotModel,
+    primitive: Primitive,
+    grasp: AntipodalGrasp,
+    arm: str,
+    fixed_side: int,
+    settings: GraspSettings,
+    capture: Capture,
+    iks: dict[tuple[str, float], ArmIK],
+    timed: _Timer,
+    obstacles: tuple[Surface, ...],
+) -> "GraspCandidate | Rejected":
+    """One claw target (an antipodal grasp, an arm, which contact on the fixed jaw) through every stage (`STAGES`).
+
+    The jaws first, then `_evaluate`'s. `iks` caches the arms' solvers by (arm, opening) across calls.
+    """
+    start = time.perf_counter()
+    too_wide = grasp.opening + settings.margin > widest_apart(model, arm)
+    timed("jaws", start)
+    if too_wide:
+        return Rejected(grasp, arm, fixed_side, "jaws", "too wide for the jaws")
+    claw = _shifted(
+        to_claw(grasp, model, arm, fixed_side, settings.margin, settings.attack, settings.depth),
+        np.array([0.0, 0.0, settings.sag_lift]),
+    )
+    if not claw.jaws_fit:  # (only deeper than the tips: the faces' V narrower there)
+        return Rejected(grasp, arm, fixed_side, "jaws", "the open jaws do not clear it at that depth")
+    key = (arm, grasp.opening)
+    if key not in iks:
+        iks[key] = ArmIK(model, arm, capture.arms, capture.head_ticks, grasp.opening, settings.margin)
+    return _evaluate(model, claw, iks[key], settings, timed, obstacles=obstacles, primitive=primitive)
+
+
+@dataclass(frozen=True)
+class FirstFeasible:
+    """`first_feasible`'s result.
+
+    The grasp found (None: none in its tries), how many were tried, why the others failed (by stage), how long it took.
+    """
+
+    candidate: GraspCandidate | None
+    tried: int
+    rejected_by_stage: dict[str, int]
+    seconds: float
+
+
+def first_feasible(
+    target: Object | Primitive,
+    model: XleRobotModel,
+    capture: Capture,
+    rng: np.random.Generator,
+    arms: Sequence[str] = ("right", "left"),
+    where: Ranges | None = None,
+    spacing: Spacing | None = None,
+    part: str | None = None,
+    settings: GraspSettings | None = None,
+    obstacles: Sequence[Surface] | None = None,
+    depths: Sequence[float] | None = None,
+    max_tries: int = 300,
+) -> FirstFeasible:
+    """A feasible grasp drawn at random: the claw targets shuffled, each through every filter until one passes.
+
+    The first to pass in a random order is a uniform draw from the feasible ones (`grasp_candidates` runs them all
+    and ranks them: what the harness needs, and ~400 times the work on bowl1's jar, 377 of 5616 passing). For the
+    simulation's starts (`docs/sim2real_grasp.md`). `depths`: each target tried at one of them, drawn (None: the
+    settings'); `max_tries`: then None (a placement nothing reaches: draw another).
+    """
+    settings = GraspSettings() if settings is None else settings
+    primitive = target.part(part) if isinstance(target, Object) else target
+    grasps = primitive.antipodal_grasps(where, spacing)
+    obstacles = tuple(_default_obstacles(primitive) if obstacles is None else obstacles)
+    targets = [(arm, k, side) for arm in arms for k in range(len(grasps)) for side in (0, 1)]
+    order = rng.permutation(len(targets))
+    timed, iks, stages = _Timer(), {}, Counter()
+    started = time.perf_counter()
+    for tried, index in enumerate(order[:max_tries], start=1):
+        arm, k, side = targets[index]
+        tried_settings = settings if depths is None else replace(settings, depth=float(rng.choice(depths)))
+        result = _evaluate_target(
+            model, primitive, grasps[k], arm, side, tried_settings, capture, iks, timed, obstacles
+        )
+        if isinstance(result, GraspCandidate):
+            return FirstFeasible(result, tried, dict(stages), time.perf_counter() - started)
+        stages[result.stage] += 1
+    return FirstFeasible(None, min(len(order), max_tries), dict(stages), time.perf_counter() - started)
+
+
 def grasp_candidates(
     target: Object | Primitive,
     model: XleRobotModel,
@@ -773,49 +867,18 @@ def grasp_candidates(
     settings = GraspSettings() if settings is None else settings
     primitive = target.part(part) if isinstance(target, Object) else target
     grasps = primitive.antipodal_grasps(where, spacing)
-    if obstacles is None:  # the target stands on the table: a level plane at its lower end
-        obstacles = []
-        if hasattr(primitive, "bottom_root") and hasattr(primitive, "top_root"):
-            obstacles = [HorizontalPlane(float(min(primitive.bottom_root[2], primitive.top_root[2])))]
+    obstacles = _default_obstacles(primitive) if obstacles is None else obstacles
     rejected: list[Rejected] = []
     passed: list[GraspCandidate] = []
     timed = _Timer()
     tried = 0
+    iks: dict[tuple[str, float], ArmIK] = {}
     for arm in arms:
-        widest = widest_apart(model, arm)
-        iks: dict[float, ArmIK] = {}
         for grasp in grasps:
             for fixed_side in (0, 1):
                 tried += 1
-                start = time.perf_counter()
-                too_wide = grasp.opening + settings.margin > widest
-                timed("jaws", start)
-                if too_wide:
-                    rejected.append(Rejected(grasp, arm, fixed_side, "jaws", "too wide for the jaws"))
-                    continue
-                claw = _shifted(
-                    to_claw(grasp, model, arm, fixed_side, settings.margin, settings.attack, settings.depth),
-                    np.array([0.0, 0.0, settings.sag_lift]),
-                )
-                if not claw.jaws_fit:  # (only deeper than the tips: the faces' V narrower there)
-                    rejected.append(
-                        Rejected(
-                            grasp, arm, fixed_side, "jaws", "the open jaws do not clear it at that depth"
-                        )
-                    )
-                    continue
-                if grasp.opening not in iks:
-                    iks[grasp.opening] = ArmIK(
-                        model, arm, capture.arms, capture.head_ticks, grasp.opening, settings.margin
-                    )
-                result = _evaluate(
-                    model,
-                    claw,
-                    iks[grasp.opening],
-                    settings,
-                    timed,
-                    obstacles=tuple(obstacles),
-                    primitive=primitive,
+                result = _evaluate_target(
+                    model, primitive, grasp, arm, fixed_side, settings, capture, iks, timed, tuple(obstacles)
                 )
                 if isinstance(result, GraspCandidate):
                     passed.append(result)

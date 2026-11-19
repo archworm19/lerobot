@@ -496,3 +496,29 @@ def test_a_grasp_deeper_in_the_jaws_moves_the_claw_on_and_opens_them_wider_where
     assert moving >= OPEN_CLEARANCE_M / 2 - 1e-3
     # deeper than the jaws can open for
     assert not to_claw(grasp, model, "right", 0, 0.008, depth=0.06).jaws_fit
+
+
+def test_a_feasible_grasp_is_drawn_at_random_trying_targets_until_one_passes(model):
+    """`first_feasible`: the targets shuffled, the first through every filter returned, as `grasp_candidates` would
+    pass it; the same seed draws the same; a target nothing reaches gives None after `max_tries`."""
+    from lerobot.felix_jr.harness.grasping import first_feasible
+
+    where = {"psi": (0.0, 30.0)}
+    drawn = first_feasible(JAR, model, BOWL1_CAPTURE, np.random.default_rng(3), arms=("right",), where=where)
+    c = drawn.candidate
+    assert c is not None and drawn.tried >= 1 and sum(drawn.rejected_by_stage.values()) == drawn.tried - 1
+    assert c.limit_margin_deg >= GraspSettings().min_joint_margin_deg and c.lift is not None
+    # one the full search passes too (it keeps only its best 26: so, not among its rejected)
+    every = grasp_candidates(JAR, model, BOWL1_CAPTURE, arms=("right",), where=where)
+    assert not any(
+        r.fixed_side == c.claw.fixed_side
+        and np.allclose(r.grasp.center_root, c.claw.grasp.center_root)
+        and np.allclose(r.grasp.closing_root, c.claw.grasp.closing_root)
+        and np.allclose(r.grasp.approach_root, c.claw.grasp.approach_root)
+        for r in every.rejected
+    )
+    again = first_feasible(JAR, model, BOWL1_CAPTURE, np.random.default_rng(3), arms=("right",), where=where)
+    assert np.allclose(again.candidate.claw.root_from_pinch, c.claw.root_from_pinch)
+    far = Cylinder.upright(np.array([-1.5, 0.0, 0.714]), 0.079, 0.020)  # 1.5 m ahead: out of reach
+    none = first_feasible(far, model, BOWL1_CAPTURE, np.random.default_rng(0), arms=("right",), max_tries=20)
+    assert none.candidate is None and none.tried == 20
