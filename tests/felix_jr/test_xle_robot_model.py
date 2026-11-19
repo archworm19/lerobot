@@ -42,7 +42,15 @@ def random_readings(rng):
 
 
 def test_the_committed_merged_urdf_is_what_the_script_builds():
-    assert MERGED_URDF.read_text() == build_merged_urdf()
+    """The same file, its numbers to 1e-12 (the platforms' rotation arithmetic differs in the last digit: Linux and
+    macOS wrote 0.0560045475472163 and ...164)."""
+    import re
+
+    number = re.compile(r"-?\d+\.?\d*(?:e[-+]?\d+)?")
+    committed, built = MERGED_URDF.read_text(), build_merged_urdf()
+    assert number.sub("#", committed) == number.sub("#", built)  # (the same text around the numbers)
+    a, b = (np.array([float(x) for x in number.findall(t)]) for t in (committed, built))
+    assert a.shape == b.shape and np.allclose(a, b, rtol=0, atol=1e-12)
 
 
 def test_the_merged_urdf_has_both_arms_no_meshes_and_a_fixed_root(model):
