@@ -123,6 +123,21 @@ def _show(name: str, value: float) -> str:
     return f"{1000 * value:.1f} mm" if name in ("t", "depth", "offset") else f"{value:.1f} deg"
 
 
+def planning_settings(base: GraspSettings | None = None) -> GraspSettings:
+    """The filters' settings a refine plans with, from `base` (the candidate's; else the defaults).
+
+    No `sag_lift` (the simulator's servos sag: aiming high against it as well would count it twice); the IK held near
+    the exact pose (rotation bounds 15/10/10 deg: loose ones put the gripper's body in the object) and the arm's plane
+    checked before any IK (`GraspSettings.arm_plane_tol_deg`), as the bank's (`bank.BankConfig.settings`).
+    """
+    return replace(
+        GraspSettings() if base is None else base,
+        sag_lift=0.0,
+        rotation_bounds_deg=(15.0, 10.0, 10.0),
+        arm_plane_tol_deg=15.0,
+    )
+
+
 def space(
     primitive: Primitive, where: Mapping[str, tuple[float, float]] | None = None
 ) -> dict[str, GraspParameter]:
@@ -154,13 +169,19 @@ def plan_for(
     grasp_settings: GraspSettings,
     start: Mapping[str, float],
     phase: str = "head",
+    capture: Any | None = None,
 ) -> tuple[GraspCandidate, Execution] | str:
-    """The harness's plan for `params` (the module docstring): the candidate and its execution, or why there is none."""
+    """The harness's plan for `params` (the module docstring): the candidate and its execution, or why there is none.
+
+    `capture`: the harness's capture the plan is made from (its poses' capture: `execute` checks it is fresh); else a
+    stand-in with the arm at `start`.
+    """
     family = {k: v for k, v in params.items() if k not in ("depth", "offset")}
     grasp = primitive.grasp_at(family)
     grasp = replace(grasp, center_root=grasp.center_root + params.get("offset", 0.0) * grasp.closing_root)
     settings = replace(grasp_settings, depth=float(params.get("depth", grasp_settings.depth)))
-    capture: Any = SimpleNamespace(arms={arm: dict(start)}, head_ticks=None)
+    if capture is None:
+        capture = SimpleNamespace(arms={arm: dict(start)}, head_ticks=None)
     found = _evaluate_target(
         model,
         primitive,
@@ -299,9 +320,10 @@ def evaluate(
     world: Sequence[tuple[np.ndarray, Mapping[str, float]]],
     refine_settings: RefineSettings,
     phase: str = "head",
+    capture: Any | None = None,
 ) -> tuple[Sample, tuple[GraspCandidate, Execution] | None]:
     """One sample: its plan, played under each of `world`'s draws (object offset, physics): its score."""
-    planned = plan_for(model, arm, primitive, params, fixed_side, grasp_settings, start, phase)
+    planned = plan_for(model, arm, primitive, params, fixed_side, grasp_settings, start, phase, capture)
     if isinstance(planned, str):
         return Sample(dict(params), 0.0, 0.0, refused=planned), None
     rises = tuple(
@@ -387,6 +409,7 @@ def _evaluate_job(params: dict[str, float]) -> tuple[Sample, tuple[GraspCandidat
         w["world"],
         w["settings"],
         w["phase"],
+        w["capture"],
     )
 
 
@@ -401,13 +424,15 @@ def refine(
     refine_settings: RefineSettings | None = None,
     phase: str = "head",
     where: Mapping[str, tuple[float, float]] | None = None,
+    capture: Any | None = None,
 ) -> RefinedPlan:
     """The grasp refined from `initial` (the module docstring): the first robust sample, or the best seen.
 
     `initial`: the family's parameters (a cylinder's `t`, `phi`, `psi`) and, if given, `depth` and `offset` (else 0):
     the harness's greedy candidate's (`first_feasible`). `start`: the arm's reading now. `fixed_side`: which contact
     the fixed jaw takes (the candidate's, kept). `grasp_settings`: the filters' (the camera's clearance at the attack
-    only, whatever given).
+    only, whatever given). `capture`: the harness's capture the plans are made from (`plan_for`), its arm's reading
+    the same as `start`.
     """
     if phase not in PHASES:
         raise ValueError(f"phase: one of {PHASES}, not {phase!r}")
@@ -431,6 +456,7 @@ def refine(
         "world": world,
         "settings": s,
         "phase": phase,
+        "capture": capture,
     }
     started = time.perf_counter()
     samples: list[Sample] = []
@@ -465,6 +491,9 @@ def refine(
             pool.join()
     assert best is not None
     planned = best[1]
+    if planned is not None:  # planned again here: a worker's plan holds a copy of the capture, not the harness's own
+        again = plan_for(model, arm, primitive, best[0].params, fixed_side, g, start, phase, capture)
+        planned = again if not isinstance(again, str) else planned
     return RefinedPlan(
         best[0],
         planned[0] if planned else None,

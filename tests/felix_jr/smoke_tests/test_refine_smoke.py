@@ -46,3 +46,38 @@ def test_the_refine_beats_the_greedy_grasp_and_returns_what_execute_runs():
     assert plan.execution is not None and plan.candidate is not None
     assert [m.label.split(" ")[0] for m in plan.execution.moves][:2] == ["start:", "stage"]
     assert np.isclose(plan.candidate.claw.depth, plan.best.params["depth"])
+
+
+def test_the_harness_tool_refines_a_chosen_candidate_into_a_plan_execute_runs():
+    """`refine_grasp` through the harness's runner: the greedy candidate as `grasp_candidates` would give it (one, named
+    A), refined from the head; recorded, its execution the whole pick from the candidates' capture, its poses the
+    pick's (to stop at the attack point with `select_poses`)."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from lerobot.felix_jr.harness.grasping import GraspCandidates, first_feasible
+
+    model = XleRobotModel.load(api.MODEL)
+    placement = bank.placements(model, bank.BankConfig(), 5)[4]
+    target = placement.primitive()
+    capture = SimpleNamespace(arms={"right": {**REST, "gripper.pos": 2.0}}, head_ticks=None)
+    config = bank.BankConfig()
+    found = first_feasible(
+        target,
+        model,
+        capture,
+        np.random.default_rng(0),
+        arms=("right",),
+        where={"psi": (0.0, 30.0)},
+        settings=config.settings(),
+        depths=(0.0,),
+        max_tries=3000,
+    )
+    chosen = GraspCandidates((replace(found.candidate, name="A"),), 1, 1, (), {}, config.settings(), capture)
+    h = api.Harness(model=model, policy=api.UNATTENDED)
+    plan = h.call("refine_grasp", target, chosen, mass_kg=placement.mass_kg, max_batches=1, workers=3)
+    assert h.ws.id_of(plan) is not None and len(plan.samples) == 6 and plan.batches == 1
+    assert plan.execution is not None and plan.execution.poses.capture is capture
+    assert list(plan.execution.poses.labels) == ["stage", "pick.back", "pick", "lift"]
+    turned = (plan.best.params["phi"] - found.candidate.claw.grasp.params["phi"] + 180.0) % 360.0 - 180.0
+    assert abs(turned) < 10.0  # (near the chosen side: phi wraps)

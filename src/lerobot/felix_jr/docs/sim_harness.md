@@ -184,6 +184,42 @@ mm deep, not enough to center the working region. A depth bias in the search, or
 failures. Also: accept only after confirming on fresh draws (screen on 8, take the first holding on ~24 more), and
 more grip trials to pin the friction (the physics' main cost).
 
+## The first robot session (plan, 2026-11-19)
+
+**What it tests:** the simulator out of sample (the shadow: every move's reading against its replay), and the head
+phase's refine on the robot (the refined grasp against today's, uncorrected after the attack point, as the
+simulator's benchmark scored them), and it records wrist frames at each attack point for the wrist phase's
+perception.
+
+**Setup.** The server on the Pi, updated to this branch (`home.py` now takes its moves from `trajectory.py`: the same
+behaviour, but it moves the robot: `checks.wiggle_test` there first). The right arm. One bottle whose grip is fitted:
+pyri (45 mm, 130 mm, 80 g). **The bottle stood at known spots:** `placement_spots(0.045, 0.13)` picks 5 the arm
+reaches from the side, spread over its reach (on today's calibration: 24-32 cm ahead of the right arm's base, +-10 cm
+to the side); `place_object(x, y, 0.045, 0.13)` turns the head to each and draws the bottle's outline on its live
+picture (`harness/placement.py`: through the calibration, ~3 mm), the person moves the bottle onto it and presses
+Enter. Where it truly stands is then known, so the head's estimate's error is measured too.
+
+**Per spot, both grasps in turn** (the order alternated from spot to spot):
+
+1. `table_height` (once), then `place_object` at the spot: the bottle on its outline. `fit_cylinder` on that
+   capture (the estimate), and a `scan` if the fit wants more views.
+2. `grasp_candidates`, A (today's grasp); for the refined one, `refine_grasp(bottle, candidates, "A", mass_kg=0.08)`
+   (its `.best.lifted`: the simulator's prediction, noted).
+3. `prepare_execution` of the pick (`{"start": "open", "pick": "close"}`) and `execute(..., hold=True)` with
+   `select_poses(..., "stage", "pick.back")`: **hold at the attack point.** A wrist capture there (`wrist_look`:
+   recorded for the wrist phase), and protocol rule 1's check 4: the move in passes only the bottle between the open
+   jaws, nothing else in the gripper's way. **Your call before going in.** No correction (rules 1's re-locating and
+   re-solving: what this session measures is the plan without them).
+4. The rest, `select_poses(..., "pick", "lift")`, executed: the outcome noted as `refine.MODES` names them (lifted,
+   missed, one jaw, knocked over, pushed away, slipped).
+5. The bottle back on its outline (`place_object` again).
+
+Every `execute` logs itself (`ExecutionLog`). After: `shadow_report()` (the moves' readings against their replays,
+out of sample), the outcomes against the simulator's predictions, and the head's estimates against the spots.
+**Safety:** `SAFE` approval before every move, 20 deg/s, the hold at the attack point. The refined grasps go deeper
+and steeper than today's, their camera's clearance at the grasp the simulator's alone: watch the wrist camera's board
+going in.
+
 ## Then
 
 The servo-compensated commands (protocol step 2), judged by the shadow's records (does the arm land nearer?); the

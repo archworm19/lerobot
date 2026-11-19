@@ -664,6 +664,107 @@ def plan_pick(
     return _grasping.plan_pick(h.model, candidates[name], candidates.capture, stage_up, lift)
 
 
+@tool(Effect.MOVE_HEAD)
+def place_object(
+    h: Harness, x: float, y: float, diameter: float, height: float, label: str = ""
+) -> Capture | None:
+    """Show where to stand an upright object, on the head camera's live picture.
+
+    The head turns to (`x`, `y`) (root frame, m) and its live picture shows the object's outline there, its circle on the table (orange) and at its top (cyan), until the person presses Enter
+    (placed) or q (stopped: None). Returns a capture with the object placed, the head aimed at it: fit it there
+    (`fit_cylinder`). The table: the best `table_height` you have, else the calibration's. Moves the head only.
+    """
+    from . import placement
+
+    tables = [node.obj for node in h.ws.nodes.values() if isinstance(node.obj, TableEstimate)]
+    table_z = max(tables, key=lambda t: t.n_inliers).h if tables else h.model.floor_z
+    if table_z is None:
+        raise ValueError("no table height: measure it first (`table_height`)")
+    return placement.place_object(h.client, h.model, (x, y), diameter / 2, height, table_z, label)
+
+
+@tool(Effect.SOFTWARE, records=False)
+def placement_spots(h: Harness, diameter: float, height: float, arm: str = "right", n: int = 5) -> str:
+    """Up to `n` spots (root frame x, y, m) for an upright object, spread over the arm's reach (for `place_object`).
+
+    Where the harness finds a grasp from the side for an object of `diameter` and `height`. Nothing moves.
+    """
+    from . import placement
+
+    tables = [node.obj for node in h.ws.nodes.values() if isinstance(node.obj, TableEstimate)]
+    table_z = max(tables, key=lambda t: t.n_inliers).h if tables else h.model.floor_z
+    if table_z is None:
+        raise ValueError("no table height: measure it first (`table_height`)")
+    spots = placement.placement_spots(h.model, diameter / 2, height, table_z, arm, n=n)
+    return "\n".join(f"{k + 1}. x {x:+.3f}, y {y:+.3f}" for k, (x, y) in enumerate(spots)) or "none reachable"
+
+
+@tool(Effect.SOFTWARE)
+def refine_grasp(
+    h: Harness,
+    target: Object,
+    chosen: Any,
+    name: str = "A",
+    part: str | None = None,
+    phase: str = "head",
+    capture: Capture | None = None,
+    mass_kg: float = 0.08,
+    max_batches: int = 5,
+    workers: int = 6,
+) -> Any:
+    """A grasp refined in the simulator (`docs/sim_harness.md`): samples around it, the first that holds taken.
+
+    Each sample (the grasp's height, side and tilt on the object, how deep in the jaws, and its offset across them,
+    near the chosen one) is planned as `plan_pick` plans it and played in the simulator, the arm's servos sagging as
+    the real ones do, under 8 draws of the object's position (~7 mm off) and the physics: the first lifted in 7 of
+    8 is taken, else after `max_batches` batches the best seen. ~15-40 s. Returns the plan: `.best` (its parameters,
+    its lifted share), `.accepted`, `.execution` (the whole pick, as `prepare_execution` makes it: for `execute`),
+    `.execution.poses` ("stage", "pick.back", "pick", "lift": `select_poses` them to stop at the attack point, as the
+    protocol does). The shares are optimistic (chosen on those 8 draws): fresh ones, ~10-30 points lower.
+
+    `phase="head"`: `chosen` is `grasp_candidates`' result, `name` the candidate; the plan starts from their capture.
+    `phase="wrist"`: `chosen` is an earlier `refine_grasp`'s plan, `capture` a fresh one at the attack point (the
+    arm's reading there), `target` the object measured again; the approach's direction kept. `mass_kg`: the object's
+    estimate. Needs the simulator (`--extra felix_jr_sim`). Nothing moves.
+    """
+    from lerobot.felix_jr.sim2real.refine import RefineSettings, planning_settings, refine
+
+    _fresh(h, target, "the object")
+    primitive = target.part(part) if isinstance(target, Object) else target
+    if phase == "head":
+        if not isinstance(chosen, _grasping.GraspCandidates) or chosen.capture is None:
+            raise ValueError("from the head, refine a `grasp_candidates` result (with its capture)")
+        _fresh(h, chosen.capture, "the candidates' capture")
+        candidate, plan_capture = chosen[name], chosen.capture
+        initial = {**candidate.claw.grasp.params, "depth": candidate.claw.depth, "offset": 0.0}
+    elif phase == "wrist":
+        if capture is None or getattr(chosen, "candidate", None) is None:
+            raise ValueError(
+                "from the wrist, refine an earlier `refine_grasp` plan, with a fresh capture there"
+            )
+        _fresh(h, capture, "the capture")
+        candidate, plan_capture = chosen.candidate, capture
+        initial = dict(chosen.best.params)
+    else:
+        raise ValueError(f"phase: 'head' or 'wrist', not {phase!r}")
+    arm = candidate.claw.arm
+    tables = [node.obj for node in h.ws.nodes.values() if isinstance(node.obj, TableEstimate)]
+    table_z = max(tables, key=lambda t: t.n_inliers).h if tables else h.model.floor_z
+    settings = RefineSettings(mass_kg=mass_kg, table_z=table_z, max_batches=max_batches, workers=workers)
+    return refine(
+        h.model,
+        arm,
+        primitive,
+        initial,
+        candidate.claw.fixed_side,
+        plan_capture.arms[arm],
+        planning_settings(candidate.settings),
+        settings,
+        phase,
+        capture=plan_capture,
+    )
+
+
 @tool(Effect.SOFTWARE)
 def render_wrist(
     h: Harness,

@@ -568,6 +568,7 @@ class TestApi:
             "scan": api.Effect.MOVE_HEAD,
             "look_at": api.Effect.MOVE_HEAD,
             "look_at_pixel": api.Effect.MOVE_HEAD,
+            "place_object": api.Effect.MOVE_HEAD,
             "execute": api.Effect.MOVE_ARM,
             "home": api.Effect.MOVE_ARM,
             "end_session": api.Effect.END,
