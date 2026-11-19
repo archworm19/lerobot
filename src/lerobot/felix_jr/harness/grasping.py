@@ -23,7 +23,9 @@ recorded with the reason (`Rejected`), and each stage is timed (`GraspCandidates
 - **wrist camera:** its optics `camera_clearance` (8 cm) from every obstacle (`Surface`s: the table's
   `TableEstimate`, other objects; without any, a level plane at the target's lower end) at the attack point and the
   grasp, through the model (`wrist_camera_position`). With the gripper upside down the camera hangs ~5 cm below the
-  pinch point: ruler1 put it on the table. Not checked without the camera's pose on the gripper.
+  pinch point: ruler1 put it on the table. Not checked without the camera's pose on the gripper. At the attack only
+  with `camera_clearance_at_grasp` False: the camera's view matters there (the wrist phase's input); at the grasp
+  only collision does, which a simulated grasp judges (`sim2real.refine`).
 - **wrist view:** the grasp's center and both contacts in the wrist camera's picture at the attack point, clear of the
   fingers (`joint_views.wrist_sees`): a policy on the wrist camera steers by it (`GraspSettings.see_object`; skipped
   without the arm's wrist camera).
@@ -138,8 +140,10 @@ class GraspSettings:
     # elbow stopping 1.2-1.3 deg short under load), and the errors are not alike: too high grips higher on the
     # object, too low hits what it stands on
     sag_lift: float = SAG_LIFT_M
-    # the wrist camera's optics this far from every obstacle, at least
+    # the wrist camera's optics this far from every obstacle, at least: at the attack, and at the grasp unless
+    # `camera_clearance_at_grasp` is False (`sim2real.refine`: the simulator judges the grasp's collisions)
     camera_clearance: float = CAMERA_CLEARANCE_M
+    camera_clearance_at_grasp: bool = True
     # every joint this far from its bound at the attack point, the grasp and the lift (deg)
     min_joint_margin_deg: float = MIN_JOINT_MARGIN_DEG
     # the object's grasp (its center and contacts) in the wrist camera's picture at the attack point, clear of the fingers:
@@ -599,7 +603,8 @@ def _evaluate(
         )
 
     start = time.perf_counter()
-    positions = [wrist_camera_position(model, arm, s) for s in (at_attack, at_grasp)]
+    checked = (at_attack, at_grasp) if settings.camera_clearance_at_grasp else (at_attack,)
+    positions = [wrist_camera_position(model, arm, s) for s in checked]
     clearance, nearest = float("nan"), None
     if obstacles and all(p is not None for p in positions):
         points = np.array(positions)

@@ -20,6 +20,9 @@ from .robot import FINGER_STL, arm_spec, set_pose
 if TYPE_CHECKING or _mujoco_available:
     import mujoco
 
+if TYPE_CHECKING:
+    from lerobot.felix_jr.harness.primitives import Primitive
+
 TABLE_Z = 0.747  # the table's top in the root frame (ruler2's head estimate)
 TABLE_NEAR_M = 0.06  # the table's near edge this far ahead of the arm's base
 TABLE_SIZE_M = (0.8, 1.2, 0.03)  # along x (away from the robot), y, thickness
@@ -49,6 +52,22 @@ class Box:
     half: tuple[float, float, float]
     mass: float = 0.03
     rgba: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 1.0)
+
+
+def from_primitive(primitive: "Primitive", name: str = "object", mass: float = 0.05) -> Cylinder:
+    """The simulator's object for a harness primitive (`harness.primitives`), standing on the table where it is.
+
+    Only an upright `Cylinder` so far (its bottom end's x, y; its radius and length); others are refused. The mass is
+    not geometry: an estimate, or a physics draw's.
+    """
+    from lerobot.felix_jr.harness.primitives import Cylinder as CylinderPrimitive
+
+    if not isinstance(primitive, CylinderPrimitive):
+        raise NotImplementedError(f"no simulator object for a {type(primitive).__name__} yet")
+    if abs(float(primitive.axis_root[2])) < 0.99:
+        raise NotImplementedError("only upright cylinders stand in the simulator so far")
+    bottom = primitive.bottom_root if primitive.axis_root[2] > 0 else primitive.top_root
+    return Cylinder(name, float(bottom[0]), float(bottom[1]), primitive.radius, primitive.length, mass)
 
 
 @dataclass

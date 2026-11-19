@@ -8,7 +8,8 @@ reaches are decided later (`grasping.py`).
 
 `where` narrows a family to ranges of its parameters, `spacing` sets the grid's step per parameter; both are keyed by
 the parameter names the primitive documents (angles in degrees, lengths in meters). A range's ends are always on the
-grid.
+grid. The family is also continuous: `grasp_space` names its parameters with their ranges, `grasp_at` makes the grasp
+at any values in it (what an optimizer samples: `sim2real.refine`); the grid is `grasp_at` on `_grid`s.
 
 Names say their frame (`docs/object_grasping.md`, "Frames and names"): `root_from_obj` maps the object frame to the root
 frame, `center_root` is a point in the root frame.
@@ -22,6 +23,17 @@ import numpy as np
 
 Ranges = Mapping[str, tuple[float, float]]
 Spacing = Mapping[str, float]
+
+
+@dataclass(frozen=True)
+class GraspParameter:
+    """One parameter of a grasp family: its range, its period if it wraps (an angle all the way round), its unit."""
+
+    name: str
+    low: float
+    high: float
+    period: float | None = None
+    unit: str = ""
 
 
 def _cm(value: float) -> str:
@@ -113,6 +125,14 @@ class Primitive(Surface, Protocol):
         self, where: Ranges | None = None, spacing: Spacing | None = None, max_opening: float | None = None
     ) -> list[AntipodalGrasp]:
         """The family's grasps on a grid, within `where`, no wider than `max_opening`."""
+        ...
+
+    def grasp_space(self, where: Ranges | None = None) -> dict[str, GraspParameter]:
+        """The family's parameters, each with its range (within `where`): what `grasp_at` takes."""
+        ...
+
+    def grasp_at(self, params: Mapping[str, float]) -> AntipodalGrasp:
+        """The family's grasp at `params` (every one of `grasp_space`'s, any value in its range)."""
         ...
 
     def approach_preference(self, approach_root: np.ndarray) -> float:
@@ -220,14 +240,9 @@ class Cylinder:
         outside = np.hypot(np.maximum(radial, 0.0), np.maximum(axial, 0.0))
         return outside + np.minimum(np.maximum(radial, axial), 0.0)
 
-    def antipodal_grasps(
-        self, where: Ranges | None = None, spacing: Spacing | None = None, max_opening: float | None = None
-    ) -> list[AntipodalGrasp]:
-        """The grasps on the grid of `t` x `phi` x `psi`, within `where`; none if the diameter is over `max_opening`."""
-        opening = 2.0 * self.radius
-        if max_opening is not None and opening > max_opening:
-            return []
-        where, step = dict(where or {}), {**self.SPACING, **(spacing or {})}
+    def grasp_space(self, where: Ranges | None = None) -> dict[str, GraspParameter]:
+        """`t` (m), `phi` (deg, all the way round), `psi` (deg), within `where` (the class docstring)."""
+        where = dict(where or {})
         unknown = set(where) - set(self.SPACING)
         if unknown:
             raise ValueError(f"a cylinder's grasps have no parameter {sorted(unknown)}: use t, phi, psi")
@@ -237,25 +252,41 @@ class Cylinder:
         psi_span = where.get("psi", (-90.0, 90.0))
         if psi_span[0] < -90 or psi_span[1] > 90:
             raise ValueError(f"psi {psi_span} is outside -90..90 deg")
-        rot_root_from_obj, axis_root = self.root_from_obj[:3, :3], self.axis_root
-        grasps = []
-        for t in _grid(t_span, step["t"]):
-            center_root = self.bottom_root + t * axis_root
-            for phi in _grid(where.get("phi", (0.0, 360.0)), step["phi"], wrap=360.0):
-                side_root = rot_root_from_obj @ np.array(
-                    [np.cos(np.radians(phi)), np.sin(np.radians(phi)), 0.0]
-                )
-                closing_root = np.cross(axis_root, side_root)
-                for psi in _grid(psi_span, step["psi"]):
-                    p = np.radians(psi)
-                    approach_root = -np.cos(p) * side_root - np.sin(p) * axis_root
-                    params = {
-                        "t": round(float(t), 4),
-                        "phi": round(float(phi), 2),
-                        "psi": round(float(psi), 2),
-                    }
-                    grasps.append(AntipodalGrasp(center_root, closing_root, approach_root, opening, params))
-        return grasps
+        phi_span = where.get("phi", (0.0, 360.0))
+        return {
+            "t": GraspParameter("t", float(t_span[0]), float(t_span[1]), unit="m"),
+            "phi": GraspParameter("phi", float(phi_span[0]), float(phi_span[1]), period=360.0, unit="deg"),
+            "psi": GraspParameter("psi", float(psi_span[0]), float(psi_span[1]), unit="deg"),
+        }
+
+    def grasp_at(self, params: Mapping[str, float]) -> AntipodalGrasp:
+        """The grasp at `t` along the axis, from side `phi`, its approach tilted `psi` (the class docstring)."""
+        t, phi, psi = float(params["t"]), float(params["phi"]), float(params["psi"])
+        axis_root = self.axis_root
+        center_root = self.bottom_root + t * axis_root
+        side_root = self.root_from_obj[:3, :3] @ np.array(
+            [np.cos(np.radians(phi)), np.sin(np.radians(phi)), 0.0]
+        )
+        closing_root = np.cross(axis_root, side_root)
+        p = np.radians(psi)
+        approach_root = -np.cos(p) * side_root - np.sin(p) * axis_root
+        named = {"t": round(t, 4), "phi": round(phi, 2), "psi": round(psi, 2)}
+        return AntipodalGrasp(center_root, closing_root, approach_root, 2.0 * self.radius, named)
+
+    def antipodal_grasps(
+        self, where: Ranges | None = None, spacing: Spacing | None = None, max_opening: float | None = None
+    ) -> list[AntipodalGrasp]:
+        """The grasps on the grid of `t` x `phi` x `psi`, within `where`; none if the diameter is over `max_opening`."""
+        if max_opening is not None and 2.0 * self.radius > max_opening:
+            return []
+        space, step = self.grasp_space(where), {**self.SPACING, **(spacing or {})}
+        span = {name: (q.low, q.high) for name, q in space.items()}
+        return [
+            self.grasp_at({"t": t, "phi": phi, "psi": psi})
+            for t in _grid(span["t"], step["t"])
+            for phi in _grid(span["phi"], step["phi"], wrap=360.0)
+            for psi in _grid(span["psi"], step["psi"])
+        ]
 
     def describe(self) -> str:
         """The radius, the bottom end, the length and the axis's tilt from vertical (root frame)."""

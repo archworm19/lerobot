@@ -126,3 +126,33 @@ def test_a_cylinder_prefers_the_side():
     down45 = np.array([1.0, 0.0, -1.0]) / np.sqrt(2.0)
     assert upright.approach_preference(down45) == pytest.approx(45.0)
     assert upright.approach_preference(2.0 * down45) == pytest.approx(45.0)  # any length
+
+
+def test_a_cylinders_grasp_space_and_its_grasp_anywhere_in_it():
+    """`grasp_space` names `t`, `phi` (wrapping all the way round) and `psi` with their ranges (narrowed by `where`,
+    refused outside the shape); `grasp_at` makes the grid's grasps exactly at its points and a grasp between them too."""
+    cyl = Cylinder.upright(np.array([-0.3, 0.1, 0.77]), 0.13, 0.0225)
+    space = cyl.grasp_space()
+    assert set(space) == {"t", "phi", "psi"}
+    assert (space["t"].low, space["t"].high, space["t"].unit) == (0.0, 0.13, "m")
+    assert space["phi"].period == 360.0 and space["psi"].period is None
+    narrowed = cyl.grasp_space({"psi": (0.0, 30.0)})
+    assert (narrowed["psi"].low, narrowed["psi"].high) == (0.0, 30.0) and narrowed["t"].high == 0.13
+    with pytest.raises(ValueError, match="outside"):
+        cyl.grasp_space({"t": (0.0, 0.2)})
+    with pytest.raises(ValueError, match="no parameter"):
+        cyl.grasp_space({"depth": (0.0, 0.01)})
+    for grasp in cyl.antipodal_grasps({"psi": (0.0, 30.0)}):
+        again = cyl.grasp_at(grasp.params)
+        assert np.allclose(again.center_root, grasp.center_root) and np.allclose(
+            again.approach_root, grasp.approach_root
+        )
+    between = cyl.grasp_at({"t": 0.055, "phi": 195.0, "psi": 7.5})  # (off the grid)
+    assert between.center_root[2] == pytest.approx(0.77 + 0.055) and between.opening == pytest.approx(0.045)
+    assert (
+        abs(between.approach_root @ between.closing_root) < 1e-12
+    )  # (still antipodal: the closing square to it)
+    side = -between.approach_root - np.sin(np.radians(7.5)) * np.array(
+        [0.0, 0.0, 1.0]
+    )  # (the approach untilted)
+    assert np.degrees(np.arctan2(side[1], side[0])) % 360 == pytest.approx(195.0, abs=1e-6)

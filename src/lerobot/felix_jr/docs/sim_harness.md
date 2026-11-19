@@ -110,6 +110,41 @@ fitted to these holds (`shortfalls`); the live sessions are the test.
 **Open:** which object pose seeds the sim (the plan's, what the robot acted on, first); scenes of several objects (the
 target alone first); the records' versioning (the settings saved with each, as the bank's).
 
+## The grasp refined in the simulator (built 2026-11-19)
+
+`sim2real/refine.py`: one function for both phases (`phase="head"` / `"wrist"`). **The parameters** are the object's,
+from its primitive (`Primitive.grasp_space`, `grasp_at`, new on the protocol: a cylinder's `t`, `phi`, `psi`;
+`antipodal_grasps` now `grasp_at` on its grid, the 6033 grasps checked identical), and the gripper's: `depth` and
+`offset` (across the jaws). The stage, the attack and the lift follow from the grasp (`plan_pick`): a sample counts
+only if its whole chain works. From the wrist, `phi` and `psi` are kept (the arm committed to its approach).
+
+**Each sample** runs the harness's own chain (the filters and IK, `plan_pick`, `prepare_execution`: what `execute`
+sends), and the shadow plays it with the object in the scene (`scene.from_primitive`) under 8 draws, the same for
+every sample: the object moved by the perception's error (7 mm; the first draw the estimate), the physics as the
+bank's. Lifted: up 3/4 of the planned lift, held 2 s. One rollout (a whole pick, 29 s simulated) takes 0.65 s, ~45
+times real time.
+
+**The search is greedy** (decided over the cross-entropy method: satisfice with a robustness threshold, as
+`first_feasible` does): batches of 6 around the greedy candidate, in 6 processes; the best of a batch lifted in 7 of 8
+draws is taken; else the next batch around the best so far, 1.5 times wider; at most 5. (The cross-entropy method,
+tried first, converged but its rounds cost ~2 minutes; it climbed to a ceiling its 3 draws could not see past.)
+
+**Two changes it needed:**
+
+- **The wrist camera's clearance at the attack only** (`GraspSettings.camera_clearance_at_grasp`: the harness keeps
+  both): the 8 cm is for the camera to see, which matters at the attack (the wrist phase's input); at the grasp only
+  collision does, which the simulator judges. With it at both, every deeper grasp was refused.
+- **The camera's real board collides in the simulator** (`robot._camera_board`: 45 x 45 mm about the lens, 12 mm
+  deep, at the calibrated pose; the SO-101 model's 32 mm module's mesh no longer collides). Clear of the gripper's
+  own parts at every opening.
+
+**First result** (seed 0's placement 4: a 45 mm x 158 mm, 54 g bottle; the arm from rest): the bank's grasp, run as
+the robot would run it (through the stage and the attack, the servos sagging: the pinch point 8-9 mm low, as the
+sessions' 0.6-0.9 cm), failed with the bottle at its estimate and held only with it 5-15 mm nearer: its working region
+beside the estimate. The refine took a grasp lifting in 8 of 8 draws in 3 batches, 28 s: 14 mm deep (the camera's
+clearance had refused it), 41 deg down (was 30), 2 cm higher. Over the bottle moved -15..+15 mm along and across the
+approach: held at 38 of 49 offsets (the start: 15), the estimate inside with 1-1.5 cm to spare on most sides.
+
 ## Then
 
 The servo-compensated commands (protocol step 2), judged by the shadow's records (does the arm land nearer?); the

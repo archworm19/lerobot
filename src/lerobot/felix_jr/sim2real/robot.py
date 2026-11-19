@@ -73,6 +73,10 @@ CAMERA_MOUNT, CAMERA_MODULE = (
     "wrist_camera",
 )  # TheRobotStudio's bodies (the module: the camera)
 COLLISION_GROUP = 3  # the SO-101's group for what collides (drawn only in a collision view)
+# the wrist camera's board as it collides (`_camera_board`): 45 x 45 mm about the lens (measured: `hardware_risks.md`),
+# from the board's back to the lens's front 12 mm deep, the lens's front this far past the optical center
+CAMERA_BOARD_M = (0.045, 0.045, 0.012)
+CAMERA_LENS_PROUD_M = 0.002
 # The gripper's servo and fingers, from what the real gripper did (`calibration.grip_test`, 2026-11-17: pyri 45 mm and
 # feno 53 mm bottles, closed in steps past contact, held 30 s, lifted; `docs/sim2real_grasp.md`):
 # - its position gain at the jaw (N m/rad): the jaw stalled 1.9-3.8 gripper.pos units short of each target with
@@ -183,6 +187,30 @@ def _pos_quat(pose: np.ndarray) -> tuple[list[float], list[float]]:
     quat = np.zeros(4)
     mujoco.mju_mat2Quat(quat, np.ascontiguousarray(pose[:3, :3]).ravel())
     return pose[:3, 3].tolist(), quat.tolist()
+
+
+def _camera_board(gripper, gripper_from_camera: np.ndarray) -> None:
+    """The wrist camera's board as it collides: a box `CAMERA_BOARD_M`, square about the lens and behind it.
+
+    The SO-101 model's module is a 32 mm one; the real camera is a 45 mm board, its lens about centered and 8-10 mm
+    proud of it (`docs/hardware_risks.md`): the module's mesh no longer collides, this box does (drawn only with the
+    module's own groups: the wrist camera's renders leave it out).
+    """
+    center = gripper_from_camera.copy()
+    center[:3, 3] = (
+        gripper_from_camera[:3, :3] @ [0.0, 0.0, -CAMERA_BOARD_M[2] / 2 + CAMERA_LENS_PROUD_M] + center[:3, 3]
+    )
+    pos, quat = _pos_quat(center)
+    gripper.add_geom(
+        name="wrist_camera_board",
+        type=mujoco.mjtGeom.mjGEOM_BOX,
+        size=[CAMERA_BOARD_M[0] / 2, CAMERA_BOARD_M[1] / 2, CAMERA_BOARD_M[2] / 2],
+        pos=pos,
+        quat=quat,
+        group=OWN_MODULE_GROUPS[COLLISION_GROUP],
+        rgba=[0.1, 0.4, 0.1, 1.0],
+        mass=0.0,
+    )
 
 
 def _camera(
@@ -424,12 +452,15 @@ def arm_spec(
         parent = "gripper" if body == "moving_jaw_so101_v1" else parents[parents.index(body) - 1]
         spec.body(body).pos, spec.body(body).quat = _pos_quat(np.linalg.inv(poses[parent]) @ poses[body])
     gripper = spec.body("gripper")
+    camera: WristCamera | None = model.wrist_cameras.get(arm)
     for geom in spec.body(CAMERA_MODULE).geoms:  # our camera is inside it (module docstring)
+        if camera is not None and geom.group == COLLISION_GROUP:  # (the real board collides instead, below)
+            geom.contype, geom.conaffinity = 0, 0
         geom.group = OWN_MODULE_GROUPS[geom.group]
     pos, quat = _pos_quat(np.linalg.inv(poses["gripper"]) @ model.frame_pose(pinch_frame(arm), q))
     gripper.add_site(name=PINCH, pos=pos, quat=quat, size=[0.003, 0, 0], rgba=[1, 0, 1, 1], group=4)
-    camera: WristCamera | None = model.wrist_cameras.get(arm)
     if camera is not None:
+        _camera_board(gripper, model.gripper_from_camera(arm))
         _camera(
             gripper,
             WRIST_CAMERA,

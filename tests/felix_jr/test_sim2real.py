@@ -97,16 +97,19 @@ def test_a_point_renders_where_the_lens_puts_it(model, camera):
     np.testing.assert_allclose([u.mean() + 0.5, v.mean() + 0.5], expected, atol=1.0)
 
 
-def test_the_camera_mount_and_module_collide_and_the_module_is_not_in_its_own_view(model):
-    """TheRobotStudio's mount and module (the robot's), colliding; the module's geoms in their own groups, drawn from the
-    head and left out of the wrist camera's renders (the camera is inside it)."""
+def test_the_camera_mount_and_the_real_board_collide_and_the_module_is_not_in_its_own_view(model):
+    """TheRobotStudio's mount colliding; its 32 mm module not (the real 45 mm board does instead: `_camera_board`); the
+    module's geoms and the board in their own groups, drawn from the head and left out of the wrist camera's renders
+    (the camera is inside it)."""
     scene = build(model, "left")
     m = scene.m
     module = [m.geom(i) for i in range(m.ngeom) if m.geom(i).bodyid[0] == m.body(robot.CAMERA_MODULE).id]
     assert {g.group[0] for g in module} == set(robot.OWN_MODULE_GROUPS.values())
     mount = [m.geom(i) for i in range(m.ngeom) if m.geom(i).bodyid[0] == m.body(robot.CAMERA_MOUNT).id]
     assert any(g.contype[0] and g.group[0] == robot.COLLISION_GROUP for g in mount)
-    assert any(g.contype[0] and g.group[0] == robot.OWN_MODULE_GROUPS[robot.COLLISION_GROUP] for g in module)
+    assert not any(g.contype[0] for g in module)
+    board = m.geom("wrist_camera_board")
+    assert board.contype[0] and board.group[0] == robot.OWN_MODULE_GROUPS[robot.COLLISION_GROUP]
     # the camera is inside its module (why its renders leave it out): within the module's mesh's bounds
     for arm in ("left", "right"):
         scene = build(model, arm)

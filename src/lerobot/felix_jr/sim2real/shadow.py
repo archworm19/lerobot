@@ -99,6 +99,16 @@ class Shadow:
         )
         return out
 
+    def object_position(self, name: str = "object") -> np.ndarray:
+        """Where an object's center is now (root frame, m)."""
+        return self.scene.d.xpos[self.scene.m.body(name).id].copy()
+
+    def hold(self, seconds: float) -> None:
+        """The servos holding their commands for `seconds` (a lift's hold)."""
+        m, d = self.scene.m, self.scene.d
+        for _ in range(int(round(seconds / m.opt.timestep))):
+            mujoco.mj_step(m, d)
+
     def _command(self, pose: Mapping[str, float]) -> None:
         m, d = self.scene.m, self.scene.d
         for key, value in pose.items():
@@ -141,7 +151,9 @@ class Shadow:
                 mujoco.mj_step(m, d)
             t += tick
         self._command(dict(targets))
-        joints = list(targets)  # (every target, the jaw's too, as the server checks: a stalled jaw never arrives)
+        joints = list(
+            targets
+        )  # (every target, the jaw's too, as the server checks: a stalled jaw never arrives)
         settler, held, reached = Settler(timeout, DWELL_S, began=0.0), 0.0, None
         while reached is None:
             r = self.reading()
