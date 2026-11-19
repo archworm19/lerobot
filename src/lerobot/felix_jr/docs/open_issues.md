@@ -205,6 +205,13 @@ including the object being grasped. Revisit only if the model, given good render
     describe the object (an upright cylinder of diameter `d`) and let the tool compute the opening, or warn when a
     roll is far from level for an upright object.
 
+19. **Grasps at the fingertips are fragile** (the simulator, 2026-11-19: `sim_harness.md`, "Why they fail"). The
+    harness grasps at depth 0 (`GraspSettings.depth`), the object's center at the tips. With the servos' sag the jaws
+    land short, so an object a few mm farther than estimated is closed on at the tips or by one finger and slips:
+    5-10 mm farther, 77 % of simulated grasps failed; nearer, 26-32 %. Deeper grasps (6-14 mm) tolerated more. Held
+    until the wrist phase's perception is designed (its smaller error may change how deep is right): then a depth
+    bias in `sim2real.refine`, or the harness's default depth.
+
 ## Tooling
 
 9. **The session CLI is a gitignored file.** `harness/scratch/` is ignored (`**/scratch/` in the root

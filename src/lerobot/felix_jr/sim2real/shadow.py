@@ -17,7 +17,7 @@ at the hold) and compares the simulated end with the real one; the command line 
 import argparse
 import pickle  # nosec B403: the harness's own sessions, written on this computer
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -74,6 +74,8 @@ class Shadow:
         init=False
     )  # the last commanded goal (where `home.move_all` starts a move)
     loaded: bool = False
+    # called each tick (1/`WAYPOINT_HZ` s of simulated time) with the move's label: to film a replay (`failures`)
+    on_tick: Callable[[str], None] | None = None
 
     def __post_init__(self) -> None:
         """Build the scene and pose the arm at the readings, the servos holding there."""
@@ -103,11 +105,14 @@ class Shadow:
         """Where an object's center is now (root frame, m)."""
         return self.scene.d.xpos[self.scene.m.body(name).id].copy()
 
-    def hold(self, seconds: float) -> None:
+    def hold(self, seconds: float, label: str = "hold") -> None:
         """The servos holding their commands for `seconds` (a lift's hold)."""
         m, d = self.scene.m, self.scene.d
-        for _ in range(int(round(seconds / m.opt.timestep))):
+        per_tick = max(1, int(round(1.0 / WAYPOINT_HZ / m.opt.timestep)))
+        for k in range(int(round(seconds / m.opt.timestep))):
             mujoco.mj_step(m, d)
+            if self.on_tick is not None and (k + 1) % per_tick == 0:
+                self.on_tick(label)
 
     def _command(self, pose: Mapping[str, float]) -> None:
         m, d = self.scene.m, self.scene.d
@@ -150,6 +155,8 @@ class Shadow:
             for _ in range(per_tick):
                 mujoco.mj_step(m, d)
             t += tick
+            if self.on_tick is not None:
+                self.on_tick(label)
         self._command(dict(targets))
         joints = list(
             targets
@@ -161,6 +168,8 @@ class Shadow:
             for _ in range(per_tick):
                 mujoco.mj_step(m, d)
             held += tick
+            if self.on_tick is not None:
+                self.on_tick(label)
         self.goal.update({k: float(v) for k, v in targets.items()})
         r = self.reading()
         return MoveReplay(

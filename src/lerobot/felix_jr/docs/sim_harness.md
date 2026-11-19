@@ -145,6 +145,45 @@ beside the estimate. The refine took a grasp lifting in 8 of 8 draws in 3 batche
 clearance had refused it), 41 deg down (was 30), 2 cm higher. Over the bottle moved -15..+15 mm along and across the
 approach: held at 38 of 49 offsets (the start: 15), the estimate inside with 1-1.5 cm to spare on most sides.
 
+**Across the bank** (2026-11-19, `python -m lerobot.felix_jr.sim2real.refine <bank> <out>`: the 13 anchored
+placements, from the greedy candidate and from the bank's anchor, each run its own seed; every start and every grasp
+taken scored again on 32 fresh draws, none the search saw):
+
+- **The search's own scores were badly optimistic:** every grasp taken at 7 or 8 of 8 lifted in 50-88 % of fresh
+  draws (8 yes-or-no draws are ~15 % uncertain; the best of ~30 noisy scores is mostly a lucky one). The fresh share
+  is the measure: refining took the greedy starts from 37 % to 57 % on average, the anchors (better to begin with)
+  from 56 % to 57 %. The best grasp per placement: 88 % at 4 placements, 66-81 % at 5, 44-50 % at 2, 19 % at the
+  115 g bottle (the real 116 g one slipped too).
+
+**Why they fail** (`python -m lerobot.felix_jr.sim2real.failures <bank> <bench> <out_dir>`: each start and taken grasp
+played under three conditions on the same 32 draws, the plan always made against the estimate: **position only**,
+the bottle offset ~7 mm, the physics as fitted; **physics only**, the bottle at its estimate, the fingers' friction
+and stiffness and its mass each scaled 0.8-1.25; **both**; 4416 rollouts; one example of each failure filmed,
+`examples.mp4`):
+
+| grasp | position only | physics only | both |
+| --- | --- | --- | --- |
+| starts | 46 % | 58 % | 45 % |
+| taken | 60 % | 84 % | 56 % |
+
+- **The position error costs most** (taken: 84 % -> 56 % with it); the physics ~16 points, slips at low friction
+  (friction under 0.9x: 67 % failed, over 1.1x: 38 %; mass barely matters in this range).
+- **By kind, under both:** slipped 368, one jaw 201 (only one finger on it), pushed away 63, knocked over 55, missed
+  36 (`refine.outcome`: from the fingers' pads touching the object at the close, its tilt, how far it moved).
+- **One-sided:** the bottle nearer the arm than estimated is mostly caught (26-32 % failed), farther mostly not
+  (0-5 mm: 52 %, 5-10 mm: 77 %, over 10 mm: 90 %): the jaws land short (the servos' sag) and close at their tips.
+  Across the jaws, fine within ~6 mm, 75 % failed past 10.
+- **Not refined here: the perception.** The object's estimate is fixed: the refine wins by modeling how the arm
+  really moves (the servos' sag, stopping short) and by preferring grasps whose working region covers more of the
+  misses, not by knowing better where the object is. Re-estimating it from the wrist camera at the attack is the
+  wrist phase's (next to think through).
+
+**Noted, held for after the wrist phase's perception:** the depth. The one-sided failures say the grasp should sit
+deeper in the jaws, so a bottle farther than estimated still lands between the fingers: the refined grasps went 6-14
+mm deep, not enough to center the working region. A depth bias in the search, or a score weighing the far side's
+failures. Also: accept only after confirming on fresh draws (screen on 8, take the first holding on ~24 more), and
+more grip trials to pin the friction (the physics' main cost).
+
 ## Then
 
 The servo-compensated commands (protocol step 2), judged by the shadow's records (does the arm land nearer?); the
