@@ -11,9 +11,9 @@ target (`HOLD_S` here), and the lift. Printed per close, the simulated against t
 
 The gripper's servo, as measured (2026-11-17): its position gain `--kp` (N m/rad at the jaw: ~4.6 % load a degree, as
 `tuning_notes.md` 3.6 has it at P 16; the SO-101 model's 998 is ~100 times stiffer), its torque capped at `--force-nm`
-(the overload protection's ~20 %, `grip_test.SUSTAINED_LOAD_PCT`, of `STALL_NM`), the fingers' and the bottle's
-friction `--friction` (a guess). The fingers collide as their convex hulls, rigid (`robot._add_fingers`): the real
-fingers' give (the stall moving ~13 units from first touch to 15 past contact) is not in the simulator yet.
+(`robot.GRIPPER_FORCE_NM`), the fingers' and the bottle's friction `--friction` (fitted to the lifts). The fingers
+collide as pads on their faces and give on a spring at their base (`--finger-model`, `robot.FINGER_MODELS`; what set
+each value is in `robot.py`; the models compared in `finger_models.py`).
 """
 
 import argparse

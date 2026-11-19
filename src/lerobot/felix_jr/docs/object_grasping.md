@@ -218,7 +218,7 @@ section 4 removes most of it).
 
 | interface | responsibility |
 |---|---|
-| `to_claw(grasp, model, arm, fixed_side, margin, attack) -> ClawTarget` | `root_from_pinch` putting the fixed tip on contact `fixed_side` (`margin` clear of it) and the moving tip, at the grasp's opening, on the other: the real tip-to-tip line (it tilts 5-19 deg off the pinch -x with the opening, which the roll-based poses ignore) along the closing line, the hinge square to the closing and the approach; `root_from_attack`, `attack` back along the approach; how far apart the tips open and close (`OPEN_CLEARANCE_M`, `SQUEEZE_M`; `prepare_execution` turns them into `gripper.pos`). Uses `XleRobotModel.grasp_offset`, which it agrees with. **Built.** Not yet: `depth` (contacts deeper than the tips: the claw's opening for a width changes there). The close is an overshoot past contact since 2026-11-18 (`reach.SQUEEZE_UNITS`, `tuning_notes.md` 3.10). |
+| `to_claw(grasp, model, arm, fixed_side, margin, attack) -> ClawTarget` | `root_from_pinch` putting the fixed tip on contact `fixed_side` (`margin` clear of it) and the moving tip, at the grasp's opening, on the other: the real tip-to-tip line (it tilts 5-19 deg off the pinch -x with the opening, which the roll-based poses ignore) along the closing line, the hinge square to the closing and the approach; `root_from_attack`, `attack` back along the approach; how far apart the tips open and close (`OPEN_CLEARANCE_M`, `SQUEEZE_M`; `prepare_execution` turns them into `gripper.pos`). Uses `XleRobotModel.grasp_offset`, which it agrees with. **Built.** `depth` (the object's center back from the tips, the open jaws checked against the fingers' faces there: `face_clearances`) since 2026-11-18. The close is an overshoot past contact since 2026-11-18 (`reach.SQUEEZE_UNITS`, `tuning_notes.md` 3.10). |
 | `ArmIK` (kept, from `reach.py`) | `solve_frame(root_from_pinch, axes_root, rotation_tols_deg)`: the joints for a whole target pinch frame, the rotation's error split about three axes, each weighted by its tolerance; still one local least-squares solve. `grasping` uses the grasp's closing line 20 deg (keeps the contacts: the missing sixth joint gives way here), approach 5 (rolls the closing line off the object), hinge 10. **Built.** |
 | `Check` / `Score` | **Redesigned** (phase B progress): filters `STAGES` (the jaws, reach, the head camera's line of sight past the arms' plates and boxes) with generous, settable bounds (`GraspSettings`); the score is the antipodal error, then the joint margin. No collision checks: the model describes only the graspable part, and from where. |
 | `Scene` | **Not built, by design** (phase B redesign): the tool is told only what may be grasped and from where; the scene is the model's to judge, and rule 1's hold checks it. (`Surroundings`, built and removed, 2026-11-06.) |
@@ -416,9 +416,10 @@ or the arm's model at all.
 
 **Choosing grasps for it (replacing the head camera's visibility filters):**
 
-- **(a) TODO, an experiment: the object in the wrist camera's view at the attack point** (inside its field of view,
-  at a distance it can focus and measure, not behind the fingers). No visibility filter of any kind for now
-  (2026-11-08): first see on the robot whether grasps lose the object from the wrist camera's view at all.
+- **(a) The object in the wrist camera's view at the attack point** (inside its field of view, at a distance it can
+  focus and measure, not behind the fingers). **Built (2026-11-18):** the grasp filters' "wrist view" stage
+  (`GraspSettings.see_object`; `GraspCandidate.wrist_view_points`), shared with the simulation's starts
+  (`sim2real_grasp.md`).
 - **(b) Corrections that do not fight each other:** prefer grasps whose closing line is square to the arm's vertical
   plane (through the shoulder pan axis and the object). Then the joints split the corrections: the shoulder pan
   moves the gripper across the jaws and, at a level grasp, turns it about the hinge (pinch y), both of which a side

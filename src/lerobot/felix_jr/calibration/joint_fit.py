@@ -11,7 +11,7 @@ pose in the root frame, and the fingers' thickness (with a tight prior). The res
 - `TipClick`: a fingertip clicked by a person. The head sees one face of the fingers, the wrist camera the other, one
   thickness apart along the hinge (`XleRobotModel.wrist_face`): a head click is the pinch point as calibrated, a
   wrist click that point moved by the thickness.
-- The priors, as `xle_fit`'s, and on each moment's joint errors (`joint_sigma_deg`): a reading off by a fraction
+- The priors (the model's, `XleRobotModel.with_current_priors`), and on each moment's joint errors (`joint_sigma_deg`): a reading off by a fraction
   of a degree moves every point seen at that moment the same way, which would otherwise bend the parameters.
 
 The lenses are fixed (the wrist's from `calibration.wrist_camera`, the head's the RealSense's). Huber-weighted least
@@ -1070,6 +1070,125 @@ def calibrate(
     }
     calibrated.fit_info = {**model.fit_info, "joint_fit": numbers}
     return calibrated, fit, numbers
+
+
+# a check's limits (`check`): past one, the part it names is off. Scored at the joints as read (a fit's residuals are
+# lower: it also fits each moment's joint errors), on the recorded sessions (2026-11-19): good calibrations (each arm's
+# own, and both arms' fitted together) 2.5-5.0 mm and 0.6-0.8 deg on the board, the wrist's tips 1.3-2.3 px, the head's
+# clicks 2.8-4.9 px; the right arm's calibration on the left arm's session (never calibrated) 17 mm, 2.7 deg, 3.1 px
+# and 36 px
+CHECK_BOARD_MM, CHECK_BOARD_DEG = 6.0, 1.5
+CHECK_WRIST_PX, CHECK_HEAD_PX = 3.0, 8.0
+
+
+def check(model: XleRobotModel, sessions: Sequence[JointSession]) -> dict[str, Any]:
+    """How well `model` explains `sessions` as it is, nothing fitted: a calibration's check on the robot.
+
+    Every moment both the head and a wrist camera saw the board at (`agreement`: the two chains on where it is), and
+    every fingertip clicked or found (the head's clicks; the wrist's, the gripper sweep's) against where the model
+    puts it at the joints as read. Each part against its limit (`CHECK_*`): `verdicts` says which pass.
+    """
+    model = model.with_current_priors()
+    for arm in sorted({c.arm for s in sessions for c in s.clicks if c.on_face in MOVING_FACES}):
+        model = model.with_gripper_hinge(
+            arm
+        )  # (as `calibrate`: the hinge where the model has it, a parameter)
+    board = sessions[0].board
+    arms = sorted({s.arm for s in sessions})
+    cameras = {arm: model.wrist_cameras[arm] for arm in arms}
+    sightings = [
+        x if len(sessions) == 1 else replace(x, placement=f"{i}:{x.placement}")
+        for i, s in enumerate(sessions)
+        for x in s.sightings
+    ]
+    clicks = [c for s in sessions for c in s.clicks]
+    theta = model.estimates
+    apart = agreement(model, board, cameras, sightings, theta)
+    misses: dict[str, list[float]] = {}
+    if sightings or clicks:
+        problem = JointProblem(model, board, cameras, sightings, clicks)
+        for c in clicks:
+            q = problem._q[id(c)]
+            uv = problem.project(c.camera, q, problem.tip(c, q, theta, JAW_THICKNESS_M)[None], theta)[0]
+            miss = float(np.linalg.norm(uv - c.pixel)) if np.isfinite(uv).all() else float("inf")
+            misses.setdefault(c.camera, []).append(miss)
+    numbers: dict[str, Any] = {
+        "sessions": [str(s.path) for s in sessions],
+        "board": {"moments": len(apart)},
+        "clicks": {
+            camera: {
+                "n": len(m),
+                "rms_px": float(np.sqrt(np.mean(np.square(m)))),
+                "median_px": float(np.median(m)),
+                "max_px": float(np.max(m)),
+            }
+            for camera, m in misses.items()
+        },
+    }
+    if len(apart):
+        numbers["board"] |= {
+            "mm": float(np.sqrt(np.mean(apart[:, 0] ** 2))),
+            "deg": float(np.sqrt(np.mean(apart[:, 1] ** 2))),
+            "max_mm": float(apart[:, 0].max()),
+            "max_deg": float(apart[:, 1].max()),
+        }
+    verdicts = []
+    b = numbers["board"]
+    if "mm" in b:
+        ok = b["mm"] <= CHECK_BOARD_MM and b["deg"] <= CHECK_BOARD_DEG
+        verdicts.append(
+            {
+                "part": "the head and the arm on where the board is",
+                "ok": ok,
+                "value": f"{b['mm']:.1f} mm, {b['deg']:.2f} deg RMS over {b['moments']} moments",
+                "limit": f"{CHECK_BOARD_MM:g} mm, {CHECK_BOARD_DEG:g} deg",
+                "if not": "the head's chain or the arm's is off: a joint session (docs/README.md section 7)",
+            }
+        )
+    for camera, c in numbers["clicks"].items():
+        wrist = camera != HEAD
+        limit = CHECK_WRIST_PX if wrist else CHECK_HEAD_PX
+        verdicts.append(
+            {
+                "part": f"the {camera} wrist camera's fingertips" if wrist else "the head's fingertip clicks",
+                "ok": c["rms_px"] <= limit,
+                "value": f"{c['rms_px']:.1f} px RMS ({c['n']}, median {c['median_px']:.1f}, max {c['max_px']:.1f})",
+                "limit": f"{limit:g} px",
+                "if not": (
+                    "the wrist camera moved on its mount (docs/hardware_risks.md), or the gripper map is off"
+                    if wrist
+                    else "the arm's joints, its gripper or the head are off (a mis-click reads high: see its picture)"
+                ),
+            }
+        )
+    numbers["verdicts"] = verdicts
+    numbers["ok"] = bool(verdicts) and all(v["ok"] for v in verdicts)
+    return numbers
+
+
+def check_report(numbers: Mapping[str, Any], extra: Sequence[str] = ()) -> str:
+    """A markdown report of a `check`: each part, pass or not, and what to do if not."""
+    lines = [
+        "# Calibration check",
+        "",
+        f"Sessions: {', '.join(numbers['sessions'])}",
+        "",
+        "**" + ("Passed." if numbers["ok"] else "Not passed: see below.") + "**",
+        "",
+        "| part | | measured | limit |",
+        "| --- | --- | --- | --- |",
+    ]
+    lines += [
+        f"| {v['part']} | {'ok' if v['ok'] else 'OFF'} | {v['value']} | {v['limit']} |"
+        for v in numbers["verdicts"]
+    ]
+    off = [v for v in numbers["verdicts"] if not v["ok"]]
+    if off:
+        lines += ["", "## What to do", ""] + [f"- {v['part']}: {v['if not']}" for v in off]
+    if not numbers["verdicts"]:
+        lines += ["", "Nothing to check: no moment both cameras saw the board at, and no fingertip."]
+    lines += ["", *extra] if extra else []
+    return "\n".join(lines) + "\n"
 
 
 def _held_out_lines(held: Mapping[str, Any]) -> list[str]:

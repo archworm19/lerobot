@@ -374,11 +374,15 @@ def path_clear(
 ) -> bool:
     """Whether the arm's straight move in the joints from `start` to `end` stays clear of the table.
 
-    As `move_joints` makes it, at `PATH_STEPS` poses: none within the clearances (`table_margin`) more than the start
-    is (the rest pose folds the fingertips within 2 cm of the table: a move may start there, not go nearer).
+    As `move_joints` makes it, at `PATH_STEPS` poses: none within the clearances (`table_margin`) more than both its
+    ends are (the rest pose folds the fingertips within 2 cm of the table: a move may start there; a planned view may sit
+    within the clearances too, its own checks passed: a move may end there; neither may dip below them on the way, as the
+    wrist camera did into the table, 2026-11-17). Was the start's alone, which sent the arm around through rest to
+    every view lower than the one before (the left arm's session, 2026-11-19: every other view of a placement).
     """
     joints = [f"{j}.pos" for j in SO101_JOINTS]
-    floor = min(0.0, table_margin(model, arm, start, table_z)) - 1e-3
+    ends = min(table_margin(model, arm, start, table_z), table_margin(model, arm, end, table_z))
+    floor = min(0.0, ends) - 1e-3
     for t in np.linspace(0.0, 1.0, PATH_STEPS + 1)[1:]:
         pose = {k: start[k] + t * (end[k] - start[k]) for k in joints}
         if table_margin(model, arm, pose, table_z) < floor:

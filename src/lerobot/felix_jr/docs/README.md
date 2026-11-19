@@ -285,8 +285,8 @@ redone. `--wrist-tip click` clicks the wrist camera's fingertip by eye instead o
 `--openings` alone keeps the jaws closed. The script runs in a client session: Ctrl+C or a crash sends the robot to
 rest.
 
-**Retired** (2026-11-16): the click calibration (`calibration.collect`, `xle_fit`: the closed pinch point clicked
-in 30-60 frames per arm, no board) and the wrist camera's separate pose step. Older calibrations still load (their
+**Retired** (2026-11-16; its code removed 2026-11-19): the click calibration (`collect`, `xle_fit`: the closed pinch
+point clicked in 30-60 frames per arm, no board) and the wrist camera's separate pose step. Older calibrations still load (their
 wrist cameras' poses and fingers' mounts read as corrections to the design).
 
 ### 8. Optional: measure the gripper's opening with calipers (needs the server)
@@ -322,29 +322,29 @@ radius r. It needs a calibrated URDF (section 7: the model's radius is the start
    stored measurements with no robot. A joint session started from this file keeps the map as its start (and fits
    where the jaws close again).
 
-### 9. Check the calibration on the robot (no clicks, needs the server)
+### 9. Check the calibration on the robot (needs the server)
 
-Draws where the calibrated URDF puts both fingertips over the head camera, view after view, with the gripper at
-different openings: the pinch point (cyan, placed by the camera calibration) and the moving jaw's tip (magenta,
-placed by the gripper map as well). When the URDF has the arm's wrist camera (section 6, and its pose from a joint
-session, section 7) and the server streams it, the wrist camera's picture is shown beside the head camera's with the same two circles, placed
-by its lens and its pose on the gripper. It needs a URDF with the arm's gripper map, made for this robot (the same
-check as the harness's: a recalibrated arm or flipped head directions are refused).
+A short joint session that fits nothing (`joint_collect --check`): the same steps and the same safety as section 7
+(the gripper sweep's checks, the views kept clear of the table, a move around through rest when the straight way is
+not), shorter (1 placement, 6 arm views, 3 head views, 4 tip views by default), the clicks optional. At the end the
+calibration is scored as it is (`joint_fit.check`), each part against its limit. The URDF must match the robot (the
+same check as the harness's: a recalibrated arm, a recalibrated gripper or flipped head directions are refused).
 
-1. Server on the Pi with the arm (and the head): as for section 7.
-2. On your computer, with the workspace clear:
-   `uv run python -m lerobot.felix_jr.calibration.check tcp://<pi>:5555 --arm right --model <calibration.urdf>
-   --out-dir <a scratch folder>`
-   `n` moves to the next view (the same views `collect` uses) with the gripper at the next of `--openings`
-   (default 0, 15, 30, 50, 70); `[` / `]` close / open it by `--gripper-step` at the same view; the arrow keys turn
-   the head; `q` quits and sends the robot to rest.
-3. Read the result: both circles should sit on the fingertips everywhere. An offset of the pinch point that changes
-   with the pose or the head is the calibration (a new joint session, section 7); a pinch point on target with the
-   moving tip off, growing with the opening, is the gripper map (the joint session fits it from the moving tip's
-   clicks; the calipers, section 8, measure it). In the wrist picture the
-   fingertips stay in about the same place: circles off them there are the wrist camera's (its lens, section 6, or its
-   pose, the joint session), whatever the head camera shows. With `--out-dir`, every frame is saved as drawn and raw (the wrist picture too),
-   with `frames.json` (the measured state and both predictions per frame, and their wrist pixels).
+1. Server on the Pi with the arm and the head: as for section 7.
+2. On your computer, the table clear, the board at hand:
+   `uv run --extra felix_jr --extra felix_jr_sim --extra pyzmq-dep python -m lerobot.felix_jr.calibration.joint_collect
+   tcp://<pi>:5555 --arm right --out-dir <a scratch folder> --start-from <calibration.urdf> --check`
+3. As section 7: the sweep, the board on its outline, `n` through the views. Click the fingertips in the head's panes
+   if you like (scored if you do); `q` stops early and scores what there is.
+4. Read `check.md` (printed at the end; `check.json` the numbers):
+   - **the head and the arm on where the board is** (every moment both saw it; limit 6 mm, 1.5 deg): off, the head's
+     chain or the arm's is: a joint session (section 7);
+   - **the wrist camera's fingertips** (the sweep's, against the model's; limit 3 px): off, the wrist camera moved on
+     its mount (`hardware_risks.md`) or the gripper map is off; the sweep's drift is printed too;
+   - **the head's fingertip clicks** (if any; limit 8 px): off, the arm's joints, its gripper or the head are.
+
+   The limits are from the recorded sessions (`joint_fit.CHECK_*`): good calibrations scored 2.5-5.0 mm, 1.3-2.3 px
+   and 2.8-4.9 px; an arm never calibrated, 17 mm and 36 px.
 
 ## Checks and teleop (after either setup)
 

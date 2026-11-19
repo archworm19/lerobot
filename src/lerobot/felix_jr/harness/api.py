@@ -76,7 +76,7 @@ if TYPE_CHECKING:
 # docs/camera_calibration.md, "The rework"), the right arm's again after its camera's mount was tightened
 # (2026-11-15: joint_right_full4, its wrist fingertip from a gripper sweep, `calibration.auto_tips`), and both
 # grippers' geometry from three sweeps each (the hinges, the fingers' mounts, the maps: `calibration.gripper_sweep`)
-MODEL = Path(__file__).parents[1] / "urdfs" / "calib_20261115_grippers.urdf"
+MODEL = Path(__file__).parents[1] / "urdfs" / "calib_20261119_joint.urdf"
 ENDPOINT = "tcp://ikeabot.local:5555"
 
 

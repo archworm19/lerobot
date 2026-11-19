@@ -59,7 +59,8 @@ from lerobot.felix_jr.calibration.boards import (  # noqa: E402
     board_from_dict,
     parse_board,
 )
-from lerobot.felix_jr.calibration.live_view import decode_key  # noqa: E402
+from lerobot.felix_jr.calibration.controls import decode_key  # noqa: E402
+from lerobot.felix_jr.calibration.merge_urdf import wrist_camera_frame  # noqa: E402
 from lerobot.felix_jr.calibration.xle_robot_model import (  # noqa: E402
     HEAD_JOINTS,
     WRIST_CAMERA_MODELS,
@@ -67,7 +68,6 @@ from lerobot.felix_jr.calibration.xle_robot_model import (  # noqa: E402
     XleRobotModel,
     arm_record,
     pinch_frame,
-    wrist_camera_frame,
 )
 from lerobot.felix_jr.server.client import FelixClient, WristCapture  # noqa: E402
 from lerobot.felix_jr.server.protocol import DEFAULT_PORT, ServerError  # noqa: E402

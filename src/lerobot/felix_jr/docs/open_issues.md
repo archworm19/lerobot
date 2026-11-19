@@ -66,7 +66,7 @@ the IK smoke test is built on pen1).
     - **The camera's pose with the head at home is ~2 cm off** (bowl4, 2026-11-07, `sessions.md`): at an attack
       hold the real fingertips (depth) were 1.9-2.8 cm from the model's at the measured joints with the head at home,
       1.3 cm with the head aimed at the grasp; the scan read the table 1.4-2 cm lower from the home pose. Until the
-      head's calibration is checked at home (`calibration.check` there), judge holds and plan moves in from a
+      head's calibration is checked at home (`joint_collect --check`, the head's looks from home), judge holds and plan moves in from a
       capture with the head aimed at the grasp (`look_at`).
     - **The move in goes sideways** (bowl4): `plan_pick` puts the attack point back along the grasp's approach, which
       `to_claw` leaves 8-19 deg off the gripper's own axis (the tip-line tilt); the fingers travel crabwise and sweep

@@ -39,7 +39,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from lerobot.felix_jr.calibration.merge_urdf import SO101_JOINTS
-from lerobot.felix_jr.calibration.views import MAX_ROLL_DEG, arm_pose_degrees
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, arm_joint, pinch_frame
 from lerobot.utils.import_utils import _scipy_available, require_package
 
@@ -50,6 +49,7 @@ if TYPE_CHECKING or _scipy_available:
     from scipy.spatial.transform import Rotation
 
 LIMIT_MARGIN = 0.95  # joints stay within this fraction of their URDF limits
+MAX_ROLL_DEG = 130.0  # how far the wrist may roll (the wrist camera's cable)
 PITCH_TOL_DEG = 0.1  # the held pitch: its penalty scale
 PITCH_OK_DEG = 0.5  # and how far off it may end up and still count as held
 # how far to open is a first guess (docs/open_issues.md, 14); how hard to close was measured (`calibration.grip_test`,
@@ -97,6 +97,12 @@ class Solution:
     roll_error_deg: float  # NaN if the roll was free
     at_limit: tuple[str, ...]  # joints that ended at a bound
     ok: bool  # within every tolerance, the pitch held
+
+
+def arm_pose_degrees(model: XleRobotModel, arm: str, q: np.ndarray) -> dict[str, float]:
+    """LeRobot's `{"shoulder_pan.pos": deg, ...}` for `arm`'s joints in `q` (the gripper closed, `gripper.pos` 1)."""
+    pose = {f"{j}.pos": float(np.degrees(q[model.q_index(arm_joint(arm, j))])) for j in SO101_JOINTS}
+    return {**pose, "gripper.pos": 1.0}
 
 
 @dataclass(frozen=True)

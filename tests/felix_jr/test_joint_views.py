@@ -81,3 +81,22 @@ def test_the_tip_views_show_the_head_the_tips_at_heights(model, table_z):
     assert max(heights) - min(heights) > 0.08  # a spread of heights
     low = jv.low_poses(model, ARM, REST, 8, table_z, np.random.default_rng(0))
     assert not any(jv.head_sees(model, ARM, model.joint_vector({ARM: p})) for p in low)
+
+
+def test_a_path_may_end_as_near_the_table_as_its_view_but_not_dip_below_both_ends(monkeypatch):
+    """The margin along a move stubbed as a function of the pan (0 at the start, 10 at the end): a view lower than the
+    start is reached the straight way (the left arm's session went around through rest to each one); a path that dips
+    below both ends, or goes in from clear ones, is not clear."""
+    start = {f"{j}.pos": 0.0 for j in jv.SO101_JOINTS}
+    end = {**start, "shoulder_pan.pos": 10.0}
+
+    def clear_with(margin_of_t):
+        monkeypatch.setattr(
+            jv, "table_margin", lambda model, arm, pose, table_z: margin_of_t(pose["shoulder_pan.pos"] / 10)
+        )
+        return jv.path_clear(None, "left", start, end, 0.0)
+
+    assert clear_with(lambda t: -0.001 - 0.02 * t)  # down to a view 2 cm within the clearances: its own depth
+    assert clear_with(lambda t: -0.02 + 0.02 * t)  # up out of one
+    assert not clear_with(lambda t: -0.02 - 0.02 * np.sin(np.pi * t))  # a dip below both ends
+    assert not clear_with(lambda t: 0.01 - 0.03 * np.sin(np.pi * t))  # into the clearances from clear ends

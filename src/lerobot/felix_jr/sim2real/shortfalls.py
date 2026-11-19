@@ -17,7 +17,7 @@ servos ramped to the commanded joints at the harness's speed, settled), its shor
 """
 
 import argparse
-import pickle
+import pickle  # nosec B403: the harness's own sessions, written on this computer
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass

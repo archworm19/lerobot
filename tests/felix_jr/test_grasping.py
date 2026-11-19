@@ -569,7 +569,8 @@ def test_a_gripper_axis_out_of_the_arms_plane_is_skipped_before_any_ik(model):
     tight = GraspSettings(rotation_bounds_deg=(15.0, 10.0, 10.0), arm_plane_tol_deg=15.0)
     found = grasp_candidates(JAR, model, BOWL1_CAPTURE, arms=("right",), settings=tight, n=50)
     skipped = [r for r in found.rejected if r.stage == "arm plane"]
-    assert skipped and all(r.attack is None and float(r.detail.split()[0]) >= 15.0 for r in skipped)  # (rounded)
+    # (the detail's angle rounded)
+    assert skipped and all(r.attack is None and float(r.detail.split()[0]) >= 15.0 for r in skipped)
     assert all(
         _out_of_arm_plane_deg(model, "right", c.claw.root_from_pinch) <= 15.0 for c in found.candidates
     )

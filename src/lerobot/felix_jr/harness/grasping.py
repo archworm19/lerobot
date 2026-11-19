@@ -877,7 +877,8 @@ def first_feasible(
     at = [settings.depth] if depths is None else [float(d) for d in depths]
     targets = [(arm, k, side, d) for arm in arms for k in range(len(grasps)) for side in (0, 1) for d in at]
     order = rng.permutation(len(targets))
-    timed, iks, stages = _Timer(), {}, Counter()
+    timed, stages = _Timer(), Counter[str]()
+    iks: dict[tuple[str, float], ArmIK] = {}
     started = time.perf_counter()
     for tried, index in enumerate(order[:max_tries], start=1):
         arm, k, side, depth = targets[index]

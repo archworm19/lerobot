@@ -3,7 +3,7 @@
   uv run --extra felix_jr --extra felix_jr_sim --extra pyzmq-dep python -m lerobot.felix_jr.calibration.joint_collect \
       tcp://<pi>:5555 --arm right --out-dir <scratch folder> --start-from <calibration.urdf>
       [--board charuco:9x7:0.025:0.018:DICT_4X4_50] [--placements 2] [--arm-views 10] [--head-views 6] [--tip-views 10]
-      [--max-vel 20] [--wrist-tip sweep|click] [--openings 20 35 50] [--resume]
+      [--max-vel 20] [--wrist-tip sweep|click] [--openings 20 35 50] [--resume] [--check]
 
 `docs/calibration_plan.md` (the procedure). Start the server on the Pi with the arm and the head. `--start-from` must
 have the arm's wrist camera's lens (`calibration.wrist_camera`; its pose on the gripper starts at the design's, or a
@@ -45,8 +45,16 @@ only the direction from its camera to the fingertip, the head's the distance alo
 rarely sees the tips (the wrist camera sits between): click them there only if they show. (Until 2026-11-17 these
 were poses low over the table, the fingers pointing down, away from the head: it hardly saw the tips.)
 
+**`--check`: a calibration's check, nothing fitted** (`--start-from` the calibration checked): the same session, its
+safety the same (the sweep's checks, the views' clearances, the moves around through rest), shorter (by default 1
+placement, 6 arm views, 3 head views, 4 tip views), the clicks optional. At the end the calibration is scored as it is
+(`joint_fit.check`): the head and the arm on where the board is at every moment both saw it, the wrist camera's
+fingertips (the sweep's; its drift is reported, not asked about), the head's clicks if any; each against its limit,
+in `check.md` and `check.json`. The model must match the robot (`XleRobotModel.check_robot`): a stale gripper map is
+refused, not replaced.
+
 Keys: `n` next, arrows turn the head (if the board is cut off), `u` undo the last click, `q` stop and
-fit. Everything is saved as you go (`joint_session.json`, `images/`), `--resume` continues. At the end the session
+fit (or score). Everything is saved as you go (`joint_session.json`, `images/`), `--resume` continues. At the end the session
 is fitted (`joint_fit.calibrate`) and `calibration.urdf` and `calibration.md` written to `--out-dir`. The script runs
 in a client session: Ctrl+C or a crash sends the robot to rest.
 """
@@ -64,6 +72,7 @@ import numpy as np
 
 from lerobot.felix_jr.calibration import joint_views as jv
 from lerobot.felix_jr.calibration.boards import PRINTED_BOARD, Board, Detection, board_pose, parse_board
+from lerobot.felix_jr.calibration.controls import INTRINSICS_KEYS, decode_key, head_limits, move_head_to
 from lerobot.felix_jr.calibration.joint_fit import (
     HEAD,
     MOVING,
@@ -75,12 +84,13 @@ from lerobot.felix_jr.calibration.joint_fit import (
     Look,
     TipClick,
     calibrate,
+    check,
+    check_report,
     load_session,
     report,
     save_misclicks,
     save_session,
 )
-from lerobot.felix_jr.calibration.live_view import INTRINSICS_KEYS, decode_key, head_limits, move_head_to
 from lerobot.felix_jr.calibration.xle_robot_model import (
     HEAD_JOINTS,
     GripperMap,
@@ -116,6 +126,9 @@ SWEEP_FAILED_PX = 30.0
 STATUS_HEIGHT = 90
 LIVE_PERIOD_S = 0.2  # the head picture's refresh while placing the board
 CALIBRATION_FILE = "calibration.urdf"
+CHECK_FILE = "check.md"  # `--check`'s report (and `check.json`, its numbers)
+# `--check`'s session, unless given: shorter than a calibration's (placements, arm views, head views, tip views)
+CHECK_VIEWS = (1, 6, 3, 4)
 KEYS = {ord("n"): "next", ord("u"): "undo", ord("q"): "quit", 27: "quit"}
 STILL_DEG, STILL_WINDOW_S, STILL_POLL_S, STILL_TIMEOUT_S = 0.15, 0.4, 0.1, 3.0  # `_wait_still`
 BOARD_MOVED_M = (
@@ -236,8 +249,12 @@ class JointCollect:
         seed: int = 0,
         wrist_tip: str = "sweep",
         openings: tuple[float, ...] = jv.VIEW_OPENINGS,
+        check_only: bool = False,
     ):
-        """Load the start, check it against the robot, and send the arms to rest for the first placement."""
+        """Load the start, check it against the robot, and send the arms to rest for the first placement.
+
+        `check_only`: a calibration's check (the module docstring, `--check`): the start is the calibration checked.
+        """
         self.client, self.arm, self.arm_id, self.out_dir, self.show = client, arm, f"{arm}_arm", out_dir, show
         self.board, self.n_placements, self.n_arm_views = board, placements, arm_views
         self.n_head_views, self.n_tip_views, self.max_vel = head_views, tip_views, max_vel
@@ -247,8 +264,13 @@ class JointCollect:
             raise ValueError(f"wrist_tip: one of {WRIST_TIPS}, not {wrist_tip!r}")
         self.wrist_tip = wrist_tip
         self.openings = tuple(openings)
+        self.check_only = check_only
         (out_dir / "images").mkdir(parents=True, exist_ok=True)
         self.model = XleRobotModel.load(start_from)
+        if (
+            check_only
+        ):  # (its settings the robot's, the gripper maps' too: else the check would score another robot)
+            self.model.check_robot(client)
         head = client.head_state()
         signs = {n: head[n]["sign"] for n in HEAD_JOINTS}
         if self.model.head_signs != signs:
@@ -266,7 +288,7 @@ class JointCollect:
         gripper = motor_record(client.arm_calibration()[self.arm_id]["gripper"])
         held = self.model.gripper_maps.get(arm)
         why = "has no" if held is None else "has a stale" if held.calibration != gripper else ""
-        if self.openings and why:
+        if self.openings and why and not check_only:
             self.model.gripper_maps[arm] = GripperMap.from_servo(gripper)
             print(
                 f"{start_from} {why} {arm} gripper map: the servo's default (the tips meeting at gripper.pos 0); "
@@ -728,7 +750,11 @@ class JointCollect:
             print(
                 f"the fixed fingertip is {self.sweep_drift_px:.1f} px from where the start has it in the wrist picture"
             )
-            if self.sweep_drift_px > SWEEP_DRIFT_PX:
+            if self.sweep_drift_px > SWEEP_DRIFT_PX and self.check_only:
+                print(
+                    "  more than the wrist camera's mount should drift: scored in the check (docs/hardware_risks.md)"
+                )
+            elif self.sweep_drift_px > SWEEP_DRIFT_PX:
                 print(
                     "  the wrist camera has moved on its mount since that calibration (docs/hardware_risks.md): "
                     "if it is loose, tighten it and start again (it may move during the session too)"
@@ -802,6 +828,8 @@ class JointCollect:
         `head_axes`: fit the head joints' axes' tilts too (`XleRobotModel.with_head_axes`).
         """
         save_session(self.session)
+        if self.check_only:
+            return self.score()
         if not self.session.sightings or not self.session.clicks:
             return None
         start = self.model.with_head_axes() if head_axes else self.model
@@ -810,6 +838,23 @@ class JointCollect:
         calibrated.save(path)
         save_misclicks(numbers, self.out_dir)
         path.with_suffix(".md").write_text(report(calibrated, start, numbers))
+        return path
+
+    def score(self) -> Path:
+        """`--check`'s end: the calibration scored as it is (`joint_fit.check`), `check.md` and `check.json` written."""
+        import json
+
+        numbers = check(self.model, [self.session])
+        numbers["sweep_drift_px"] = self.sweep_drift_px
+        extra = []
+        if self.sweep_drift_px is not None:
+            extra.append(
+                f"The gripper sweep's fixed fingertip: {self.sweep_drift_px:.1f} px from where the calibration has it "
+                f"in the wrist picture (the mount drifts within {SWEEP_DRIFT_PX:g} px; `docs/hardware_risks.md`)."
+            )
+        path = self.out_dir / CHECK_FILE
+        path.write_text(check_report(numbers, extra))
+        path.with_suffix(".json").write_text(json.dumps(numbers, indent=1))
         return path
 
     # ---- showing -----------------------------------------------------------------------------------------------
@@ -901,16 +946,23 @@ def main() -> None:
         "--start-from", type=Path, required=True, help="a calibration.urdf with the arm's wrist camera"
     )
     parser.add_argument("--board", default=PRINTED_BOARD, help="the board (boards.parse_board)")
-    parser.add_argument("--placements", type=int, default=2)
-    parser.add_argument("--arm-views", type=int, default=10, help="arm views per placement")
-    parser.add_argument("--head-views", type=int, default=6, help="head views per placement, the arms folded")
+    parser.add_argument("--placements", type=int, default=None, help="board placements (2; --check: 1)")
+    parser.add_argument(
+        "--arm-views", type=int, default=None, help="arm views per placement (10; --check: 6)"
+    )
+    parser.add_argument(
+        "--head-views",
+        type=int,
+        default=None,
+        help="head views per placement, the arms folded (6; --check: 3)",
+    )
     parser.add_argument(
         "--tip-views",
         "--low-views",
         dest="tip_views",
         type=int,
-        default=10,
-        help="views of the fingertips for the head (joint_views.head_views)",
+        default=None,
+        help="views of the fingertips for the head (joint_views.head_views; 10; --check: 4)",
     )
     parser.add_argument("--max-vel", type=float, default=20.0, help="arm speed limit, deg/s (20)")
     parser.add_argument("--resume", action="store_true")
@@ -932,9 +984,22 @@ def main() -> None:
         action="store_true",
         help="fit the head's pan and tilt axes' tilts too (4 more parameters)",
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="check --start-from on the robot: nothing fitted, the clicks optional (the module docstring)",
+    )
     args = parser.parse_args()
+    defaults = CHECK_VIEWS if args.check else (2, 10, 6, 10)
+    for name, default in zip(("placements", "arm_views", "head_views", "tip_views"), defaults, strict=True):
+        if getattr(args, name) is None:
+            setattr(args, name, default)
 
-    window = "joint calibration (n next; click each fingertip in its face's pane; q fit and quit)"
+    window = (
+        "calibration check (n next; clicks optional; q score and quit)"
+        if args.check
+        else "joint calibration (n next; click each fingertip in its face's pane; q fit and quit)"
+    )
     pending: list[tuple[int, int]] = []
 
     def on_mouse(event: int, x: int, y: int, flags: int, param: Any) -> None:
@@ -962,6 +1027,7 @@ def main() -> None:
             resume=args.resume,
             wrist_tip=args.wrist_tip,
             openings=tuple(args.openings),
+            check_only=args.check,
         )
         if session.sweep_pending and not session.sweep_first():
             client.home(max_vel=args.max_vel)
@@ -988,7 +1054,10 @@ def main() -> None:
         client.home(max_vel=args.max_vel)
     print(f"saved to {args.out_dir / SESSION_FILE}")
     path = session.finish(head_axes=args.head_axes)
-    if path is not None:
+    if path is not None and args.check:
+        print(path.read_text())
+        print(f"Wrote {path} and {path.with_suffix('.json')}")
+    elif path is not None:
         print(path.with_suffix(".md").read_text())
         print(f"Wrote {path} and {path.with_suffix('.md')}")
 

@@ -253,7 +253,8 @@ class GripTest:
                 return None
             values.append(value)
         depth = self.depth_mm if self.depth_mm is not None else values[0] / 2 + 1000.0 * DEPTH_MARGIN_M
-        return Bottle(label or (last.label if last else "bottle"), *values, depth)
+        diameter, height, mass = values
+        return Bottle(label or (last.label if last else "bottle"), diameter, height, mass, depth)
 
     def bottle_outline(self, bottle: Bottle, q: np.ndarray) -> dict[str, np.ndarray]:
         """Where the bottle should stand, in the wrist picture at `q` (raw pixels; NaN where behind the camera).

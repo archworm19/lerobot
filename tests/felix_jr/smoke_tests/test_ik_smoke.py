@@ -302,7 +302,8 @@ def test_the_plan_is_solved_as_recorded_and_prepares_without_jumps(model, plan):
     ]
     opening, closing = grips[0].targets["gripper.pos"], grips[1].targets["gripper.pos"]
     assert opening == pytest.approx(GRIPPER.pos_for(model.opening_for_width("right", 0.03)))
-    assert 0.0 <= closing < opening < 25.0  # not pen1's guessed 60-80 (the pen: closed to the tips meeting, 0)
+    # not pen1's guessed 60-80 (the pen: closed to the tips meeting, 0)
+    assert 0.0 <= closing < opening < 25.0
 
 
 # ---- 6. carrying the pen --------------------------------------------------------------------------------------------

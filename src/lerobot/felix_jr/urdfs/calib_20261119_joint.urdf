@@ -93,11 +93,11 @@
   <joint name="fixed_Base" type="fixed">
     <parent link="chassis" />
     <child link="Base" />
-    <origin xyz="-0.0844085768139878 -0.0880307321299656 0.393042928772885" rpy="0.0323728532748007 0.0258173242363515 -0.06703018810606" /></joint>
+    <origin xyz="-0.0858240639969066 -0.0880001656118934 0.393911329205568" rpy="0.0211027084636011 0.0181298107189192 -0.0678592889290526" /></joint>
   <joint name="fixed_Base_2" type="fixed">
     <parent link="chassis" />
     <child link="Base_2" />
-    <origin xyz="-0.11546998592278 0.108543104768283 0.394685495646498" rpy="-0.0138619252282812 -0.0254837678450664 3.04679427457902" /></joint>
+    <origin xyz="-0.117842346232284 0.0983682417417701 0.395067769047603" rpy="-0.013716052574345 -0.0146842325582014 3.0822910708489" /></joint>
   <joint name="fixed_top_base_link" type="fixed">
     <parent link="chassis" />
     <child link="top_base_link" />
@@ -109,18 +109,18 @@
     <axis xyz="0 0 1" />
     <limit lower="-3.2" upper="3.2" effort="0" velocity="0" />
     <dynamics damping="0.6" friction="0.052" />
-  <origin xyz="-0.0916683420886217 0.000650742864924787 0.323141185663773" rpy="0 -0 0.0133607647199635" /></joint>
+  <origin xyz="-0.0924788923781266 -0.00460732822962846 0.323454476959756" rpy="0 -0 0.0589342325516221" /></joint>
   <joint name="head_tilt_joint" type="revolute">
     <parent link="head_pan_link" />
     <child link="head_tilt_link" />
     <axis xyz="0 1 0" />
     <limit lower="-0.76" upper="1.45" effort="0" velocity="0" />
     <dynamics damping="0.6" friction="0.052" />
-  <origin xyz="0.0158895573659584 -0.00999864078798933 0.0982911856637735" rpy="0 0.509211945545943 -3.14159260717959" /></joint>
+  <origin xyz="0.0118599093954439 -0.00925328150087236 0.098604458030828" rpy="0 0.517252697876788 -3.14159260717959" /></joint>
   <joint name="fixed_head_camera_link" type="fixed">
     <parent link="head_tilt_link" />
     <child link="head_camera_link" />
-    <origin xyz="0.0148483747230107 0.0269968900286762 0.0484709974450731" rpy="0.00435098612748645 0.090149049464337 0.020101451659677" /></joint>
+    <origin xyz="0.0147495231968358 0.0253199464782038 0.0488477512367451" rpy="0.00754479944840678 0.0915370589109266 0.0264862076406674" /></joint>
   <link name="left_base_link">
     <inertial>
       <origin xyz="0.0137179 -5.19711e-05 0.0334843" rpy="0 0 0" />
@@ -181,44 +181,43 @@
     <parent link="left_gripper_link" />
     <child link="left_gripper_frame_link" />
     <axis xyz="0 0 0" />
-  <origin xyz="-0.00638310586404021 -0.0039635328411154 -0.102366739344573" rpy="3.14159265358979 2.65358979335584e-06 3.14159265358979" /></joint>
+  <origin xyz="-0.00763814031173267 -0.00465196483733502 -0.103586662338872" rpy="3.14159265358979 2.65358979335584e-06 3.14159265358979" /></joint>
   <joint name="left_gripper" type="revolute">
-    <origin xyz="0.0173886825712952 0.0188000062678167 -0.02510636189714" rpy="1.5708 -5.24283998437625e-08 -1.33226762955019e-15" />
     <parent link="left_gripper_link" />
     <child link="left_moving_jaw_so101_v1_link" />
     <axis xyz="0 0 1" />
     <limit effort="10" velocity="10" lower="-0.174533" upper="1.74533" />
-  </joint>
+  <origin xyz="0.0220200956333064 0.0188000062678167 -0.0250645488585893" rpy="1.5708 -5.24283998437625e-08 -1.33226762955019e-15" /></joint>
   <joint name="left_wrist_roll" type="revolute">
     <parent link="left_wrist_link" />
     <child link="left_gripper_link" />
     <axis xyz="0 0 1" />
     <limit effort="10" velocity="10" lower="-2.74385" upper="2.84121" />
-  <origin xyz="-0.00107813394184989 -0.0613649550070542 0.0177553213662843" rpy="1.57080000553087 0.0733144701110457 3.14159009072386" /></joint>
+  <origin xyz="0.000781572692625874 -0.0615541461085861 0.0179847398528317" rpy="1.57080001659363 0.106600458279072 3.14159021385053" /></joint>
   <joint name="left_wrist_flex" type="revolute">
     <parent link="left_lower_arm_link" />
     <child link="left_wrist_link" />
     <axis xyz="0 0 1" />
     <limit effort="10" velocity="10" lower="-1.65806" upper="1.65806" />
-  <origin xyz="-0.133357261420046 0.00800596930707175 -0.000344678483465748" rpy="3.99680288865056e-15 4.44089209850063e-16 -1.52286398330041" /></joint>
+  <origin xyz="-0.1354229332551 0.00786042392386175 -0.000115260131943415" rpy="3.99680288865056e-15 4.44089209850063e-16 -1.5282107481121" /></joint>
   <joint name="left_elbow_flex" type="revolute">
     <parent link="left_upper_arm_link" />
     <child link="left_lower_arm_link" />
     <axis xyz="0 0 1" />
     <limit effort="10" velocity="10" lower="-1.69" upper="1.69" />
-  <origin xyz="-0.113686902803441 -0.0306658273213567 -0.000344678508756578" rpy="-4.46601221298471e-16 8.34961295749518e-16 1.47376621841072" /></joint>
+  <origin xyz="-0.114473606807883 -0.0299063535880063 -0.000115260193094486" rpy="-4.20400135076856e-16 8.48455504250141e-16 1.50489216515523" /></joint>
   <joint name="left_shoulder_lift" type="revolute">
     <parent link="left_shoulder_link" />
     <child link="left_upper_arm_link" />
     <axis xyz="0 0 1" />
     <limit effort="10" velocity="10" lower="-1.74533" upper="1.74533" />
-  <origin xyz="-0.0311576558413308 -0.0186224757224295 -0.0541518884895224" rpy="-1.5707963256771 -1.5587255450562 -3.67432282066815e-06" /></joint>
+  <origin xyz="-0.0311775397783743 -0.0183930573135915 -0.0541709344260803" rpy="1.57079632599064 -1.55401928938156 3.14158898118883" /></joint>
   <joint name="left_shoulder_pan" type="revolute">
     <parent link="left_base_link" />
     <child link="left_shoulder_link" />
     <axis xyz="0 0 1" />
     <limit effort="10" velocity="10" lower="-1.91986" upper="1.91986" />
-  <origin xyz="0.0387396771879935 -0.000390083898441551 0.0623518725509635" rpy="3.14159000019721 -3.23512582699807e-08 3.129403498236" /></joint>
+  <origin xyz="0.0387655413158845 -0.00039132811975692 0.0623709021709128" rpy="3.14159000018546 -3.13725565041339e-08 3.12977234662823" /></joint>
   <joint name="left_arm_mount" type="fixed">
     <parent link="Base" />
     <child link="left_base_link" />
@@ -284,44 +283,43 @@
     <parent link="right_gripper_link" />
     <child link="right_gripper_frame_link" />
     <axis xyz="0 0 0" />
-  <origin xyz="-0.0079785878232538 -0.00419899836597652 -0.100623860363587" rpy="3.14159265358979 2.65358979335584e-06 3.14159265358979" /></joint>
+  <origin xyz="-0.00911810641077761 -0.00500526502705236 -0.101490962834908" rpy="3.14159265358979 2.65358979335584e-06 3.14159265358979" /></joint>
   <joint name="right_gripper" type="revolute">
-    <origin xyz="0.0170256081084893 0.0187999941235231 -0.0218001774680883" rpy="1.5708 -5.24283998437625e-08 -1.33226762955019e-15" />
     <parent link="right_gripper_link" />
     <child link="right_moving_jaw_so101_v1_link" />
     <axis xyz="0 0 1" />
     <limit effort="10" velocity="10" lower="-0.174533" upper="1.74533" />
-  </joint>
+  <origin xyz="0.0197706228120471 0.0187999941235231 -0.0199687224416867" rpy="1.5708 -5.24283998437625e-08 -1.33226762955019e-15" /></joint>
   <joint name="right_wrist_roll" type="revolute">
     <parent link="right_wrist_link" />
     <child link="right_gripper_link" />
     <axis xyz="0 0 1" />
     <limit effort="10" velocity="10" lower="-2.74385" upper="2.84121" />
-  <origin xyz="0.00156589275287063 -0.0612560277523201 0.0192423533613617" rpy="1.57079999803116 0.036028628944623 3.14158995350182" /></joint>
+  <origin xyz="0.0015919755227627 -0.061130757532886 0.0182783364092831" rpy="1.57080000297106 0.0631270022118267 3.1415900531727" /></joint>
   <joint name="right_wrist_flex" type="revolute">
     <parent link="right_lower_arm_link" />
     <child link="right_wrist_link" />
     <axis xyz="0 0 1" />
     <limit effort="10" velocity="10" lower="-1.65806" upper="1.65806" />
-  <origin xyz="-0.133374674272196 0.00650874674733786 0.00114235325118127" rpy="3.99680288865056e-15 8.88178419700125e-16 -1.58441814289111" /></joint>
+  <origin xyz="-0.134069572270279 0.00652712402009349 0.000178339033554862" rpy="3.99680288865056e-15 8.88178419700125e-16 -1.58476499159928" /></joint>
   <joint name="right_elbow_flex" type="revolute">
     <parent link="right_upper_arm_link" />
     <child link="right_lower_arm_link" />
     <axis xyz="0 0 1" />
     <limit effort="10" velocity="10" lower="-1.69" upper="1.69" />
-  <origin xyz="-0.111055132056944 -0.0297558655009811 0.00114235327417914" rpy="-4.23894941391318e-16 8.46714884083096e-16 1.50076892021513" /></joint>
+  <origin xyz="-0.111756897335362 -0.0303402967613192 0.000178339192737788" rpy="-4.47813847718143e-16 8.34311556947926e-16 1.47231333884773" /></joint>
   <joint name="right_shoulder_lift" type="revolute">
     <parent link="right_shoulder_link" />
     <child link="right_upper_arm_link" />
     <axis xyz="0 0 1" />
     <limit effort="10" velocity="10" lower="-1.74533" upper="1.74533" />
-  <origin xyz="-0.0310264667195638 -0.017135444488266 -0.0541867485344946" rpy="-1.5707963227258 -1.56748050526632 -3.67727417938113e-06" /></joint>
+  <origin xyz="-0.0295328838296311 -0.0180994644681772 -0.0542012111043601" rpy="-1.57079632601807 -1.55342681151521 -3.67398181033707e-06" /></joint>
   <joint name="right_shoulder_pan" type="revolute">
     <parent link="right_base_link" />
     <child link="right_shoulder_link" />
     <axis xyz="0 0 1" />
     <limit effort="10" velocity="10" lower="-1.91986" upper="1.91986" />
-  <origin xyz="0.0392870264420687 4.38683557204856e-05 0.062386806687876" rpy="3.14159000052057 -5.25591572472652e-08 3.12178719870458" /></joint>
+  <origin xyz="0.0393296533782426 0.000208489226671898 0.062401267344385" rpy="3.14159000027498 -3.82009132641733e-08 3.12719887220557" /></joint>
   <joint name="right_arm_mount" type="fixed">
     <parent link="Base_2" />
     <child link="right_base_link" />
@@ -333,7 +331,7 @@
     <child link="head_camera_optical" />
     <origin xyz="0 0 0" rpy="-1.5707963267949 0 -1.5707963267949" />
   </joint>
-<felix_calibration version="1">
+<link name="left_wrist_camera_optical" /><joint name="left_wrist_camera_joint" type="fixed"><parent link="left_gripper_link" /><child link="left_wrist_camera_optical" /><origin xyz="0.00448865233933834 0.0752812247428273 -0.00960391552476909" rpy="2.68602341855936 -0.0153681413435676 0.00218389236822027" /></joint><link name="right_wrist_camera_optical" /><joint name="right_wrist_camera_joint" type="fixed"><parent link="right_gripper_link" /><child link="right_wrist_camera_optical" /><origin xyz="0.00272030872936364 0.0767264036754852 -0.0046213534359342" rpy="2.69784946632606 0.0217628293674571 0.0123941950062601" /></joint><link name="left_fixed_finger" /><joint name="left_fixed_finger_joint" type="fixed"><parent link="left_gripper_frame_link" /><child link="left_fixed_finger" /><origin xyz="0 0 0" rpy="-1.5707963267949 1.51843644923507 2.49349781446389e-15" /></joint><link name="left_moving_finger" /><joint name="left_moving_finger_joint" type="fixed"><parent link="left_gripper_frame_link" /><child link="left_moving_finger" /><origin xyz="0 0 0" rpy="-1.5707963267949 1.28281700021583 3.14159265358979" /></joint><link name="right_fixed_finger" /><joint name="right_fixed_finger_joint" type="fixed"><parent link="right_gripper_frame_link" /><child link="right_fixed_finger" /><origin xyz="0 0 0" rpy="-1.5707963267949 1.56206968053493 -2.66453525910038e-15" /></joint><link name="right_moving_finger" /><joint name="right_moving_finger_joint" type="fixed"><parent link="right_gripper_frame_link" /><child link="right_moving_finger" /><origin xyz="0 0 0" rpy="-1.5707963267949 1.25663706143591 3.14159265358979" /></joint><felix_calibration version="1">
 {
  "version": 1,
  "head_signs": {
@@ -359,7 +357,7 @@
  },
  "gripper_maps": {
   "right": {
-   "pos_closed": -1.6480873245372656,
+   "pos_closed": -0.6115203966704075,
    "deg_per_unit": 1.27177734375,
    "calibration": {
     "drive_mode": 0,
@@ -394,11 +392,10 @@
     ]
    ],
    "radius_m": 0.08546270867157496,
-   "finger_mount_deg": -18.0,
-   "fixed_finger_mount_deg": 0.5
+   "default": false
   },
   "left": {
-   "pos_closed": -0.37293474512009767,
+   "pos_closed": -0.5843263214598852,
    "deg_per_unit": 1.262109375,
    "calibration": {
     "drive_mode": 0,
@@ -433,8 +430,7 @@
     ]
    ],
    "radius_m": 0.08559902560302637,
-   "finger_mount_deg": -16.5,
-   "fixed_finger_mount_deg": 3.0
+   "default": false
   }
  },
  "arm_calibration": {
@@ -541,35 +537,7 @@
     0.0
    ],
    "rms_px": 0.5986161736537272,
-   "n_views": 117,
-   "gripper_from_camera": [
-    [
-     0.999366310361788,
-     -0.03512756479779051,
-     0.005747338970612137,
-     0.006181154247161299
-    ],
-    [
-     -0.02867897224154364,
-     -0.8902724849121401,
-     -0.4545243878600269,
-     0.07616013545286644
-    ],
-    [
-     0.021083032633728408,
-     0.4540715326903245,
-     -0.890715750919015,
-     -0.009550439156782487
-    ],
-    [
-     0.0,
-     0.0,
-     0.0,
-     1.0
-    ]
-   ],
-   "extrinsics_rms_px": 3.5804471736275842,
-   "extrinsics_views": 9
+   "n_views": 117
   },
   "right": {
    "width": 640,
@@ -596,35 +564,7 @@
     0.0
    ],
    "rms_px": 0.7086997728189971,
-   "n_views": 96,
-   "gripper_from_camera": [
-    [
-     0.9998320516864649,
-     -0.01004914695250573,
-     -0.015325895274375313,
-     0.005358413697784899
-    ],
-    [
-     -0.015664085728772717,
-     -0.9026918394540611,
-     -0.43000241790171995,
-     0.07714754299295486
-    ],
-    [
-     -0.009513403109078989,
-     0.4301702658582654,
-     -0.9026976445813479,
-     -0.005225863290827317
-    ],
-    [
-     0.0,
-     0.0,
-     0.0,
-     1.0
-    ]
-   ],
-   "extrinsics_rms_px": 3.4576597281501167,
-   "extrinsics_views": 9
+   "n_views": 96
   }
  },
  "parameters": [
@@ -1173,87 +1113,215 @@
    "group": "tip",
    "mean": 0.0,
    "arm": "right"
+  },
+  {
+   "name": "pos:left_wrist_camera_joint:x",
+   "sigma": 0.015,
+   "group": "wrist camera",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_wrist_camera_joint:y",
+   "sigma": 0.015,
+   "group": "wrist camera",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:left_wrist_camera_joint:z",
+   "sigma": 0.015,
+   "group": "wrist camera",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "rot:left_wrist_camera_joint:x",
+   "sigma": 0.08726646259971647,
+   "group": "wrist camera",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "rot:left_wrist_camera_joint:y",
+   "sigma": 0.08726646259971647,
+   "group": "wrist camera",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "rot:left_wrist_camera_joint:z",
+   "sigma": 0.08726646259971647,
+   "group": "wrist camera",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "pos:right_wrist_camera_joint:x",
+   "sigma": 0.015,
+   "group": "wrist camera",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_wrist_camera_joint:y",
+   "sigma": 0.015,
+   "group": "wrist camera",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "pos:right_wrist_camera_joint:z",
+   "sigma": 0.015,
+   "group": "wrist camera",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "rot:right_wrist_camera_joint:x",
+   "sigma": 0.08726646259971647,
+   "group": "wrist camera",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "rot:right_wrist_camera_joint:y",
+   "sigma": 0.08726646259971647,
+   "group": "wrist camera",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "rot:right_wrist_camera_joint:z",
+   "sigma": 0.08726646259971647,
+   "group": "wrist camera",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "rot:right_fixed_finger_joint:z",
+   "sigma": 0.08726646259971647,
+   "group": "finger",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "rot:right_moving_finger_joint:z",
+   "sigma": 0.3490658503988659,
+   "group": "finger",
+   "mean": 0.0,
+   "arm": "right"
+  },
+  {
+   "name": "rot:left_fixed_finger_joint:z",
+   "sigma": 0.08726646259971647,
+   "group": "finger",
+   "mean": 0.0,
+   "arm": "left"
+  },
+  {
+   "name": "rot:left_moving_finger_joint:z",
+   "sigma": 0.3490658503988659,
+   "group": "finger",
+   "mean": 0.0,
+   "arm": "left"
   }
  ],
  "estimates": [
-  0.013360764719963494,
-  0.509211945545943,
-  0.01133165791137824,
-  0.0006507428649247868,
-  0.00014118566377315116,
-  0.014889557365958398,
-  -0.011998640787989326,
-  0.00014118566377351147,
-  -0.010151625276989333,
-  0.026996890028676158,
-  0.018470997445073124,
-  0.0034418295527639054,
-  0.09018954215060752,
-  0.01989168591207403,
-  0.005591423186012199,
-  0.02196926787003443,
-  -0.0019570712271154123,
-  0.033224205094022574,
-  0.02472054124157279,
-  -0.067438500757438,
-  0.012191808943626694,
-  -9.562281200649446e-05,
-  -0.0003900749218715511,
-  -4.812744903653881e-05,
-  0.012074454943802632,
-  -0.0007584558413307788,
-  -0.0003446757224294726,
-  4.8111510477556426e-05,
-  -0.09703378158928366,
-  -0.0011169028034412876,
-  -0.0026658273213566886,
-  -0.0003446785087567518,
-  0.04793601669959262,
-  0.0015427385799540892,
-  0.0028059693070717462,
-  -0.00034467848346578445,
-  -0.02463497011121217,
-  -0.00107813394184995,
-  -0.0002649550070541998,
-  -0.0003446786337157319,
-  0.0015168941359597953,
-  -0.003745411841115401,
-  -0.0042393393445728286,
-  -0.025469985922780478,
-  -0.0014568952317165918,
-  -0.0003145043535022917,
-  -0.015058704795938235,
-  -0.02480729786205336,
-  -0.09496840236012723,
-  0.019808108475076244,
-  0.00045172644206866244,
-  4.387733229048563e-05,
-  -1.319331212398552e-05,
-  0.003319494733684061,
-  -0.0006272667195638059,
-  0.0011423555117339602,
-  1.3251465505385136e-05,
-  -0.07003107978487093,
-  0.0015148679430562557,
-  -0.0017558655009811033,
-  0.0011423532741789675,
-  -0.013618142891111667,
-  0.0015253257278036397,
-  0.0013087467473378623,
-  0.0011423532511812369,
-  0.012650871055462302,
-  0.0015658927528705716,
-  -0.00015602775232014503,
-  0.001142353361361749,
-  -7.858782325379833e-05,
-  -0.003980877365976518,
-  -0.00249646036358714,
-  -0.002811317428704764,
+  0.05893423255162206,
+  0.5172526978767876,
+  0.010521107621873397,
+  -0.004607328229628455,
+  0.00045447695975553957,
+  0.01085990939544389,
+  -0.011253281500872363,
+  0.000454458030828008,
+  -0.01025047680316421,
+  0.025319946478203757,
+  0.018847751236745057,
+  0.006326855810457856,
+  0.09163104870984749,
+  0.026122270870289097,
+  0.004175936003093414,
+  0.021999834388106633,
+  -0.0010886707944315547,
+  0.021709170547157264,
+  0.0174062113643797,
+  -0.06804620552066257,
+  0.011822960551396299,
+  -6.97586841155551e-05,
+  -0.0003913191431869201,
+  -2.9097829087244408e-05,
+  -0.016773364208231025,
+  -0.0007783397783742691,
+  -0.000115257313591524,
+  2.9065573919729053e-05,
+  -0.06590783484477106,
+  -0.001903606807883025,
+  -0.0019063535880063137,
+  -0.00011526019309465965,
+  0.04258925188790107,
+  -0.0005229332551003012,
+  0.0026604239238617504,
+  -0.00011526013194345125,
+  -0.057920958279464536,
+  0.0007815726926258187,
+  -0.0004541461085860915,
+  -0.00011526014716833659,
+  0.00026185968826733394,
+  -0.004433843837335025,
+  -0.005459262338872417,
+  -0.02784234623228411,
+  -0.011631758258229919,
+  6.776904760326968e-05,
+  -0.014147185977870146,
+  -0.014273021066300306,
+  -0.05940033853601619,
+  0.014396434974066124,
+  0.0004943533782425587,
+  0.00020849820324189756,
+  1.2673443850145792e-06,
+  0.017373188484794442,
+  0.0008663161703689258,
+  0.00017833553182275018,
+  -1.2111043601172004e-06,
+  -0.09848666115226892,
+  0.0008131026646381475,
+  -0.002340296761319174,
+  0.0001783391927376141,
+  -0.013964991599279606,
+  0.000830427729720637,
+  0.0013271240200934875,
+  0.00017833903355482606,
+  -0.014447502211924191,
+  0.0015919755227626444,
+  -3.075753288599127e-05,
+  0.00017833640928313925,
+  -0.0012181064107776095,
+  -0.004787144027052362,
+  -0.0033635628349078114,
+  0.0018200956333064133,
   6.2678166910509445e-09,
-  -0.0017063618971400385,
-  -0.0031743918915107276,
+  -0.0016645488585893355,
+  -0.0004293771879528801,
   -5.876476895581613e-09,
-  0.001599822531911653
+  0.003431277558313257,
+  0.0019884590470424317,
+  0.008197353343191166,
+  -0.0026077647262068003,
+  -0.01794838699347231,
+  0.014812884048324123,
+  0.00466602751932663,
+  0.00022011543706772563,
+  0.009642532275849146,
+  0.0023747973626280896,
+  -0.00627415994910262,
+  -0.014388398893896572,
+  -0.020494234816564105,
+  -0.008726646259971648,
+  -0.3141592653589793,
+  -0.05235987755982989,
+  -0.2879793265790644
  ],
  "covariance": null,
  "fit_info": {
@@ -1282,43 +1350,707 @@
   },
   "joint_fit": {
    "sessions": [
-    "/Users/ztcecere/CalibrationScratch2/joint_right_full4_auto"
+    "src/lerobot/felix_jr/calibration/scratch/joint_right_1117b",
+    "src/lerobot/felix_jr/calibration/scratch/joint_left_1119_2"
    ],
    "sightings": {
-    "head": 31,
-    "right": 19
+    "head": 62,
+    "left": 14,
+    "right": 14
    },
    "clicks": {
-    "head": 8,
-    "right": 27
+    "head": 40,
+    "left": 10,
+    "right": 10
    },
    "rms_px": {
-    "head board": 0.43830347069865444,
-    "right board": 0.28401156584940024,
-    "right click": 0.06163428979005095,
-    "head click": 1.8053559474770213
+    "head board": 0.45778184263901495,
+    "right board": 0.26158737410275296,
+    "left board": 0.2633160913822361,
+    "right click": 1.221777542931185,
+    "head click": 1.6389553297427295,
+    "left click": 0.9325349267096101
    },
+   "misclicks": [],
+   "misclicks_kept": [],
    "held_out": {
-    "moments": 3,
+    "moments": 5,
     "left_out": 1,
     "before": {
-     "mm": 4.700685310448424,
-     "deg": 0.8817595976098285
+     "mm": 11.069567818603076,
+     "deg": 1.9010405788007352
     },
     "after": {
-     "mm": 5.316123949145281,
-     "deg": 0.9516366934716374
+     "mm": 3.6274939916544717,
+     "deg": 0.7465557504575887
     }
    },
-   "thickness_mm": 10.519304181549906,
+   "thickness_mm": 10.095704558686915,
+   "openings_deg": {
+    "left": 0.26679929029447397,
+    "right": -0.029966766166494418
+   },
    "camera_moved": {
+    "left": {
+     "mm": 1.9078538901444855,
+     "deg": 2.03028670579014
+    },
     "right": {
-     "mm": 1.2403676971377657,
-     "deg": 0.6879441784614626
+     "mm": 0.4938969790721625,
+     "deg": 0.07496260354108261
     }
    },
-   "nfev": 53,
-   "message": "`ftol` termination condition is satisfied."
+   "nfev": 48,
+   "message": "`ftol` termination condition is satisfied.",
+   "uncertainty": {
+    "sd": {
+     "zero:head_pan_joint": {
+      "sd": 3.190508300363162,
+      "prior": 20.0,
+      "unit": "deg"
+     },
+     "zero:head_tilt_joint": {
+      "sd": 4.453393837707291,
+      "prior": 20.0,
+      "unit": "deg"
+     },
+     "pos:head_pan_joint:x": {
+      "sd": 7.331141214900714,
+      "prior": 10.0,
+      "unit": "mm"
+     },
+     "pos:head_pan_joint:y": {
+      "sd": 7.314583475872047,
+      "prior": 10.0,
+      "unit": "mm"
+     },
+     "pos:head_pan_joint:z": {
+      "sd": 8.275010899890114,
+      "prior": 10.0,
+      "unit": "mm"
+     },
+     "pos:head_tilt_joint:x": {
+      "sd": 0.6632276949679562,
+      "prior": 10.0,
+      "unit": "mm"
+     },
+     "pos:head_tilt_joint:y": {
+      "sd": 8.321008856109769,
+      "prior": 10.0,
+      "unit": "mm"
+     },
+     "pos:head_tilt_joint:z": {
+      "sd": 8.275010892691753,
+      "prior": 10.0,
+      "unit": "mm"
+     },
+     "pos:fixed_head_camera_link:x": {
+      "sd": 3.798436815194805,
+      "prior": 10.0,
+      "unit": "mm"
+     },
+     "pos:fixed_head_camera_link:y": {
+      "sd": 8.323063563777652,
+      "prior": 15.0,
+      "unit": "mm"
+     },
+     "pos:fixed_head_camera_link:z": {
+      "sd": 1.2696537447110958,
+      "prior": 10.0,
+      "unit": "mm"
+     },
+     "rot:fixed_head_camera_link:x": {
+      "sd": 0.05965175446723184,
+      "prior": 5.0,
+      "unit": "deg"
+     },
+     "rot:fixed_head_camera_link:y": {
+      "sd": 4.452675367745833,
+      "prior": 5.0,
+      "unit": "deg"
+     },
+     "rot:fixed_head_camera_link:z": {
+      "sd": 0.038433922380987584,
+      "prior": 5.0,
+      "unit": "deg"
+     },
+     "pos:fixed_Base:x": {
+      "sd": 9.16332043519492,
+      "prior": 15.0,
+      "unit": "mm"
+     },
+     "pos:fixed_Base:y": {
+      "sd": 7.49322615974703,
+      "prior": 15.0,
+      "unit": "mm"
+     },
+     "pos:fixed_Base:z": {
+      "sd": 8.765936966767057,
+      "prior": 15.0,
+      "unit": "mm"
+     },
+     "rot:fixed_Base:x": {
+      "sd": 0.1391803361395396,
+      "prior": 5.0,
+      "unit": "deg"
+     },
+     "rot:fixed_Base:y": {
+      "sd": 0.22413959844820439,
+      "prior": 5.0,
+      "unit": "deg"
+     },
+     "rot:fixed_Base:z": {
+      "sd": 3.377194412902073,
+      "prior": 5.0,
+      "unit": "deg"
+     },
+     "zero:left_shoulder_pan": {
+      "sd": 1.8820098731976074,
+      "prior": 2.0,
+      "unit": "deg"
+     },
+     "pos:left_shoulder_pan:x": {
+      "sd": 1.988819614155467,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:left_shoulder_pan:y": {
+      "sd": 1.9866208055059529,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:left_shoulder_pan:z": {
+      "sd": 1.9882580283974598,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "zero:left_shoulder_lift": {
+      "sd": 0.8543432985440931,
+      "prior": 2.0,
+      "unit": "deg"
+     },
+     "pos:left_shoulder_lift:x": {
+      "sd": 1.0015082407040794,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:left_shoulder_lift:y": {
+      "sd": 1.7413545273453943,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:left_shoulder_lift:z": {
+      "sd": 1.988258014255463,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "zero:left_elbow_flex": {
+      "sd": 1.0400403251065367,
+      "prior": 2.0,
+      "unit": "deg"
+     },
+     "pos:left_elbow_flex:x": {
+      "sd": 0.5626370509515408,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:left_elbow_flex:y": {
+      "sd": 1.6244999402978422,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:left_elbow_flex:z": {
+      "sd": 1.7413545490340523,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "zero:left_wrist_flex": {
+      "sd": 0.7516274790930171,
+      "prior": 2.0,
+      "unit": "deg"
+     },
+     "pos:left_wrist_flex:x": {
+      "sd": 0.6573438968481442,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:left_wrist_flex:y": {
+      "sd": 1.7383995343535068,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:left_wrist_flex:z": {
+      "sd": 1.7413545485292337,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "zero:left_wrist_roll": {
+      "sd": 0.4646254934099705,
+      "prior": 2.0,
+      "unit": "deg"
+     },
+     "pos:left_wrist_roll:x": {
+      "sd": 0.6345125865786673,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:left_wrist_roll:y": {
+      "sd": 1.8914161206421343,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:left_wrist_roll:z": {
+      "sd": 1.741354548988208,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:left_gripper_frame_joint:x": {
+      "sd": 0.38399353663318814,
+      "prior": 8.0,
+      "unit": "mm"
+     },
+     "pos:left_gripper_frame_joint:y": {
+      "sd": 0.7495601882210612,
+      "prior": 8.0,
+      "unit": "mm"
+     },
+     "pos:left_gripper_frame_joint:z": {
+      "sd": 2.0361498832118596,
+      "prior": 8.0,
+      "unit": "mm"
+     },
+     "pos:fixed_Base_2:x": {
+      "sd": 9.39764638556566,
+      "prior": 15.0,
+      "unit": "mm"
+     },
+     "pos:fixed_Base_2:y": {
+      "sd": 7.557832686997818,
+      "prior": 15.0,
+      "unit": "mm"
+     },
+     "pos:fixed_Base_2:z": {
+      "sd": 8.789654184369533,
+      "prior": 15.0,
+      "unit": "mm"
+     },
+     "rot:fixed_Base_2:x": {
+      "sd": 0.15481709040899014,
+      "prior": 5.0,
+      "unit": "deg"
+     },
+     "rot:fixed_Base_2:y": {
+      "sd": 0.27170315166049663,
+      "prior": 5.0,
+      "unit": "deg"
+     },
+     "rot:fixed_Base_2:z": {
+      "sd": 3.357992650628236,
+      "prior": 5.0,
+      "unit": "deg"
+     },
+     "zero:right_shoulder_pan": {
+      "sd": 1.8941527795395767,
+      "prior": 2.0,
+      "unit": "deg"
+     },
+     "pos:right_shoulder_pan:x": {
+      "sd": 1.9891673540592454,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:right_shoulder_pan:y": {
+      "sd": 1.9866952131292543,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:right_shoulder_pan:z": {
+      "sd": 1.9882918528050402,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "zero:right_shoulder_lift": {
+      "sd": 0.880446692018117,
+      "prior": 2.0,
+      "unit": "deg"
+     },
+     "pos:right_shoulder_lift:x": {
+      "sd": 1.3658795687924052,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:right_shoulder_lift:y": {
+      "sd": 1.7427699559369585,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:right_shoulder_lift:z": {
+      "sd": 1.988291833354263,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "zero:right_elbow_flex": {
+      "sd": 1.057615729945993,
+      "prior": 2.0,
+      "unit": "deg"
+     },
+     "pos:right_elbow_flex:x": {
+      "sd": 0.62723261916132,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:right_elbow_flex:y": {
+      "sd": 1.6144929570891537,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:right_elbow_flex:z": {
+      "sd": 1.7427698939623124,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "zero:right_wrist_flex": {
+      "sd": 0.7726302402152551,
+      "prior": 2.0,
+      "unit": "deg"
+     },
+     "pos:right_wrist_flex:x": {
+      "sd": 0.7725870716693227,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:right_wrist_flex:y": {
+      "sd": 1.7397362164086754,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:right_wrist_flex:z": {
+      "sd": 1.7427698937860154,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "zero:right_wrist_roll": {
+      "sd": 0.5129226472763005,
+      "prior": 2.0,
+      "unit": "deg"
+     },
+     "pos:right_wrist_roll:x": {
+      "sd": 0.8218462485686334,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:right_wrist_roll:y": {
+      "sd": 1.8918798660436225,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:right_wrist_roll:z": {
+      "sd": 1.742769893942952,
+      "prior": 2.0,
+      "unit": "mm"
+     },
+     "pos:right_gripper_frame_joint:x": {
+      "sd": 0.43351112427280125,
+      "prior": 8.0,
+      "unit": "mm"
+     },
+     "pos:right_gripper_frame_joint:y": {
+      "sd": 0.7669541412642433,
+      "prior": 8.0,
+      "unit": "mm"
+     },
+     "pos:right_gripper_frame_joint:z": {
+      "sd": 2.0735744478545493,
+      "prior": 8.0,
+      "unit": "mm"
+     },
+     "pos:left_gripper:x": {
+      "sd": 0.7483549146124606,
+      "prior": 10.0,
+      "unit": "mm"
+     },
+     "pos:left_gripper:z": {
+      "sd": 2.1987208632160815,
+      "prior": 10.0,
+      "unit": "mm"
+     },
+     "pos:right_gripper:x": {
+      "sd": 0.9432667345462481,
+      "prior": 10.0,
+      "unit": "mm"
+     },
+     "pos:right_gripper:z": {
+      "sd": 2.243462976024137,
+      "prior": 10.0,
+      "unit": "mm"
+     },
+     "pos:left_wrist_camera_joint:x": {
+      "sd": 0.6349104635305509,
+      "prior": 15.0,
+      "unit": "mm"
+     },
+     "pos:left_wrist_camera_joint:y": {
+      "sd": 0.3267376362748077,
+      "prior": 15.0,
+      "unit": "mm"
+     },
+     "pos:left_wrist_camera_joint:z": {
+      "sd": 2.0019888096602974,
+      "prior": 15.0,
+      "unit": "mm"
+     },
+     "rot:left_wrist_camera_joint:x": {
+      "sd": 0.08881077274529627,
+      "prior": 5.0,
+      "unit": "deg"
+     },
+     "rot:left_wrist_camera_joint:y": {
+      "sd": 0.20600835120802136,
+      "prior": 5.0,
+      "unit": "deg"
+     },
+     "rot:left_wrist_camera_joint:z": {
+      "sd": 0.394274771369893,
+      "prior": 5.0,
+      "unit": "deg"
+     },
+     "pos:right_wrist_camera_joint:x": {
+      "sd": 0.6997921473048102,
+      "prior": 15.0,
+      "unit": "mm"
+     },
+     "pos:right_wrist_camera_joint:y": {
+      "sd": 0.27747115799541655,
+      "prior": 15.0,
+      "unit": "mm"
+     },
+     "pos:right_wrist_camera_joint:z": {
+      "sd": 2.0646698080364962,
+      "prior": 15.0,
+      "unit": "mm"
+     },
+     "rot:right_wrist_camera_joint:x": {
+      "sd": 0.08558694073322264,
+      "prior": 5.0,
+      "unit": "deg"
+     },
+     "rot:right_wrist_camera_joint:y": {
+      "sd": 0.22486001096207892,
+      "prior": 5.0,
+      "unit": "deg"
+     },
+     "rot:right_wrist_camera_joint:z": {
+      "sd": 0.43580188050590285,
+      "prior": 5.0,
+      "unit": "deg"
+     },
+     "thickness": {
+      "sd": 0.8643887319089384,
+      "prior": 1.0,
+      "unit": "mm"
+     },
+     "left opening": {
+      "sd": 0.5290163138654703,
+      "prior": 3.0,
+      "unit": "deg"
+     },
+     "right opening": {
+      "sd": 0.5493439945347863,
+      "prior": 3.0,
+      "unit": "deg"
+     }
+    },
+    "pairs": [
+     [
+      "zero:head_tilt_joint",
+      "rot:fixed_head_camera_link:y",
+      -0.9998894297059553
+     ],
+     [
+      "pos:fixed_head_camera_link:x",
+      "rot:fixed_head_camera_link:y",
+      0.9993965787753719
+     ],
+     [
+      "pos:head_tilt_joint:y",
+      "pos:fixed_head_camera_link:y",
+      0.999358056574441
+     ],
+     [
+      "zero:head_tilt_joint",
+      "pos:fixed_head_camera_link:x",
+      -0.9992748476063759
+     ],
+     [
+      "pos:fixed_head_camera_link:x",
+      "rot:fixed_head_camera_link:x",
+      0.9789072868184007
+     ],
+     [
+      "rot:fixed_head_camera_link:x",
+      "rot:fixed_head_camera_link:y",
+      0.9787298874772226
+     ],
+     [
+      "zero:head_tilt_joint",
+      "rot:fixed_head_camera_link:x",
+      -0.9782123107480576
+     ],
+     [
+      "pos:head_pan_joint:y",
+      "pos:fixed_Base:y",
+      0.9583139761773876
+     ],
+     [
+      "zero:left_wrist_flex",
+      "pos:left_wrist_flex:y",
+      -0.9568191230325628
+     ],
+     [
+      "pos:head_pan_joint:y",
+      "pos:fixed_Base_2:y",
+      0.9423058102316333
+     ],
+     [
+      "zero:left_wrist_roll",
+      "rot:left_wrist_camera_joint:z",
+      0.9382376689170114
+     ],
+     [
+      "zero:right_wrist_roll",
+      "rot:right_wrist_camera_joint:z",
+      0.9346625584505481
+     ],
+     [
+      "pos:left_wrist_roll:y",
+      "pos:left_wrist_camera_joint:z",
+      -0.9339746050454671
+     ],
+     [
+      "pos:left_gripper_frame_joint:z",
+      "pos:left_wrist_camera_joint:z",
+      0.9264712274112052
+     ],
+     [
+      "zero:right_wrist_flex",
+      "pos:right_wrist_flex:y",
+      -0.9229678082620159
+     ],
+     [
+      "rot:right_wrist_camera_joint:y",
+      "rot:right_wrist_camera_joint:z",
+      -0.9151588175408685
+     ],
+     [
+      "pos:left_wrist_roll:y",
+      "pos:left_gripper_frame_joint:z",
+      -0.9135673681372268
+     ],
+     [
+      "zero:right_wrist_roll",
+      "pos:right_wrist_camera_joint:x",
+      0.9111565310555741
+     ],
+     [
+      "zero:right_wrist_roll",
+      "rot:right_wrist_camera_joint:y",
+      -0.9069158840759861
+     ],
+     [
+      "pos:right_wrist_camera_joint:x",
+      "rot:right_wrist_camera_joint:z",
+      0.9060350107573676
+     ],
+     [
+      "pos:left_wrist_camera_joint:x",
+      "rot:left_wrist_camera_joint:z",
+      0.9053539187290528
+     ],
+     [
+      "zero:left_shoulder_lift",
+      "pos:left_elbow_flex:y",
+      0.9051255950755998
+     ],
+     [
+      "pos:right_gripper_frame_joint:z",
+      "pos:right_wrist_camera_joint:z",
+      0.9029960392429494
+     ],
+     [
+      "pos:fixed_head_camera_link:z",
+      "rot:fixed_head_camera_link:y",
+      -0.9012379242712626
+     ],
+     [
+      "pos:right_wrist_roll:y",
+      "pos:right_wrist_camera_joint:z",
+      -0.9012301210231749
+     ],
+     [
+      "zero:head_tilt_joint",
+      "pos:fixed_head_camera_link:z",
+      0.9011550195743164
+     ]
+    ],
+    "weak": [
+     {
+      "sd": 1.0000000246248393,
+      "parts": [
+       [
+        "rot:fixed_Base:z",
+        0.2761651312660163
+       ],
+       [
+        "rot:fixed_Base_2:z",
+        0.22657062690250634
+       ],
+       [
+        "rot:fixed_head_camera_link:y",
+        0.1786874190752032
+       ],
+       [
+        "pos:fixed_Base:x",
+        0.1093043589896295
+       ]
+      ]
+     },
+     {
+      "sd": 1.0000000010185843,
+      "parts": [
+       [
+        "pos:head_pan_joint:z",
+        -0.2667543805562136
+       ],
+       [
+        "pos:head_tilt_joint:z",
+        0.15541661883737737
+       ],
+       [
+        "zero:left_shoulder_pan",
+        -0.1332651712962027
+       ],
+       [
+        "pos:head_tilt_joint:y",
+        -0.10814316438367493
+       ]
+      ]
+     },
+     {
+      "sd": 1.0000000008331322,
+      "parts": [
+       [
+        "zero:left_shoulder_pan",
+        -0.38652309779534655
+       ],
+       [
+        "pos:left_wrist_flex:y",
+        0.10203824027987732
+       ]
+      ]
+     }
+    ]
+   },
+   "fit_failed": false
   }
  },
  "nominal_origins": {
@@ -1397,6 +2129,30 @@
   "right_shoulder_pan": {
    "xyz": "0.0388353 -8.97657e-09 0.0624",
    "rpy": "3.14159 4.18253e-17 -3.14159"
+  },
+  "left_wrist_camera_joint": {
+   "xyz": "0.00250019329229591 0.0670838713996361 -0.00699615079856229",
+   "rpy": "2.70398898037638 7.00028201316982e-06 -5.23273839458938e-06"
+  },
+  "right_wrist_camera_joint": {
+   "xyz": "0.00250019329229591 0.0670838713996361 -0.00699615079856229",
+   "rpy": "2.70398898037638 7.00028201316982e-06 -5.23273839458938e-06"
+  },
+  "left_fixed_finger_joint": {
+   "xyz": "0 0 0",
+   "rpy": "-1.5707963267949 1.5707963267949 0"
+  },
+  "left_moving_finger_joint": {
+   "xyz": "0 0 0",
+   "rpy": "1.5707963267949 1.5707963267949 0"
+  },
+  "right_fixed_finger_joint": {
+   "xyz": "0 0 0",
+   "rpy": "-1.5707963267949 1.5707963267949 0"
+  },
+  "right_moving_finger_joint": {
+   "xyz": "0 0 0",
+   "rpy": "1.5707963267949 1.5707963267949 0"
   }
  }
 }

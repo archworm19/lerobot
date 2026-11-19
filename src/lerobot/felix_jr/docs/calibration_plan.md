@@ -27,7 +27,8 @@ and is untested anywhere else, so the person clicks what the head sees).
 3. **Optional: the gripper's widths with calipers** (`calibration.gripper_step`): no longer needed (the servo's range
    gives the degrees per unit; the joint session fits where the jaws close and the hinge), kept as the one measurement
    of the jaws' width in millimeters: a check, and the ground truth for the grip deformation work.
-4. **The check** (`calibration.check`), as now.
+4. **The check** (`joint_collect --check`, `README.md` section 9, since 2026-11-19: a short session, nothing fitted,
+   each part scored against its limit; `calibration/check.py`, which drew the fingertips to judge by eye, is gone).
 
 ## The work, in order
 
@@ -198,7 +199,21 @@ Newest first. Each commit that changes the calibration adds its entry here, titl
 name its own hash, so the next one fills it in. Before the plan (2026-11-16) the work is in `camera_calibration.md`
 and git's log.
 
-- **The wrist camera kept off the table, at every pose and along every move** (2026-11-17, hash in the next entry).
+- **Both arms calibrated together, checked, the default; a calibration's check without a fit; the click calibration's
+  code removed** (2026-11-19, hash in the next entry). The left arm's session (`joint_left_1119_2`: the start 17.5 mm
+  and 2.7 deg off it, 4.5 mm and 0.77 deg after), then both arms' sessions fitted as one (`joint_fit` on
+  `joint_right_1117b` and `joint_left_1119_2`): one head for both, held out 11.1 mm -> 3.6 mm and 0.75 deg over 5
+  moments, each arm's residuals as in its own fit, the fingers' thickness 10.1 mm (10.0 measured); the head's position
+  parameters settled between the two single fits (weakly determined each: only the camera's pose they make matters).
+  `joint_collect --check` (`joint_fit.check`, `check_report`): a short session, its safety the calibration's, nothing
+  fitted, each part scored against a limit (`CHECK_*`, set from the recorded sessions). On the robot, at new views:
+  the left arm 2.6 mm and 0.63 deg (6 moments), the wrist's tips 1.6 px, the sweep's drift 1.3 px; the right 3.5 mm
+  and 1.10 deg (3 moments), 1.9 px, 2.0 px: both passed. It is `urdfs/calib_20261119_joint.urdf`, `api.MODEL`
+  (`calib_20261115_grippers.urdf` removed). `joint_views.path_clear`: a move no nearer the table than both its ends
+  (was its start's: every view lower than the last went around through rest; 9 and 10 of 28 moves in the two
+  sessions, now 1). Removed: `check.py`, `collect.py`, `xle_fit.py`, `views.py`, `live_view.py` (its keys and head
+  moves now `controls.py`), `Capture.from_session`, and their tests.
+- **`a802a02a0`: The wrist camera kept off the table, at every pose and along every move** (2026-11-17).
   The second robot session (`joint_right_1117b`): at a tip view the pinch face is up, so the wrist camera faces the
   table, and it hit it (3 of its tip views put the camera's board 1-3 cm into the table in the model; nothing
   checked it). `joint_views.camera_clear_of_table` (the 45 mm board's corners, 2 cm), in `clear_of_table`,

@@ -23,7 +23,7 @@ from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
@@ -36,6 +36,9 @@ from lerobot.felix_jr.harness.reach import FrameSolution, close_gripper_pos
 
 from . import robot
 from .grasp_check import GraspTrial, SimAccept
+
+if TYPE_CHECKING:
+    from lerobot.felix_jr.harness.objects import Capture
 
 # the reachable table in front of the arm (from its base: ahead along the robot's facing, -x; to the side, y): a 50 mm
 # cylinder, side grasps (`PSI_DEG`), none closer than ~0.22 m ahead, all of +-0.15 m to the side from 0.25 m out;
@@ -166,7 +169,8 @@ def run_placement(model: XleRobotModel, config: BankConfig, placement: Placement
     rng = np.random.default_rng(np.random.SeedSequence([config.seed, placement.index, 1]))
     table_z = placement.bottom_root[2]
     target = placement.primitive()
-    capture = SimpleNamespace(arms={config.arm: dict(REST)}, head_ticks=None)
+    # the arm at rest, no head (what the filters read of a capture: the IK's start; no camera here)
+    capture = cast("Capture", SimpleNamespace(arms={config.arm: dict(REST)}, head_ticks=None))
     accept = SimAccept(
         model,
         target,
@@ -280,7 +284,8 @@ def load(path: Path) -> tuple[BankConfig, list[dict[str, Any]]]:
     """A bank's config and its placements' lines (`run_placement`)."""
     lines = [json.loads(s) for s in path.read_text().splitlines() if s.strip()]
     raw = lines[0]["config"]
-    config = BankConfig(**{k: tuple(v) if isinstance(v, list) else v for k, v in raw.items()})
+    fields: dict[str, Any] = {k: tuple(v) if isinstance(v, list) else v for k, v in raw.items()}
+    config = BankConfig(**fields)
     return config, [line for line in lines[1:] if line["kind"] == "placement"]
 
 

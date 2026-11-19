@@ -321,3 +321,72 @@ def test_a_fixed_fingertip_moved_since_the_start_stops_the_session_unless_told_t
             assert len(asked) == (answer is not None)
             assert session.phase == ("place" if goes_on else "sweep")
             assert len(session.session.clicks) == (drift < 30.0)  # a misread's tips dropped
+
+
+def test_a_check_scores_the_calibration_as_it_is_the_truth_passing_and_the_start_not(setup):
+    """`--check` (`check_only`): the same session, shorter, nothing fitted; at the end each part against its limit.
+    The true robot's calibration passes; the start's (its estimates 30 % of their priors off) is off on the board."""
+    from dataclasses import replace
+
+    from lerobot.felix_jr.calibration.joint_collect import CHECK_VIEWS
+    from lerobot.felix_jr.calibration.xle_robot_model import arm_record, motor_record
+
+    client, start, start_path, truth, true_q, tmp_path = setup
+    robot = {arm_id.removesuffix("_arm"): m for arm_id, m in client.arm_calibration().items()}
+    results = {}
+    for name in ("truth", "start"):
+        model = XleRobotModel.load(start_path)
+        if name == "truth":
+            model.set_estimates(truth.theta)
+        # the robot's settings (`check_robot` refuses a model made under others)
+        model.arm_calibration = {arm: arm_record(m) for arm, m in robot.items()}
+        model.gripper_maps = {
+            arm: replace(g, calibration=motor_record(robot[arm]["gripper"]))
+            for arm, g in model.gripper_maps.items()
+        }
+        path = tmp_path / f"{name}.urdf"
+        model.save(path)
+        placements, arm_views, head_views, tip_views = CHECK_VIEWS
+        with client.session():
+            session = JointCollect(
+                client,
+                ARM,
+                tmp_path / f"check_{name}",
+                lambda _: None,
+                path,
+                BOARD,
+                placements,
+                arm_views,
+                head_views,
+                tip_views,
+                wrist_tip="click",
+                check_only=True,
+            )
+            assert session.check_only and not session.model.gripper_maps[ARM].default  # (kept as given)
+            for _ in range(8):
+                session.live_at = 0.0
+                session.refresh()
+                if session.live is not None:
+                    break
+                session.nudge("down")
+            while session.phase not in ("tips", "done"):
+                session.next()
+                if (
+                    session.phase == "arm" and session.head_face == "pinch"
+                ):  # the fixed tip, where the truth shows it
+                    q = true_q(client.get_state())
+                    tip = jv.fingertips(start, ARM, q, truth.theta, truth.thickness)[0]
+                    uv = start.project(tip[None], q, truth.theta)[0][0]
+                    if jv.in_picture(uv[None], HEAD_SIZE):
+                        session.click("head:fixed", *uv)
+            while session.phase == "tips":
+                session.next()
+            report = session.finish()
+        assert report is not None and report.name == "check.md" and report.with_suffix(".json").is_file()
+        assert not (tmp_path / f"check_{name}" / "calibration.urdf").exists()  # (nothing fitted)
+        results[name] = __import__("json").loads(report.with_suffix(".json").read_text())
+    truth_board, start_board = results["truth"]["board"], results["start"]["board"]
+    assert truth_board["moments"] >= 3 and truth_board["mm"] < 2.0, truth_board
+    assert results["truth"]["ok"], results["truth"]["verdicts"]
+    assert start_board["mm"] > 3 * truth_board["mm"], (start_board, truth_board)
+    assert not results["start"]["ok"]

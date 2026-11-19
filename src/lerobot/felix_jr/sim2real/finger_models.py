@@ -144,7 +144,7 @@ def video(model: XleRobotModel, trial: dict, table_z: float, rows: list[dict[str
     require_package("mujoco", extra="felix_jr_sim")
     frames: dict[str, list[np.ndarray]] = {}
     for row in rows:
-        name, tiles = row["model"], []
+        name, tiles = row["model"], list[np.ndarray]()
         state: dict[str, Any] = {}
 
         def grab(scene: Any, phase: str, state: dict = state, tiles: list = tiles, name: str = name) -> None:

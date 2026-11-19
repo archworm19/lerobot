@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Any
 import cv2
 import numpy as np
 
-from lerobot.felix_jr.calibration.xle_fit import load_session
 from lerobot.felix_jr.calibration.xle_robot_model import HEAD_JOINTS, XleRobotModel
 from lerobot.felix_jr.depth import with_matrices
 
@@ -81,26 +80,6 @@ class Capture:
         head = {n: int(state["head"][n]["ticks"]) for n in HEAD_JOINTS}
         return cls.from_frames(
             snap.color, snap.raw_depth, snap.calibration, model, arms, head, snap.timestamp
-        )
-
-    @classmethod
-    def from_session(
-        cls, session_dir: str | Path, index: int, model: XleRobotModel, calibration: dict[str, Any]
-    ) -> "Capture":
-        """Frame `index` of a calibration session folder (`calibration/collect.py`).
-
-        Sessions save color, raw depth and the joint readings but not the RealSense calibration: pass it
-        (`depth.load_calibration`).
-        """
-        session = load_session(session_dir)
-        click = next(c for c in session.clicks if c.index == index)
-        if click.image is None:
-            raise ValueError(f"click {index} of {session_dir} has no saved image")
-        color_path = session.path / click.image
-        color = cv2.cvtColor(read_image(color_path), cv2.COLOR_BGR2RGB)
-        raw = read_image(color_path.with_name(f"{color_path.stem}_depth.png"), cv2.IMREAD_UNCHANGED)
-        return cls.from_frames(
-            color, raw, calibration, model, {click.arm: click.arm_pose}, click.head_ticks, click.timestamp
         )
 
     def save(self, folder: str | Path) -> None:

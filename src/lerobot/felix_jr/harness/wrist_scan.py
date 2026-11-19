@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 SCALE_NOTE = "the scale is the model's: a few % of the distance"
 SWEEP_ROLLS_DEG = (-30.0, -15.0, 15.0, 30.0)
 SWEEP_FLEXES_DEG = (-10.0, 10.0)
-MAX_ROLL_DEG = 130.0  # the wrist camera's cable (as `calibration.views`)
+MAX_ROLL_DEG = 130.0  # the wrist camera's cable (as `reach.MAX_ROLL_DEG`)
 SWEEP_VEL = 15.0
 
 
