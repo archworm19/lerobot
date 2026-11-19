@@ -471,3 +471,28 @@ def test_the_object_is_in_the_wrist_cameras_view_at_the_attack_point():
     assert unchecked.passed >= found.passed + len(out) - sum(
         r.stage in ("lift", "paths") for r in unchecked.rejected
     )
+
+
+def test_a_grasp_deeper_in_the_jaws_moves_the_claw_on_and_opens_them_wider_where_they_narrow():
+    """`to_claw`'s depth: 0 is the harness's tips grasp, unchanged; deeper, the claw goes that much further along the
+    fingers and the jaws open until the moving finger's face clears the object (`face_clearances`), the V narrower
+    there; too wide for the jaws and `jaws_fit` is False."""
+    from lerobot.felix_jr.harness import api
+    from lerobot.felix_jr.harness.grasping import OPEN_CLEARANCE_M, face_clearances
+
+    model = XleRobotModel.load(api.MODEL)  # (its gripper map and fingers' frames)
+    grasp = JAR.antipodal_grasps({"psi": (0.0, 1.0), "t": (0.06, 0.061)})[0]
+    tips = to_claw(grasp, model, "right", 0, 0.008)
+    deep = to_claw(grasp, model, "right", 0, 0.008, depth=0.025)
+    assert tips.depth == 0.0 and tips.jaws_fit
+    # the claw 2.5 cm further on, along its own axis (toward the fingertips)
+    shift = deep.root_from_pinch[:3, 3] - tips.root_from_pinch[:3, 3]
+    np.testing.assert_allclose(shift, 0.025 * tips.root_from_pinch[:3, 2], atol=1e-9)
+    np.testing.assert_allclose(deep.root_from_pinch[:3, :3], tips.root_from_pinch[:3, :3])
+    # the jaws wider, the moving face clear by half the open clearance
+    assert deep.jaws_fit and deep.open_apart > tips.open_apart
+    opening = model.opening_for_width("right", deep.open_apart)
+    _, moving = face_clearances(model, "right", deep.aim_pinch, grasp.opening / 2, opening)
+    assert moving >= OPEN_CLEARANCE_M / 2 - 1e-3
+    # deeper than the jaws can open for
+    assert not to_claw(grasp, model, "right", 0, 0.008, depth=0.06).jaws_fit

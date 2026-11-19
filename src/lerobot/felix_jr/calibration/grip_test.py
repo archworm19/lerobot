@@ -16,7 +16,8 @@ Per bottle, in the terminal (the arm moves first, the bottle is placed after, so
 2. **The grip pose:** from the side (the jaws closing across, horizontally, the wrist camera on top), the fingers as
    near level as reachable (`GRIP_TILTS_DEG`) `GRIP_AHEAD_M` ahead of the arm's base, the tips at `TIP_HEIGHT` of the bottle's height. The sim checks the way there and
    the pose (the gripper's lowest over the table, `MIN_CLEARANCE_M`); it asks before moving. The jaws open to the
-   bottle's width plus `OPEN_MARGIN_M` (the gripper map).
+   bottle's width plus `OPEN_MARGIN_M` at the tips, and wider if the fingers' faces need it where the bottle stands
+   (`grasping.face_clearances`: deeper, the jaws are a V).
 3. **Stand the bottle** where its outline is drawn on the live wrist picture (`place`: its circle on the table, at
    the tips' height and at its top, from the model's grasp point for its width moved back by the depth); Enter in
    that window (`--no-window`: in the terminal, by eye).
@@ -395,7 +396,16 @@ class GripTest:
             f"  the grip pose: {100 * ahead:.0f} cm ahead of the arm's base, the fingers {tilt:g} deg below level"
         )
         width = bottle.diameter_mm / 1000.0
-        open_pos = model.gripper_pos_for(arm, model.opening_for_width(arm, width + OPEN_MARGIN_M))
+        # wide enough where the bottle stands, not only at the tips: deeper, the jaws are a V (`grasping.face_clearances`;
+        # the tips' rule left a 53 mm bottle 31.5 mm in against the moving finger)
+        from lerobot.felix_jr.harness.grasping import _open_apart_at_depth
+
+        center = model.grasp_offset(arm, width) - np.array([0.0, 0.0, bottle.depth_mm / 1000.0])
+        apart, _ = _open_apart_at_depth(model, arm, center, width / 2, width + OPEN_MARGIN_M)
+        open_pos = min(
+            100.0,
+            model.gripper_pos_for(arm, model.opening_for_width(arm, min(apart, 2 * model.jaw_radius(arm)))),
+        )
         contact = model.gripper_pos_for(arm, model.opening_for_width(arm, width))
         if not self._move(pose, f"to the grip pose, the tips {100 * tip:.0f} cm over the table"):
             return False

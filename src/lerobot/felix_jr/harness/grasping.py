@@ -124,6 +124,8 @@ class GraspSettings:
         5.0  # antipodal errors this close rank as equal; the joint margin decides between them
     )
     margin: float = MARGIN_M  # the fixed jaw this far clear of its contact
+    # the object's center this far back along the fingers from the tips (`to_claw`): 0, at the tips, the harness's way
+    depth: float = 0.0
     attack: float = ATTACK_M  # the attack point this far back along the approach
     # the grasp and its attack point aimed this much higher than the object: the arm lands low (its sag; bowl6: the
     # elbow stopping 1.2-1.3 deg short under load), and the errors are not alike: too high grips higher on the
@@ -182,6 +184,9 @@ class ClawTarget:
     attack: float
     open_apart: float
     close_apart: float
+    depth: float = 0.0  # the object's center this far back along the fingers from the tips (m: `to_claw`)
+    # the open jaws clear the object where it stands (`face_clearances`; at depth 0 the tips' width, as before)
+    jaws_fit: bool = True
 
     @property
     def fixed_contact_root(self) -> np.ndarray:
@@ -218,11 +223,18 @@ def to_claw(
     fixed_side: int,
     margin: float = 0.0,
     attack: float = ATTACK_M,
+    depth: float = 0.0,
 ) -> ClawTarget:
     """The claw target for `grasp`: `arm`'s fixed tip on contact `fixed_side`, the moving tip on the other.
 
     The fixed tip stands `margin` clear of its contact; the moving tip, at the grasp's opening, is on the other; the
     jaws come in along the grasp's approach, from the attack point `attack` back along it.
+
+    `depth`: the object's center that far back along the fingers from the tips (the claw that much further on): 0, at
+    the tips, as the harness has always grasped. Deeper, the jaws are a V narrower there: they open as wide as the
+    fingers' faces need to clear the object by half `OPEN_CLEARANCE_M` (`face_clearances`), and `jaws_fit` is False
+    when they cannot. Which depth holds best is the simulation's to say (`docs/sim2real_grasp.md`: a 52 mm bottle at
+    15 mm was pushed out, a 45 mm one at 27.5 mm held).
 
     Raises ValueError if the jaws cannot open as wide as the grasp needs.
     """
@@ -243,13 +255,17 @@ def to_claw(
         np.column_stack([h_root, d_root, a_root]) @ np.column_stack([hinge_pinch, u_pinch, forward_pinch]).T
     )
 
-    aim_pinch = model.grasp_offset(arm, grasp.opening, margin)
+    back = np.array([0.0, 0.0, depth])  # (the pinch z points toward the fingertips)
+    aim_pinch = model.grasp_offset(arm, grasp.opening, margin) - back
     root_from_pinch = np.eye(4)
     root_from_pinch[:3, :3] = rot_root_from_pinch
     root_from_pinch[:3, 3] = grasp.center_root - rot_root_from_pinch @ aim_pinch
     root_from_attack = root_from_pinch.copy()
     root_from_attack[:3, 3] -= attack * a_root
     widest = 2 * model.jaw_radius(arm)
+    open_apart, jaws_fit = min(grasp.opening + margin + OPEN_CLEARANCE_M, widest), True
+    if depth > 0:
+        open_apart, jaws_fit = _open_apart_at_depth(model, arm, aim_pinch, grasp.opening / 2, open_apart)
     return ClawTarget(
         grasp,
         arm,
@@ -257,14 +273,59 @@ def to_claw(
         root_from_pinch,
         root_from_attack,
         aim_pinch,
-        model.grasp_offset(arm, grasp.opening),
+        model.grasp_offset(arm, grasp.opening) - back,
         margin,
         attack,
-        min(grasp.opening + margin + OPEN_CLEARANCE_M, widest),
+        open_apart,
         _apart_at(model, arm, close_gripper_pos(model, arm, grasp.opening))
         if arm in model.gripper_maps
         else 0.0,
+        depth,
+        jaws_fit,
     )
+
+
+def face_clearances(
+    model: XleRobotModel, arm: str, center_pinch: np.ndarray, radius: float, opening_deg: float
+) -> tuple[float, float]:
+    """How far (m) the fixed and the moving finger's inner faces are from an object of `radius` about `center_pinch`.
+
+    Each face the plane through its fingertip square to its finger frame's y (`XleRobotModel.finger_pose`: the STL's
+    straight face, `sim2real.robot.finger_pads`), the moving one turned by the jaws' opening; signed, negative into the
+    object, measured on the side toward the jaws' middle.
+    """
+    middle = model.grasp_offset(arm, 2 * radius, mid_plane=False)
+    out = []
+    for finger, turn in (("fixed", None), ("moving", model.moving_jaw(arm, opening_deg))):
+        frame = model.finger_pose(arm, finger)
+        if turn is not None:
+            frame = turn @ frame
+        origin, normal = frame[:3, 3], frame[:3, 1]
+        if (middle - origin) @ normal < 0:  # toward the jaws' middle
+            normal = -normal
+        out.append(float((center_pinch - origin) @ normal - radius))
+    return out[0], out[1]
+
+
+def _open_apart_at_depth(
+    model: XleRobotModel, arm: str, center_pinch: np.ndarray, radius: float, open_apart: float
+) -> tuple[float, bool]:
+    """The tips' opening (m apart) that clears an object deep in the jaws, and whether the jaws open that wide.
+
+    At least `open_apart` (the tips' rule); wider until the moving finger's face is half `OPEN_CLEARANCE_M` from the
+    object (`face_clearances`), up to the widest the jaws open (`widest_apart`). Without the gripper map, as given.
+    """
+    if arm not in model.gripper_maps:
+        return open_apart, True
+    radius_m = model.jaw_radius(arm)
+    opening = model.opening_for_width(arm, min(open_apart, 2 * radius_m))
+    widest_deg = min(model.gripper_maps[arm].opening_deg(100.0), 180.0)
+    need = OPEN_CLEARANCE_M / 2
+    while face_clearances(model, arm, center_pinch, radius, opening)[1] < need:
+        opening += 1.0
+        if opening > widest_deg:
+            return widest_apart(model, arm), False
+    return float(2 * radius_m * np.sin(np.radians(opening) / 2)), True
 
 
 def _apart_at(model: XleRobotModel, arm: str, gripper_pos: float) -> float:
@@ -733,9 +794,16 @@ def grasp_candidates(
                     rejected.append(Rejected(grasp, arm, fixed_side, "jaws", "too wide for the jaws"))
                     continue
                 claw = _shifted(
-                    to_claw(grasp, model, arm, fixed_side, settings.margin, settings.attack),
+                    to_claw(grasp, model, arm, fixed_side, settings.margin, settings.attack, settings.depth),
                     np.array([0.0, 0.0, settings.sag_lift]),
                 )
+                if not claw.jaws_fit:  # (only deeper than the tips: the faces' V narrower there)
+                    rejected.append(
+                        Rejected(
+                            grasp, arm, fixed_side, "jaws", "the open jaws do not clear it at that depth"
+                        )
+                    )
+                    continue
                 if grasp.opening not in iks:
                     iks[grasp.opening] = ArmIK(
                         model, arm, capture.arms, capture.head_ticks, grasp.opening, settings.margin
