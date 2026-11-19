@@ -332,6 +332,26 @@ short on its own, so the execution's bias is not drawn, only its spread); a chea
 attack's), wide; the other
 pools a snapshot with a few mm of noise; a few settling steps, and the rare start that intersects or falls rejected.
 
+**The reset sampler** (`sim2real/starts.py`, 2026-11-19: `StartSampler(model, bank).sample(rng)`, `StartConfig` its
+parameters): the attack pool's joints as above, the offset's means and spreads `perception_mean_m` /
+`perception_std_m` (along -1.0 +- 0.7 cm, across 0 +- 0.7, up -0.4 +- 0.3) and the joints' `joint_std_deg` (the
+sessions' 0.3-0.5 deg), each sampled `*_width` 1.5 times as wide. **The arm arrives:** started at the command, the
+servos never sag (the friction's band holds them there), so the attack is ramped into from `arrival_deg` (3 deg) back,
+each joint from the side the sessions' attacks came from (`ARRIVAL_UP`: the lift always up its range, wrist_flex
+almost always down, the elbow either), at the harness's 20 deg/s. A bank records the servos it was built with
+(`bank.servos()`); the sampler refuses one built under others (its snapshots would not match). On the first bank (13
+anchors):
+
+- ~65 ms a start (the scene's build, the arrival, the check's 0.3 s settle), every pool; the check passed at the first
+  draw nearly always (1 redraw in 120).
+- The gripper lands where the drawn offset puts it to within a few mm (the Jacobian's map; a 4 cm draw 3-4 mm off).
+- The servos' stop, at the bank's attacks: elbow_flex +0.7 deg, wrist_flex +1.0 (the sessions' +0.65, +0.87); the
+  lift -0.46 (the sessions' +0.24: the bank's attacks load the lift less, so moving up it stops past its target, as
+  the fitted band has it; this rests on the lift's ridge, `robot.ARM_KP_NM_PER_RAD`); the pan's and the roll's spread
+  0.46 and 0.75 deg (the sessions' 0.33, 0.36; ~2 mm at the gripper).
+- The check's limit: a geom passed right through the object reads shallow in MuJoCo (a pad shut through a bottle:
+  0.1 mm); the attack's offsets cannot get there.
+
 **The arm's misses, from the sessions** (2026-11-19: every `execute(..., hold=True)` of 13 sessions, bowl1-8,
 container1, pen1-2, ruler1-2, both arms; the last move's commanded joints against the capture's read ones, the gripper's
 offset by the model; 50 moves). What the encoders see, so the execution part of the miss only:
@@ -369,7 +389,7 @@ size, mass and softness (feno: a softer bottle), the attack offsets, the wrist c
    wrist camera's view), each tested on the harness's grasp tests and timed.
 2. ~~The bank's generator: placements, the filters, the simulated grasps under physics draws, the snapshots, the
    file.~~ **Built (2026-11-18, above);** the neighbourhood check dropped (the starts perturb the joints).
-3. The reset sampler and its pools.
+3. ~~The reset sampler and its pools.~~ **Built (2026-11-19, above).**
 4. The environment around it (observations, actions, reward), then the teacher.
 
 ## Next

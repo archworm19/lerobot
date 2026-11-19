@@ -34,6 +34,7 @@ from lerobot.felix_jr.harness.grasping import GraspCandidate, GraspSettings, fir
 from lerobot.felix_jr.harness.primitives import Cylinder as CylinderPrimitive
 from lerobot.felix_jr.harness.reach import FrameSolution, close_gripper_pos
 
+from . import robot
 from .grasp_check import GraspTrial, SimAccept
 
 # the reachable table in front of the arm (from its base: ahead along the robot's facing, -x; to the side, y): a 50 mm
@@ -240,7 +241,12 @@ def build_bank(
         done = {line["placement"]["index"] for line in lines}
     else:
         out.parent.mkdir(parents=True, exist_ok=True)
-        meta = {"kind": "config", "model": str(model_path), "table_z": table_height(model, config.arm)}
+        meta = {
+            "kind": "config",
+            "model": str(model_path),
+            "table_z": table_height(model, config.arm),
+            "servos": servos(),
+        }
         out.write_text(json.dumps(meta | {"config": asdict(config)}) + "\n")
     todo = [p for p in placements(model, config, n) if p.index not in done]
     with out.open("a") as f:
@@ -257,6 +263,17 @@ def build_bank(
                     f.write(json.dumps(line) + "\n")
                     f.flush()
                     yield line
+
+
+def servos() -> dict[str, Any]:
+    """The arm's servos the simulator has now (`robot.ARM_*`): saved with a bank, its snapshots made under them."""
+    return {"kp": robot.ARM_KP_NM_PER_RAD, "frictionloss": robot.ARM_FRICTIONLOSS_NM}
+
+
+def meta(path: Path) -> dict[str, Any]:
+    """A bank's first line: its config, the model, the table, the servos (None: a bank from before they were saved)."""
+    with path.open() as f:
+        return json.loads(f.readline())
 
 
 def load(path: Path) -> tuple[BankConfig, list[dict[str, Any]]]:
