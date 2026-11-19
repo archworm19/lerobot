@@ -39,6 +39,9 @@ MOVED_M = 0.01  # the object moved this much while settling: the start was not c
 # camera's mount and the wrist inside it; 6-29 mm on pyri-like cylinders, 2026-11-18)
 START_OVERLAP_M = 0.001
 BLEW_UP_M = 0.5  # the object moved this far in a trial: the simulation became unstable
+# the states `simulate_grasp(snapshots=True)` keeps: open at the grasp after settling, closed on the object, halfway
+# up the lift (the bank's "at the object", "in the jaws" and "lifted" pools)
+SNAPSHOTS = ("at_object", "in_jaws", "lifted")
 CLOSE_S = 2.0
 LIFT_MOVE_S = 1.5
 LIFT_HOLD_S = 2.0  # the success criterion's hold (`docs/sim2real_grasp.md`)
@@ -58,6 +61,8 @@ class GraspTrial:
     held: bool
     rose_m: float
     note: str = ""
+    # with `snapshots`: the simulator's state ("qpos", "qvel", "ctrl") at each stage (`SNAPSHOTS`), for the bank's pools
+    states: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
 
 
 def physics_draws(rng: np.random.Generator, n: int) -> list[dict[str, float]]:
@@ -84,8 +89,12 @@ def simulate_grasp(
     table_z: float,
     draw: Mapping[str, float],
     finger_model: str = "sprung",
+    snapshots: bool = False,
 ) -> GraspTrial:
-    """`candidate`'s grasp of `target` simulated once, under `draw` (`physics_draws`; the module docstring)."""
+    """`candidate`'s grasp of `target` simulated once, under `draw` (`physics_draws`; the module docstring).
+
+    `snapshots`: the state kept at each of `SNAPSHOTS` (`GraspTrial.states`).
+    """
     require_package("mujoco", extra="felix_jr_sim")
     if abs(float(target.axis_root[2])) < 0.99:
         raise NotImplementedError("only upright cylinders are simulated so far")
@@ -114,14 +123,22 @@ def simulate_grasp(
         for _ in range(int(seconds / m.opt.timestep)):
             mujoco.mj_step(m, d)
 
+    states: dict[str, dict[str, np.ndarray]] = {}
+
+    def keep(stage: str) -> None:
+        if snapshots:
+            states[stage] = {"qpos": d.qpos.copy(), "qvel": d.qvel.copy(), "ctrl": d.ctrl.copy()}
+
     start = d.xpos[body].copy()
     touching = _touching(m, d, body)  # (what the object starts in contact with, for the note)
     run(SETTLE_S)
     if np.linalg.norm(d.xpos[body] - start) > MOVED_M:
         note = f"the object moved before the close (touching at the start: {touching})"
         return GraspTrial(claw.depth, dict(draw), False, 0.0, note)
+    keep("at_object")
     d.ctrl[gripper] = np.radians(model.opening_deg(arm, close_gripper_pos(model, arm, width)))
     run(CLOSE_S)
+    keep("in_jaws")
     z0 = float(d.xpos[body][2])
     assert candidate.lift is not None
     begin = np.array(d.ctrl).copy()
@@ -132,6 +149,8 @@ def simulate_grasp(
             a = m.actuator(joint.removesuffix(".pos")).id
             d.ctrl[a] = begin[a] + f * (np.radians(angle) - begin[a])
         mujoco.mj_step(m, d)
+        if k == steps // 2:
+            keep("lifted")
     run(LIFT_HOLD_S)
     rose = float(d.xpos[body][2]) - z0
     if np.linalg.norm(d.xpos[body] - start) > BLEW_UP_M:
@@ -139,7 +158,7 @@ def simulate_grasp(
     lift = float(candidate.lift.root_from_pinch[2, 3] - candidate.grasp.root_from_pinch[2, 3])
     held = rose > HELD_FRACTION * lift
     note = "" if held else "the object did not come up with the jaws"
-    return GraspTrial(claw.depth, dict(draw), held, rose, note)
+    return GraspTrial(claw.depth, dict(draw), held, rose, note, states)
 
 
 def start_overlap(
@@ -189,7 +208,8 @@ def _touching(m: "mujoco.MjModel", d: "mujoco.MjData", body: int) -> str:
 class SimAccept:
     """`first_feasible`'s `accept`: a grasp held in at least `min_rate` of `n_draws` physics draws (the module docstring).
 
-    Every trial is kept (`trials`, by the candidate's index in the order tried), the rejected grasps' too.
+    Every trial is kept (`trials`, by the candidate's index in the order tried; `candidates`, the grasps, alike), the
+    rejected grasps' too. `snapshots`: each trial keeps its states (`simulate_grasp`; the bank's pools).
     """
 
     model: XleRobotModel
@@ -200,10 +220,13 @@ class SimAccept:
     n_draws: int = 3
     min_rate: float = 2 / 3
     finger_model: str = "sprung"
+    snapshots: bool = False
     trials: list[list[GraspTrial]] = field(default_factory=list)
+    candidates: list[GraspCandidate] = field(default_factory=list)
 
     def __call__(self, candidate: GraspCandidate) -> bool:
         """Simulate `candidate` under `n_draws` draws; accept at `min_rate` (refused at once if it starts in the object)."""
+        self.candidates.append(candidate)
         deepest, touching = start_overlap(self.model, candidate, self.target, self.table_z)
         if deepest > START_OVERLAP_M:
             note = f"the open gripper {1000 * deepest:.0f} mm into the object at the grasp ({touching})"
@@ -211,7 +234,14 @@ class SimAccept:
             return False
         runs = [
             simulate_grasp(
-                self.model, candidate, self.target, self.mass_kg, self.table_z, draw, self.finger_model
+                self.model,
+                candidate,
+                self.target,
+                self.mass_kg,
+                self.table_z,
+                draw,
+                self.finger_model,
+                self.snapshots,
             )
             for draw in physics_draws(self.rng, self.n_draws)
         ]

@@ -298,8 +298,37 @@ in the vertical plane through the pan axis (`GraspSettings.arm_plane_tol_deg`): 
 (rotation bounds 15/10/10 deg; loose ones put the gripper's body in the object), every reachable grasp was within 9 deg
 of it, and a 15 deg check before any IK halves the time (0.77 against 1.47 s a placement, the same grasps).
 
-**At a reset** (no IK): a pool by `pool_weights`, an anchor; the attack pool's offset applied by moving the object (the
-arm stays at a pose known reachable; the offset clamped to the table and to the anchor's correctable range); the other
+**The bank's generator** (`sim2real/bank.py`, 2026-11-18; `uv run --extra felix_jr --extra felix_jr_sim python -m
+lerobot.felix_jr.sim2real.bank <out.jsonl> --placements N --workers 6`): per placement an upright cylinder drawn
+(40-60 mm since the first run, 10-20 cm, 40-120 g; 0.22-0.35 m ahead of the arm's base, +-0.15 m to the side), `first_feasible` with
+`SimAccept` (side grasps, psi 0-30 deg; depths 0, 10, 20 mm and just past the radius; 3 physics draws, 2 to hold), the
+anchor's states at the grasp, in the jaws and partway up from a draw that held (`grasp_check.SNAPSHOTS`; they load back
+into the same scene with the object staying in the jaws: `test_bank_smoke.py`). JSON lines, one a placement, every
+grasp simulated kept with its trials; `--resume` continues a stopped run. The first 24 placements:
+
+- **13 of 24 anchored, ~3 s a placement on 6 workers** (4 performance cores; ~14 s a placement of work): ~1000 anchors
+  in about an hour and a half.
+- **Wide cylinders do not hold in the simulator:** of the 11 placements 59 mm and up, 3 anchored (59-61 mm), the rest
+  simulated 7-38 grasps each with none holding (the object not coming up); below 58 mm all but 3 anchored, and those 3
+  reached nothing to simulate. Untested on the robot (the grip trials were 45 and 52 mm): a real trial with a 60-70 mm
+  bottle would tell a simulator's limit from the claw's; taken as the claw's (bottles past 60 mm are hard for it), the
+  bank's diameters now 40-60 mm. The failed placements are most of the time (25-45 s each).
+- **Depth:** accepted 9 of 96 at 0 mm, 4 of 85 at 10 mm, none of 54 at 20 mm.
+- **Where the arm reaches** (a 50 mm cylinder, the filters only): side grasps none closer than ~0.22 m ahead and all of
+  +-0.15 m to the side from 0.25 m out; closer in only from well above (psi to 90 deg: the grasps that put the gripper's
+  body inside a tall cylinder). Hence the region; nearer placements would need top grasps.
+- **The masses:** with 110-260 g one placement in six anchored, with 40-100 g three (the real claw: 80 g held, 116 g
+  slipped). Most of a placement's 3000 tries fail the arm plane (~1 ms each, before any IK): 400 tries anchored none.
+- Not yet: a cap on the grasps simulated per placement. The neighbourhood check is dropped: the attack pool's starts
+  perturb the arm's joints instead of moving the object (below), so the grasp stays the anchor's, reachable.
+
+**At a reset** (no IK): a pool by `pool_weights`, an anchor; the attack pool's start the anchor's attack joints
+perturbed (decided 2026-11-19, replacing moving the object: the grasp stays the anchor's, reachable by construction;
+any joints are a real pose; the misses are the shapes this 5-joint arm makes): the execution error in the joints (the
+sessions' commanded against read joints, its bias too) plus the perception error, a Cartesian offset mapped through
+the Jacobian's pseudo-inverse at the attack pose; both fitted from the sessions, sampled wider than fitted, the widths
+parameters; a cheap check (one forward: the arm not in the object, the wrist camera no nearer the table than the
+attack's), wide; the other
 pools a snapshot with a few mm of noise; a few settling steps, and the rare start that intersects or falls rejected.
 
 **Randomized around the fits:** the friction, the fingers' stiffness, the gripper's gain and torque cap, the objects'
@@ -310,8 +339,8 @@ size, mass and softness (feno: a softer bottle), the attack offsets, the wrist c
 
 1. The shared filter fixes in the harness (the jaws' width from the faces, the lift and the paths, the object in the
    wrist camera's view), each tested on the harness's grasp tests and timed.
-2. The bank's generator: placements, the filters (and the neighbourhood check, timed), the simulated grasps under
-   physics draws, the snapshots, the file.
+2. ~~The bank's generator: placements, the filters, the simulated grasps under physics draws, the snapshots, the
+   file.~~ **Built (2026-11-18, above);** the neighbourhood check dropped (the starts perturb the joints).
 3. The reset sampler and its pools.
 4. The environment around it (observations, actions, reward), then the teacher.
 
