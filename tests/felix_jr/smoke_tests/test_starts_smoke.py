@@ -97,3 +97,20 @@ def test_a_bank_from_other_servos_or_no_pool_weight_is_refused(model, bank_path,
         starts.StartSampler(model, other)
     with pytest.raises(ValueError, match="no pool"):
         starts.StartSampler(model, bank_path, starts.StartConfig(pool_weights={"attack": 0.0}))
+
+
+def test_a_video_of_an_attack_pair_and_a_pool_clip_is_written(model, bank_path, tmp_path, monkeypatch):
+    """The unperturbed anchor holds; the clip's frames are the pair's size (the single clip padded)."""
+    cv2 = pytest.importorskip("cv2")
+    monkeypatch.setattr(
+        starts, "SCRIPT_S", {k: 0.6 if k != "start" else 0.1 for k in starts.SCRIPT_S} | {"lift": 1.0}
+    )
+    sampler = starts.StartSampler(model, bank_path)
+    out = tmp_path / "starts.mp4"
+    lines = starts.video(sampler, out, np.random.default_rng(0), pairs=1, clips={"in_jaws": 1})
+    assert len(lines) == 2 and lines[0].startswith("1. attack pair") and ": held" in lines[0]
+    assert lines[1].startswith("2. in_jaws")
+    capture = cv2.VideoCapture(str(out))
+    assert capture.get(cv2.CAP_PROP_FRAME_COUNT) > 30
+    ok, frame = capture.read()
+    assert ok and frame.shape == (2 * starts.TILE[1], 2 * starts.TILE[0], 3)

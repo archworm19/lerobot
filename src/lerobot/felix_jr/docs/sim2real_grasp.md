@@ -351,6 +351,13 @@ anchors):
   0.46 and 0.75 deg (the sessions' 0.33, 0.36; ~2 mm at the gripper).
 - The check's limit: a geom passed right through the object reads shallow in MuJoCo (a pad shut through a bottle:
   0.1 mm); the attack's offsets cannot get there.
+- **Seen** (`python -m lerobot.felix_jr.sim2real.starts <bank> <out.mp4> --pairs 6 --clips at_object=1 ...`: each
+  start played forward with its anchor's script, a view from beside and the wrist camera's; an attack start below the
+  same anchor unperturbed, the miss kept through the script): every unperturbed attack held (2.6-3.1 cm up), every
+  perturbed one missed with no correction, even a small offset (-0.3 along, -0.5 across, -0.9 up, cm): most of this
+  bank's anchors grasp at depth 0, the object's center at the tips, where a few mm short or low loses it. Deeper
+  anchors would forgive the real misses more; for the environment, prefer them or let the policy learn to go deeper.
+  The other pools held as scripted.
 
 **The arm's misses, from the sessions** (2026-11-19: every `execute(..., hold=True)` of 13 sessions, bowl1-8,
 container1, pen1-2, ruler1-2, both arms; the last move's commanded joints against the capture's read ones, the gripper's

@@ -16,19 +16,30 @@ and the simulator's state for it, ready to step (`Start.scene`):
 
 Then a short settle (`SETTLE_S`) and a cheap check (`check`): the arm not in the object nor on the table (the open
 pools), the object not moved off on its own; a start that fails is drawn again (`max_draws`).
+
+  uv run --extra felix_jr --extra felix_jr_sim python -m lerobot.felix_jr.sim2real.starts <bank.jsonl> <out.mp4>
+      [--pairs 6] [--clips attack=2 at_object=1 in_jaws=1 lifted=1] [--seed 0]
+
+`video`: starts played forward with the anchor's script from their stage on (to the grasp, close, lift, hold), a view
+of the scene and the wrist camera's: `--pairs` attack starts each below the same anchor unperturbed (its exact attack,
+arrived at the same way), the attack's miss kept through the script (no correction: what the policy has to close);
+`--clips` single starts per pool.
 """
 
-from collections.abc import Mapping
+import argparse
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, arm_joint, pinch_frame
+from lerobot.felix_jr.harness.reach import close_gripper_pos
 from lerobot.utils.import_utils import _mujoco_available, require_package
 
-from . import bank
+from . import bank, robot
 from .scene import Cylinder, Scene, build
 
 if _mujoco_available:
@@ -238,3 +249,242 @@ def check(scene: Scene, pool: str) -> bool:
     if np.linalg.norm(d.xpos[body] - start) > MOVED_M:
         return False
     return not (open_pools and _penetration(m, d, ("table",)) > PENETRATION_M)
+
+
+# ---- video ------------------------------------------------------------------------------------------------------
+
+VIDEO_FPS, TILE = 30, (480, 360)
+SCRIPT_S = {"start": 0.7, "grasp": 1.5, "close": 1.5, "lift": 1.5, "hold": 1.5, "result": 1.0}
+# each pool's script from its stage on
+SCRIPTS = {
+    "attack": ("grasp", "close", "lift", "hold"),
+    "at_object": ("close", "lift", "hold"),
+    "in_jaws": ("lift", "hold"),
+    "lifted": ("lift", "hold"),
+}
+
+
+def _text(image: np.ndarray, lines: Sequence[str]) -> None:
+    for k, line in enumerate(lines):
+        for color, width in (((0, 0, 0), 3), ((255, 255, 255), 1)):
+            cv2.putText(
+                image, line, (8, 22 + 22 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, width, cv2.LINE_AA
+            )
+
+
+class _Run:
+    """One scene playing an anchor's script, its joints shifted by `shift` (deg), drawn from beside and the wrist."""
+
+    def __init__(
+        self,
+        model: XleRobotModel,
+        scene: Scene,
+        line: Mapping[str, Any],
+        shift: Mapping[str, float],
+        title: list[str],
+    ) -> None:
+        from .view import COLLISION, SITES, VISUAL
+
+        self.model, self.scene, self.anchor, self.placement = model, scene, line["anchor"], line["placement"]
+        self.shift, self.title = shift, title
+        m, d = scene.m, scene.d
+        self.body = m.body("object").id
+        self.camera = mujoco.MjvCamera()
+        self.camera.lookat[:] = d.xpos[self.body] + [0.0, 0.0, 0.02]
+        self.camera.distance, self.camera.azimuth, self.camera.elevation = 0.45, 120.0, -20.0
+        self.renderers = [mujoco.Renderer(m, TILE[1], TILE[0]) for _ in range(2)]
+        self.options = []
+        for own in (False, True):  # (the wrist camera's module left out of its own view)
+            option = mujoco.MjvOption()
+            option.geomgroup[VISUAL], option.geomgroup[COLLISION] = True, False
+            option.geomgroup[robot.OWN_MODULE_GROUPS[VISUAL]] = not own
+            option.geomgroup[robot.OWN_MODULE_GROUPS[COLLISION]] = False
+            option.sitegroup[SITES] = False
+            self.options.append(option)
+        self.act = [m.actuator(j).id for j in JOINTS]
+
+    def target(self, pose: str) -> np.ndarray:
+        """The anchor's `pose` joints, shifted (rad)."""
+        return np.radians([self.anchor[pose]["joints"][f"{j}.pos"] + self.shift.get(j, 0.0) for j in JOINTS])
+
+    def off_table_cm(self) -> float:
+        """How far the object's center is above where it stands (cm)."""
+        p = self.placement
+        return 100 * (float(self.scene.d.xpos[self.body][2]) - (p["bottom_root"][2] + p["height"] / 2))
+
+    def frame(self, phase: str) -> np.ndarray:
+        """The two views side by side, labeled."""
+        d = self.scene.d
+        views = []
+        for renderer, option, camera in zip(
+            self.renderers, self.options, (self.camera, robot.WRIST_CAMERA), strict=True
+        ):
+            renderer.update_scene(d, camera=camera, scene_option=option)
+            views.append(cv2.resize(renderer.render(), TILE))
+        _text(views[0], [*self.title, phase, f"object {self.off_table_cm():+.1f} cm off the table"])
+        _text(views[1], ["wrist camera"])
+        return np.hstack(views)
+
+    def close(self) -> None:
+        """Free the renderers."""
+        for renderer in self.renderers:
+            renderer.close()
+
+
+def _play(runs: Sequence[_Run], script: Sequence[str], writer: "cv2.VideoWriter") -> list[str]:
+    """`runs` stepped together through `script` (`SCRIPT_S`), stacked top to bottom; each one's result."""
+    m = runs[0].scene.m
+    every = max(1, int(round(1 / VIDEO_FPS / m.opt.timestep)))
+    count = [0]
+
+    def emit(phase: str) -> None:
+        writer.write(cv2.cvtColor(np.vstack([r.frame(phase) for r in runs]), cv2.COLOR_RGB2BGR))
+
+    for _ in range(int(SCRIPT_S["start"] * VIDEO_FPS)):
+        emit("the start")
+    for stage in script:
+        steps = int(SCRIPT_S[stage] / m.opt.timestep)
+        begin = [r.scene.d.ctrl[r.act].copy() for r in runs]
+        goal = [r.target(stage) if stage in ("grasp", "lift") else None for r in runs]
+        if stage == "close":
+            for r in runs:
+                width = close_gripper_pos(r.model, r.scene.arm, r.anchor["opening"])
+                r.scene.d.ctrl[r.scene.m.actuator(robot.GRIPPER).id] = np.radians(
+                    r.model.opening_deg(r.scene.arm, width)
+                )
+        for k in range(steps):
+            for r, b, g in zip(runs, begin, goal, strict=True):
+                if g is not None:
+                    r.scene.d.ctrl[r.act] = b + (k + 1) / steps * (g - b)
+                mujoco.mj_step(r.scene.m, r.scene.d)
+            count[0] += 1
+            if count[0] % every == 0:
+                emit(stage)
+    results = [
+        ("held" if r.off_table_cm() > 1.0 else "not held") + f" ({r.off_table_cm():.1f} cm)" for r in runs
+    ]
+    for _ in range(int(SCRIPT_S["result"] * VIDEO_FPS)):
+        emit("result: " + " / ".join(results))
+    return results
+
+
+def _describe(line: Mapping[str, Any]) -> str:
+    p, a = line["placement"], line["anchor"]
+    return (
+        f"{2000 * p['radius']:.0f} mm x {1000 * p['height']:.0f} mm, {1000 * p['mass_kg']:.0f} g, "
+        f"depth {1000 * a['depth']:.0f} mm"
+    )
+
+
+def unperturbed(sampler: StartSampler, index: int) -> Scene:
+    """Anchor `index`'s scene at its exact attack, the jaws open, arrived at as `StartSampler` arrives."""
+    anchor, arm = sampler.anchors[index]["anchor"], sampler.bank_config.arm
+    scene = sampler.scene(index)
+    attack = {j: anchor["attack"]["joints"][f"{j}.pos"] for j in JOINTS}
+    back = sampler.config.arrival_deg
+    before = {j: attack[j] - (back if ARRIVAL_UP[j] >= 0.5 else -back) for j in JOINTS}
+    jaws = open_gripper_pos(sampler.model, arm, anchor)
+    scene.set_pose({**{f"{j}.pos": v for j, v in before.items()}, "gripper.pos": jaws})
+    arrive(scene, before, attack)
+    return scene
+
+
+def video(
+    sampler: StartSampler,
+    out: Path,
+    rng: np.random.Generator,
+    pairs: int = 6,
+    clips: Mapping[str, int] | None = None,
+) -> list[str]:
+    """Starts played forward into `out` (mp4; the module docstring): `pairs` attack pairs, then `clips` per pool.
+
+    Returns a line per clip: what it was and how it ended.
+    """
+    require_package("mujoco", extra="felix_jr_sim")
+    model = sampler.model
+    writer = cv2.VideoWriter(str(out), cv2.VideoWriter_fourcc(*"mp4v"), VIDEO_FPS, (2 * TILE[0], 2 * TILE[1]))
+    blank = np.zeros((TILE[1], 2 * TILE[0], 3), dtype=np.uint8)
+    lines = []
+    try:
+        n = 0
+        for _ in range(pairs):
+            n += 1
+            start = sampler.sample(rng, "attack")
+            line = sampler.anchors[start.anchor]
+            o = start.offset_m
+            offset = f"offset (cm): along {100 * o['along']:+.1f}, across {100 * o['across']:+.1f}, up {100 * o['up']:+.1f}"
+            attack = line["anchor"]["attack"]["joints"]
+            shift = {j: start.joints_deg[j] - attack[f"{j}.pos"] for j in JOINTS}
+            runs = [
+                _Run(
+                    model,
+                    unperturbed(sampler, start.anchor),
+                    line,
+                    {},
+                    [f"{n}. unperturbed", _describe(line)],
+                ),
+                _Run(model, start.scene, line, shift, [f"{n}. perturbed (no correction)", offset]),
+            ]
+            results = _play(runs, SCRIPTS["attack"], writer)
+            lines.append(f"{n}. attack pair, {_describe(line)}, {offset}: {results[0]} / {results[1]}")
+            for r in runs:
+                r.close()
+        for pool, count in (clips or {}).items():
+            for _ in range(count):
+                n += 1
+                start = sampler.sample(rng, pool)
+                line = sampler.anchors[start.anchor]
+                title = [f"{n}. {pool}", _describe(line)]
+                if start.offset_m:
+                    o = start.offset_m
+                    title.append(
+                        f"offset (cm): along {100 * o['along']:+.1f}, across {100 * o['across']:+.1f}"
+                    )
+                attack = line["anchor"]["attack"]["joints"]
+                shift = {j: start.joints_deg[j] - attack[f"{j}.pos"] for j in start.joints_deg}
+                run = _Run(model, start.scene, line, shift, title)
+
+                results = _play([run], SCRIPTS[pool], _Stacked(writer, blank))
+                lines.append(f"{n}. {pool}, {_describe(line)}: {results[0]}")
+                run.close()
+    finally:
+        writer.release()
+    return lines
+
+
+class _Stacked:
+    """A writer that pads a single run's frames (half height) with a blank bottom half."""
+
+    def __init__(self, writer: "cv2.VideoWriter", blank: np.ndarray) -> None:
+        self.writer, self.blank = writer, blank
+
+    def write(self, frame: np.ndarray) -> None:
+        self.writer.write(np.vstack([frame, self.blank]))
+
+
+def main() -> None:
+    """Command line entry point; see the module docstring."""
+    from lerobot.felix_jr.harness import api
+
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("bank", type=Path)
+    parser.add_argument("out", type=Path, help="the video (.mp4; under a scratch/ folder)")
+    parser.add_argument(
+        "--pairs", type=int, default=6, help="attack starts, each below the anchor unperturbed"
+    )
+    parser.add_argument("--clips", nargs="*", default=[], help="single starts per pool: pool=count ...")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--model", type=Path, default=api.MODEL)
+    args = parser.parse_args()
+    clips = {k: int(v) for k, v in (c.split("=") for c in args.clips)}
+    unknown = set(clips) - set(POOLS)
+    if unknown:
+        parser.error(f"no pool {', '.join(sorted(unknown))}: {', '.join(POOLS)}")
+    sampler = StartSampler(XleRobotModel.load(args.model), args.bank)
+    for line in video(sampler, args.out, np.random.default_rng(args.seed), args.pairs, clips):
+        print(line, flush=True)
+    print(f"wrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()
