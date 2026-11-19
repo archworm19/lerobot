@@ -385,6 +385,17 @@ same check as the harness's: a recalibrated arm, a recalibrated gripper or flipp
   servo without changing anything.
 - `teleop.spacemouse_teleop --log run.csv` records commanded and measured joints and tip position every tick.
 
+## Branches and CI
+
+- **`main`** (the fork's default, `archworm19/lerobot`) is ours: changes reach it by pull request, its CI passed
+  (`.github/workflows/felix_ci.yml`: `tests`, the felix_jr fast tests; `guard`, no images, captures or `scratch/`
+  files added, and ruff on the Python a change touches). No force pushes, no deletion; the owner may bypass.
+- **`upstream-main`** mirrors Hugging Face's `main`. To take upstream's changes: `git fetch upstream`,
+  `git push origin upstream/main:upstream-main`, then a pull request from `upstream-main` into `main`.
+- The repository is public: GitHub-hosted Linux runners cost nothing. Upstream's own workflows are disabled here;
+  a new one arriving with a sync shows in the pull request: disable it (`gh workflow disable`).
+- `smoke` (every test, smoke and slow too) runs nightly and from the Actions tab (`workflow_dispatch`).
+
 ## Setup notes
 
 - Teleop needs `pyspacemouse`, the hidapi system library (`brew install hidapi` on macOS) and `placo`. They
