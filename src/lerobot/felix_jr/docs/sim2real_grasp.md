@@ -327,9 +327,37 @@ perturbed (decided 2026-11-19, replacing moving the object: the grasp stays the 
 any joints are a real pose; the misses are the shapes this 5-joint arm makes): the execution error in the joints (the
 sessions' commanded against read joints, its bias too) plus the perception error, a Cartesian offset mapped through
 the Jacobian's pseudo-inverse at the attack pose; both fitted from the sessions, sampled wider than fitted, the widths
-parameters; a cheap check (one forward: the arm not in the object, the wrist camera no nearer the table than the
+parameters (the servos now sag as the real ones do, above: the start's command the attack joints, the arm settling
+short on its own, so the execution's bias is not drawn, only its spread); a cheap check (one forward: the arm not in the object, the wrist camera no nearer the table than the
 attack's), wide; the other
 pools a snapshot with a few mm of noise; a few settling steps, and the rare start that intersects or falls rejected.
+
+**The arm's misses, from the sessions** (2026-11-19: every `execute(..., hold=True)` of 13 sessions, bowl1-8,
+container1, pen1-2, ruler1-2, both arms; the last move's commanded joints against the capture's read ones, the gripper's
+offset by the model; 50 moves). What the encoders see, so the execution part of the miss only:
+
+| pose (moves) | read - commanded, mean (deg): pan, lift, elbow, wrist flex, roll | std (deg) | gripper (cm) |
+| --- | --- | --- | --- |
+| attack, `pick.back` (28) | +0.1, +0.2, +0.7, +0.9, +0.2 | 0.3, 0.3, 0.5, 0.3, 0.4 | 0.6 low (std 0.3, to 1.35); across 0.0 +- 0.2, along 0.0 +- 0.15 |
+| grasp, `pick` (10) | -0.0, +0.3, +1.2, +0.1, +0.2 | 0.5, 0.1, 0.3, 0.5, 0.3 | 0.7 low (std 0.2); across 0.05 +- 0.4 |
+| loaded, lift / stage (8) | -0.1, +1.4, +1.1, -0.1, -0.1 | 0.5, 0.9, 0.6, 0.4, 0.3 | 1.05 low (std 0.4, to 1.9) |
+
+- **Gravity, not the direction of the move:** every pose sags (the read joints all on the same side), more loaded (the
+  shoulder +1.4 deg with an object, +0.2 without). The joints barely correlate at the attack (|r| <= 0.4): independent
+  draws per joint will do.
+- **The encoders see most of it, not all:** pen2's camera-measured sag was 1.3 cm against its encoders' 0.9 (link flex).
+- **The rest of the miss is perception** (`sessions.md`: not in the joints): the jaws ~1-1.5 cm short along the
+  approach (twice), bottles 0.3-2.3 cm ahead of the aim point, 0.5-1.5 cm across, a pushed pen ~15 deg.
+- **The simulator's arm, fitted to them** (`sim2real/shortfalls.py --fit`; `robot.ARM_KP_NM_PER_RAD`,
+  `robot.ARM_FRICTIONLOSS_NM`): the direction a joint moved into its hold matters more than gravity (elbow_flex +1.1
+  deg short moving down its range, +0.2 moving up; wrist_flex +0.9 and -0.2; the lift, loaded, +1.9 down): a servo
+  stops short on the side it came from, a friction band about a center gravity sets. Per joint a gain and a
+  `frictionloss`: ~25 N m/rad and 0.2 N m for the P 16 joints, ~50 for the P 32 ones (the elbow 0.45 N m, the lift
+  0.65), against the SO-101 model's 998 and 0.052. The replays (from the move before, at the harness's 20 deg/s) within
+  0.19-0.30 deg RMS of the holds that moved; ~0.35-0.4 on all, the rest moved too little to say which side. The holds
+  alone fit the lift as well at 150 N m/rad (its unloaded holds all moved one way), but only ~50 sags as the loaded
+  lifts did. The grip trials' replays barely moved (pyri6's loads 2.6 % RMS against 2.1, feno2's 4.3 against 4.6; both
+  lifts as on the robot); the bank's yield the same (13 of 24).
 
 **Randomized around the fits:** the friction, the fingers' stiffness, the gripper's gain and torque cap, the objects'
 size, mass and softness (feno: a softer bottle), the attack offsets, the wrist camera's pose on the gripper (~0.5 deg,

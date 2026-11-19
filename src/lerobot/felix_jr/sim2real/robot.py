@@ -79,6 +79,29 @@ COLLISION_GROUP = 3  # the SO-101's group for what collides (drawn only in a col
 #   12-23 % load, ~4.6 % of the stall torque a degree (as `tuning_notes.md` 3.6 has it at P 16). The SO-101 model's
 #   998 is ~100 times stiffer;
 GRIPPER_KP_NM_PER_RAD = 8.8
+# The arm's servos, per joint: the position gain (N m/rad) and the joint's friction (`frictionloss`, N m), fitted to the
+# sessions' holds (`shortfalls`, 2026-11-19: 50 holds of 13 sessions, both arms). A servo stops short in the direction it
+# moved (elbow_flex +1.1 deg moving down its range, +0.2 up; wrist_flex +0.9, -0.2): a friction band, half-width
+# friction / gain, about a center gravity sets (gravity / gain). The gain follows the joint's P coefficient
+# (`base_follower.DEFAULT_JOINT_P_GAINS`: 32 for the lift and the elbow, 16 for the rest), ~50 and ~25; the holds
+# alone fit the lift as well stiffer (150, 0.45: a ridge, all its unloaded holds moved one way), but only 50 sags as
+# the loaded lifts did moving down (1.5 deg with the jaws empty, 1.9 real with the object). Within 0.19-0.30 deg RMS
+# on the holds that moved; ~0.35-0.4 on all (the rest moved too little to say which side). The SO-101 model's were
+# 998 and 0.052: ~20-40 times stiffer, no band.
+ARM_KP_NM_PER_RAD: dict[str, float] | None = {
+    "shoulder_pan": 25.0,
+    "shoulder_lift": 50.0,
+    "elbow_flex": 50.0,
+    "wrist_flex": 25.0,
+    "wrist_roll": 25.0,
+}
+ARM_FRICTIONLOSS_NM: dict[str, float] | None = {
+    "shoulder_pan": 0.2,
+    "shoulder_lift": 0.65,
+    "elbow_flex": 0.45,
+    "wrist_flex": 0.2,
+    "wrist_roll": 0.2,
+}
 # - its torque, capped at the servo's torque limit (`Max_Torque_Limit` 500: 50 % of the STS3215's 3.35 N m stall torque,
 #   the model's forcerange; the SO-101's anti-burnout setup, `base_follower.py`). The load rose past 20 % on a close
 #   (23 % at 15 past contact, 33 % at 0) before the overload protection tripped (over ~20 % for ~2 s: not modeled; what
@@ -429,6 +452,12 @@ def arm_spec(
     gripper.gainprm[0] = GRIPPER_KP_NM_PER_RAD
     gripper.biasprm[1] = -GRIPPER_KP_NM_PER_RAD
     gripper.forcerange = [-GRIPPER_FORCE_NM, GRIPPER_FORCE_NM]
+    for joint, kp in (ARM_KP_NM_PER_RAD or {}).items():  # the arm's servos as fitted (`ARM_KP_NM_PER_RAD`)
+        servo = spec.actuator(joint)
+        servo.gainprm[0] = kp
+        servo.biasprm[1] = -kp
+    for joint, friction in (ARM_FRICTIONLOSS_NM or {}).items():
+        spec.joint(joint).frictionloss = friction
     k = model.intrinsics
     _camera(
         spec.worldbody,
