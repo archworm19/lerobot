@@ -76,6 +76,28 @@ the code; a bucket pays from ~1 GB or many pods reading the same data. **Outputs
 
    MuJoCo Warp takes it (`put_model`); the arm the same to 0.000 deg, the bottle settling 0.7 mm apart.
 3. **The image in CI** (GHCR) and the rsync-and-run script; a CPU smoke test (mjlab imports, our scene steps once).
+   **Built (2026-11-20):** `docker/Dockerfile.felix_sim` (CUDA 12.8 base, Python 3.12, `uv sync --frozen
+   --no-install-project --extra felix_jr_sim --extra felix_jr_gpu` into `/opt/venv`, sshd and rsync, the SO-101 model
+   in `/opt/felix/so101`; the code is not in it: `PYTHONPATH=/workspace/lerobot/src`), `docker/felix_sim_start.sh`
+   (RunPod's `$PUBLIC_KEY` into root's keys, sshd, stays up), `.github/workflows/felix_image.yml` (on a push to `main`
+   or `sim_deploy` that changes what the image is built from, or by hand: builds unless the tag exists, pushes
+   `felix-sim:<tag>` and `:latest`), `cloud/run.py` (below). The tag: a hash of `pyproject.toml`, `uv.lock`, the
+   Dockerfile and the start script (`python src/lerobot/felix_jr/cloud/run.py tag`), the same in CI and the run
+   script, which refuses a pod on another tag.
+
+## Running on a pod
+
+1. **The image public, once:** GHCR makes a new package private; on GitHub, the `felix-sim` package's settings,
+   "Change visibility" to public (free, and RunPod pulls it without credentials).
+2. **A pod:** RunPod, "Deploy" a GPU pod with a custom image, `ghcr.io/<owner>/felix-sim:<tag>` (`run.py tag` names the
+   tag), TCP port 22 exposed, your ssh public key in RunPod's settings (it reaches the pod as `$PUBLIC_KEY`). The
+   pod's "Connect" shows `ssh root@<ip> -p <port>`.
+3. **A run:** `uv run python -m lerobot.felix_jr.cloud.run --host root@<ip> --port <port> -- python -m
+   lerobot.felix_jr.sim2real.<module> ...`: the code synced (what git tracks or would: `scratch/` stays home), the
+   commit and `git diff` saved with the run, its output streamed, `$RUN_DIR`'s files fetched into
+   `cloud/scratch/runs/<id>/`. Again after a code change: only the changes go.
+4. **Stop the pod** when done (RunPod's console or `runpodctl stop pod <id>`): it bills until stopped, its disk until
+   deleted.
 4. **One RTX 4090 on RunPod** (deleted after): the replays on CUDA, then environments per second against their count;
    the same on an L40S.
 5. **The rollout batched** (`refine.rollout` / `outcome` over many environments): the refine and the bank on the GPU.

@@ -1,0 +1,59 @@
+# felix_jr's simulator on a rented GPU (RunPod): the dependencies only, never the code (`docs/sim_deploy.md`).
+#
+# The code is rsynced into /workspace/lerobot per run (`python -m lerobot.felix_jr.cloud.run`); this image changes
+# only when the lock does. Built and pushed by `.github/workflows/felix_image.yml` to
+# ghcr.io/<owner>/felix-sim:<tag>, the tag a hash of the files it is built from (`cloud/run.py`, `image_tag`).
+#
+#   docker build -f docker/Dockerfile.felix_sim -t felix-sim .
+
+ARG CUDA_VERSION=12.8.1
+ARG OS_VERSION=24.04
+FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu${OS_VERSION}
+
+ARG PYTHON_VERSION=3.12
+ARG UV_VERSION=0.11.30
+ARG IMAGE_TAG=dev
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_LINK_MODE=copy \
+    MUJOCO_GL=egl \
+    PYTHONPATH=/workspace/lerobot/src \
+    FELIX_JR_SIM_CACHE=/opt/felix/so101 \
+    PATH=/opt/venv/bin:$PATH
+
+# python, what MuJoCo's EGL rendering and OpenCV need, ssh and rsync (RunPod reaches a pod over ssh: its own templates
+# start sshd, a custom image must), git (a run records its commit)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python${PYTHON_VERSION} python${PYTHON_VERSION}-venv ca-certificates curl git \
+        libglib2.0-0 libgl1 libegl1 libgomp1 ffmpeg \
+        openssh-server rsync \
+    && curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+    && mkdir -p /run/sshd /workspace /opt/felix \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# the dependencies: the simulator's extras and mjlab, from the lock, not the project itself (its code comes by rsync)
+WORKDIR /opt/felix/build
+COPY pyproject.toml uv.lock README.md ./
+RUN uv venv --python python${PYTHON_VERSION} /opt/venv \
+    && uv sync --frozen --no-install-project --no-cache --extra felix_jr_sim --extra felix_jr_gpu
+
+# the SO-101's MuJoCo model (`sim2real/assets.py`), downloaded once here, not on every pod
+COPY src/lerobot/felix_jr/sim2real/assets.py /opt/felix/build/assets.py
+RUN python -c "import importlib.util as u; s = u.spec_from_file_location('assets', '/opt/felix/build/assets.py'); \
+m = u.module_from_spec(s); s.loader.exec_module(m); print(m.so101_model())" \
+    && rm -rf /opt/felix/build
+
+# what an ssh session sees (sshd does not pass the image's ENV on), the tag (a run checks it against its own lock)
+RUN printf '%s\n' \
+        'export PATH=/opt/venv/bin:$PATH' \
+        'export PYTHONPATH=/workspace/lerobot/src' \
+        'export MUJOCO_GL=egl' \
+        'export FELIX_JR_SIM_CACHE=/opt/felix/so101' \
+        > /etc/profile.d/felix.sh \
+    && echo "${IMAGE_TAG}" > /opt/felix/image_tag
+
+COPY docker/felix_sim_start.sh /opt/felix/start.sh
+WORKDIR /workspace
+EXPOSE 22
+CMD ["bash", "/opt/felix/start.sh"]

@@ -1,0 +1,89 @@
+# felix_jr's simulator image (docker/Dockerfile.felix_sim: the dependencies, never the code) built and pushed to GitHub's
+# container registry, ghcr.io/<owner>/felix-sim:<tag>. The tag is a hash of what the image is built from
+# (`python src/lerobot/felix_jr/cloud/run.py tag`, the same the run script checks a pod against), so a push that leaves
+# those files alone builds nothing new. Public repository and package: no cost (docs/sim_deploy.md).
+name: felix_image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - sim_deploy
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - docker/Dockerfile.felix_sim
+      - docker/felix_sim_start.sh
+      - src/lerobot/felix_jr/cloud/run.py
+      - .github/workflows/felix_image.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          lfs: false # (the image takes no LFS file: the code, the finger mesh with it, comes by rsync)
+      - name: The tag
+        id: tag
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          tag=$(python3 src/lerobot/felix_jr/cloud/run.py tag)
+          image="ghcr.io/${OWNER,,}/felix-sim"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "### felix-sim:$tag" >> "$GITHUB_STEP_SUMMARY"
+      - name: Login to GitHub's container registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Already built?
+        id: exists
+        env:
+          REF: ${{ steps.tag.outputs.image }}:${{ steps.tag.outputs.tag }}
+        run: |
+          if docker manifest inspect "$REF" > /dev/null 2>&1; then
+            echo "found=true" >> "$GITHUB_OUTPUT"; echo "$REF exists: nothing to build" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Free disk space (torch and CUDA's libraries are ~10 GB)
+        if: steps.exists.outputs.found == 'false'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - name: Set up Docker Buildx
+        if: steps.exists.outputs.found == 'false'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          cache-binary: false
+      - name: Build and push
+        if: steps.exists.outputs.found == 'false'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./docker/Dockerfile.felix_sim
+          push: true
+          build-args: |
+            IMAGE_TAG=${{ steps.tag.outputs.tag }}
+          tags: |
+            ${{ steps.tag.outputs.image }}:${{ steps.tag.outputs.tag }}
+            ${{ steps.tag.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.description=felix_jr's simulator (MuJoCo, MuJoCo Warp, mjlab): dependencies only
