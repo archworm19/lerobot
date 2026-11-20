@@ -7,6 +7,67 @@ renders and the workspace log; `session.py log <name>` prints the calls and obje
 (`workspace.pkl`) of the sessions before pen1 (`cable1`, `cable1_new`, `chapstick1`, `desk1`) no longer loads: it
 holds objects removed since (`Plan`, `Reach`) or lacks the call log. Their images and `log.jsonl` still read.
 
+## sim1-sim3 (2026-11-19): today's grasp against the simulator's refined one, uncorrected (refined 3 of 7, today's 0 of 5; feno, planned as pyri)
+
+**Setup.** The right arm, **feno (53 mm, 110 mm, 116 g) on the table, but every plan made for pyri** (45 mm, 130 mm,
+80 g: the driver's default `--bottle`, not changed; found after, from the wrist frames), stood on its outline at 5 spots the arm reaches from the side
+(`place_object`: the head's live picture), fitted by the head (`fit_cylinder`), then today's grasp (`grasp_candidates`
+A) and the refined one (`refine_grasp`, `sim2real/refine.py`) in turn, each the whole pick in one `execute`, held
+at the attack point for the person's call, no correction after (`sim2real/robot_session.py`; the plan:
+`sim_harness.md`, "The first robot session").
+
+**What went wrong first** (sim1, sim2's start): the refined grasps all "no grasp" (refine planned under the bank's
+tighter IK, which refused the harness's candidate itself; the fit covered only the marked middle of the bottle and the
+simulator stood that band on the table: its grasps closed above it); the simulator's table the head's 73.7 cm, the
+sweeps' 77.8; sim2's today's grasp at spot 2 ran the wrist camera's board into the shoulder (stopped by hand: the
+simulator, replayed, saw it: now a go/no-go before today's grasps, `check_collisions`); sim3's first trial stopped
+before moving (the jaw opened 1.7 units short of a 1.5 tolerance; now 3). All fixed in `921e81f16`.
+
+**Results** (sim2 and sim3, the trials that ran):
+
+| | run | lifted | slipped | pushed away | missed |
+| --- | --- | --- | --- | --- | --- |
+| today's | 5 | 0 | 0 | 2 | 3 |
+| refined | 7 | 3 | 3 | 1 | 0 |
+
+The refine predicted 75-88 % for each (in-sample: optimistic). Confounded: the refined plan is another grasp, not
+only a refined one.
+
+**The bottle was the wrong one in every model.** The head fitted a cylinder of pyri's radius to feno, the plans were
+made for pyri's height and the squeeze for its width, and the refine's 75-88 % were for an 80 g bottle 2 cm taller
+and 8 mm thinner than the one it would grasp. The robot ran feno.
+
+**Each plan replayed in the simulator with feno where it truly stood** (the plan as run; 16 physics draws each): **it
+matched the robot 11 times in 12** (lifted or not). Today's: none lifted in any draw (one jaw, slipped, knocked
+over), as on the robot. The three refined that lifted: 4, 8 and 3 of 16 (the last nominally knocked over: the one
+miss). The three that slipped: 1, 2 and 4 of 16, slipped or one jaw. The physics draws barely tell the lifts from the
+slips: these were marginal grasps of feno, all of them; a refine for feno, at 7 of 8, would have taken none.
+
+**The slips went too shallow** (the person, watching: the bottle not deep enough in the jaws; it was not pushed), and
+the simulator, given feno, slips them too. **No gripper error is needed:** the replay with pyri at the spots lifted
+them (16, 14, 7 of 16), which first read as the real jaws stopping short of the model's depth; with the right bottle
+that gap is gone. The wrist frames at the attack say the same: the model's outline of feno where it truly stood lies
+on the real bottle (the fixed jaw's tip within a few px of the model's in every frame); fitted to the frame's edges,
+the bottle sat +0.6 mm across the approach from the truth (sd 4.9 over 12 frames), the gripper aimed straight. Along
+the approach a single frame does not tell: -4 mm, sd 11 (the line of sight).
+
+**The head's estimates:** the bottle 6 mm farther along the approach than fitted on average (11 of 12 positive; -1 to
++13 mm), ~3 mm to one side. Fitted with pyri's radius (`fit_cylinder`'s radius is given): a cylinder 4 mm thinner than
+feno, its axis placed off. Not a measure of the fit as it would be with the right radius.
+
+**The servo model out of sample** (`shadow_report` over these 16 executions, 240 moves): the grasp poses 1.1 mm from
+the real arm's (the joints 0.09-0.18 deg RMS), the lifts 1.9 mm, the approach steps 1.5 mm; one attack 18 mm off (sim2's
+collision, the real arm blocked).
+
+**Takeaways:** the simulator, given the true bottle and spot, predicts the robot's outcome (11 of 12); today's grasp
+choice (the rim, the fingertips) fails on the robot as in the simulator. Nothing here measured the refine: it planned
+for another bottle. The driver now has no default bottle (`--bottle` required, confirmed before anything moves, a
+resumed session refuses another). **The refine for feno** (after, at sim3's 5 true spots, 16 fresh draws): no
+sample reaches 7 of 8 at any spot (5 batches each, the best 1-3 of 8); refined 1, 6, 9, 1, 9 of 16 (33 %), today's
+0, 3, 5, 2, 6 (20 %). Feno, wide and heavy for these jaws at friction 0.31, holds marginally wherever it is
+grasped: a poor test of the refine. Next: the same session with pyri, named (the simulator: ~75 % refined, ~39 %
+today's).
+
 ## ruler2 (2026-11-14): the bottle past the ruler; the other arm as a second view for DA3 (failed; not picked)
 
 **Setup.** The Aleve bottle (white, plain, ~5-6.5 cm wide, tapered) upright at (-45.5, -3.9) cm (the head's depth),

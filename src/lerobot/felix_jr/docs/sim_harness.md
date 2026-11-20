@@ -230,6 +230,13 @@ out of sample), the outcomes against the simulator's predictions, and the head's
 and steeper than today's, their camera's clearance at the grasp the simulator's alone: watch the wrist camera's board
 going in.
 
+**Ran** (sim1-sim3, 2026-11-19: `sessions.md`): refined 3 of 7 lifted, today's 0 of 5, but with **feno (53 mm,
+110 mm, 116 g) on the table and every plan made for pyri** (the driver's default bottle; now `--bottle` is required
+and confirmed). Replayed with feno at its true spot, the simulator matched the robot 11 of 12 (the slips included:
+no gripper depth error is needed); the wrist frames at the attack agree with the model across the approach (+0.6 mm,
+sd 4.9) and cannot tell along it. Refined for feno, no grasp holds: 33 % refined, 20 % today's, on fresh draws.
+Next: the session again, with pyri named.
+
 ## Then
 
 The servo-compensated commands (protocol step 2), judged by the shadow's records (does the arm land nearer?); the

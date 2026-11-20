@@ -1,7 +1,7 @@
 """The first robot session of the simulated grasps: today's grasp against the refined one (`docs/sim_harness.md`).
 
   uv run --extra felix_jr --extra felix_jr_sim --extra pyzmq-dep python -m lerobot.felix_jr.sim2real.robot_session \
-      <name> [--endpoint tcp://<pi>:5555] [--bottle pyri 45 130 80] [--spots 5] [--max-vel 20] [--assume-estimate]
+      <name> --bottle feno 53 110 116 [--endpoint tcp://<pi>:5555] [--spots 5] [--max-vel 20] [--assume-estimate]
 
 Everything goes through one harness (`api.Harness`, `SAFE`: every move of the head or the arm shown and asked
 first). The table's height first (a capture where the head rests); the spots (`placement.placement_spots`: the arm
@@ -26,6 +26,10 @@ spot), each:
 
 Saved in `harness/scratch/sessions/<name>/` (gitignored): `workspace.pkl` (the harness's state, every `ExecutionLog`
 among it: `shadow_report` reads them), `results.jsonl` (a line per grasp), `wrist_<spot>_<kind>.png` (at the attack).
+
+**The bottle** is named every time (`--bottle LABEL DIAMETER_MM HEIGHT_MM MASS_G`, no default: sim2 and sim3 ran
+feno under pyri's default, and every plan and replay was for the wrong bottle), confirmed against the one on the
+table before anything moves, and a resumed session refuses a bottle other than its first trials'.
 """
 
 import argparse
@@ -213,13 +217,37 @@ def trial(
     return record
 
 
+def check_bottle(bottle: Bottle, results: Path, ask: Any = input) -> None:
+    """Refuse `bottle` if the session's earlier trials (`results`) used another; else ask that it is the one placed."""
+    if results.is_file():
+        earlier = {
+            json.dumps(r["bottle"], sort_keys=True)
+            for r in map(json.loads, results.read_text().splitlines())
+            if r
+        }
+        if earlier and earlier != {json.dumps(bottle.__dict__, sort_keys=True)}:
+            raise SystemExit(
+                f"{results} has trials with {sorted(earlier)}, not {bottle.__dict__}: a new session"
+            )
+    answer = ask(
+        f"the bottle: {bottle.label}, {1000 * bottle.diameter:.0f} mm across, {1000 * bottle.height:.0f} mm tall, "
+        f"{1000 * bottle.mass:.0f} g. Is that the one you will place? [y/N] "
+    )
+    if not answer.strip().lower().startswith("y"):
+        raise SystemExit("stopped: name the bottle with --bottle LABEL DIAMETER_MM HEIGHT_MM MASS_G")
+
+
 def main() -> None:
     """Command line entry point; see the module docstring."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("name", help="the session's folder under harness/scratch/sessions/")
     parser.add_argument("--endpoint", default=api.ENDPOINT)
     parser.add_argument(
-        "--bottle", nargs=4, default=["pyri", "45", "130", "80"], metavar=("LABEL", "MM", "MM", "G")
+        "--bottle",
+        nargs=4,
+        required=True,
+        metavar=("LABEL", "DIAMETER_MM", "HEIGHT_MM", "MASS_G"),
+        help="the bottle on the table, e.g. feno 53 110 116 (pyri: 45 130 80)",
     )
     parser.add_argument("--spots", type=int, default=5)
     parser.add_argument("--max-vel", type=float, default=20.0)
@@ -228,6 +256,8 @@ def main() -> None:
     label, d, height, mass = args.bottle
     bottle = Bottle(label, float(d) / 1000, float(height) / 1000, float(mass) / 1000)
     folder = SESSIONS / args.name
+    results = folder / "results.jsonl"
+    check_bottle(bottle, results)
     folder.mkdir(parents=True, exist_ok=True)
     h = api.Harness(endpoint=args.endpoint)
     state = folder / "workspace.pkl"
@@ -240,7 +270,6 @@ def main() -> None:
     spots = placement.placement_spots(h.model, bottle.diameter / 2, bottle.height, table_z, n=args.spots)
     print(f"table at {100 * table_z:.1f} cm; spots: " + "; ".join(f"({x:+.3f}, {y:+.3f})" for x, y in spots))
     done = set()
-    results = folder / "results.jsonl"
     if results.is_file():
         done = {  # (a trial that found no grasp, or stopped on its own, is tried again)
             (r["spot"], r["kind"])
