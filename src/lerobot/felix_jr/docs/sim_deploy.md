@@ -87,8 +87,9 @@ the code; a bucket pays from ~1 GB or many pods reading the same data. **Outputs
 
 ## Running on a pod
 
-1. **The image public, once:** GHCR makes a new package private; on GitHub, the `felix-sim` package's settings,
-   "Change visibility" to public (free, and RunPod pulls it without credentials).
+1. **The image:** `ghcr.io/archworm19/felix-sim:<tag>`, public (it took the repository's visibility through its
+   source label: RunPod pulls it without credentials, at no cost). The first build (2026-11-20, tag `7b58f4797478`)
+   took 10 minutes on a free runner.
 2. **A pod:** RunPod, "Deploy" a GPU pod with a custom image, `ghcr.io/<owner>/felix-sim:<tag>` (`run.py tag` names the
    tag), TCP port 22 exposed, your ssh public key in RunPod's settings (it reaches the pod as `$PUBLIC_KEY`). The
    pod's "Connect" shows `ssh root@<ip> -p <port>`.
