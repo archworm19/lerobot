@@ -183,11 +183,13 @@ current sampled: the server's `grip`, protocol 6), a 30 s hold, a 4 cm lift.
 - **The fingers collide as pads on their straight inner faces** (`finger_pads`: 4 boxes 2 mm thick on the 67 mm face,
   11 to 24 mm deep), not the mesh: its convex hull takes in the ribbed body (22 mm behind the face), and a bottle
   gripped on it tipped over. Torsional friction (`condim` 4), the pads' contact parameters first (`priority`), an
-  elliptic friction cone, `impratio` 10, no-slip iterations.
+  elliptic friction cone, `impratio` 10 (no-slip iterations until 2026-11-20: MuJoCo Warp has none; the fingers'
+  give and the joints' friction refitted without them, `sim_deploy.md`).
 - **The gripper's servo as measured:** its gain 8.8 N m/rad (the stalls 1.9-3.8 units short at 12-23 %; the stock
   SO-101 model's 998 is ~100 times stiffer), its torque capped at the servo's limit, 50 % of 3.35 N m (what it keeps:
   20 %; the protection's trip is not modeled).
-- **The fingers' give:** each finger on a hinge at its base with a spring, 1.2 N m/rad, fitted to pyri's stalls. The
+- **The fingers' give:** each finger on a hinge at its base with a spring, 1.6 N m/rad (1.2 with no-slip), fitted to
+  pyri's stalls. The
   joints' armature is the SO-101 default the fit was made with (0.005 kg m^2: an explicit 0 moved the stalls 0.8).
 - **Friction 0.31**, fitted to the lifts (feno slips below 0.33, pyri holds from 0.30). Two bottles: a first value.
 

@@ -38,7 +38,7 @@ FIT_TRIAL = "pyri6"  # the 45 mm bottle, the stiffer one (`robot.FINGER_STIFFNES
 TRIALS = ("pyri6", "feno2")
 # per model, the settings tried (`robot` constants, as {name: value}); the first is today's
 GRIDS: dict[str, list[dict[str, Any]]] = {
-    "sprung": [{"FINGER_STIFFNESS_NM_PER_RAD": k} for k in (1.2, 0.8, 1.6)],
+    "sprung": [{"FINGER_STIFFNESS_NM_PER_RAD": k} for k in (1.6, 1.2, 2.2)],
     "rigid": [{}],
     "soft": [
         {"FINGER_SOFT_SOLREF": (tc, 1.0), "FINGER_SOFT_SOLIMP": (d0, 0.95, w, 0.5, 2.0)}

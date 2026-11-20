@@ -99,6 +99,11 @@ ARM_KP_NM_PER_RAD: dict[str, float] | None = {
     "wrist_flex": 25.0,
     "wrist_roll": 25.0,
 }
+# the friction held hard (`JOINT_FRICTION_SOLIMP`, the impedance of the joints' friction constraint): MuJoCo's soft
+# default lets a joint creep through its friction band; the no-slip solver stopped that until it went (2026-11-20:
+# MuJoCo Warp has none). With 0.99-0.999 the shadow's replays as before or nearer (the pinch points 1.7 mm mean at the
+# attacks, 1.4 at the grasps, 1.8 loaded; with no-slip 2.0, 1.4, 1.9; with neither 2.3, 2.0, 2.8)
+JOINT_FRICTION_SOLIMP = (0.99, 0.999, 0.001, 0.5, 2.0)
 ARM_FRICTIONLOSS_NM: dict[str, float] | None = {
     "shoulder_pan": 0.2,
     "shoulder_lift": 0.65,
@@ -129,8 +134,11 @@ PAD_TORSIONAL_FRICTION, PAD_ROLLING_FRICTION = 0.005, 0.0001
 #   past contact as the load rose 12 -> 23 % (0.37 N m): with the force ~6 cm from the hinge and ~3.8 cm from each
 #   finger's base, two fingers in series, ~1 N m/rad each. Fitted (`grip_sim`) to the 45 mm bottle, the stiffer one: at
 #   1.0-1.4 its five stalls within 0.2-0.3 gripper.pos units (RMS) and its loads 1.4-2.5 %; the 53 mm one gave more at
-#   less load (its own give, a softer bottle: an object's, not the gripper's);
-FINGER_STIFFNESS_NM_PER_RAD = 1.2
+#   less load (its own give, a softer bottle: an object's, not the gripper's). 1.6 since noslip went (2026-11-20,
+#   MuJoCo Warp has none: `docs/sim_deploy.md`): without it the pads creep as the jaw closes, and 1.2 stalled the jaw
+#   ~0.5 units further closed at 4-6 % less load; at 1.6, 0.27 / 0.44 units and 3.0 / 4.3 % RMS (the 45 / 53 mm
+#   bottles; with noslip at 1.2: 0.23 / 0.39, 1.7 / 3.3), and both lifts as on the robot (with noslip: one);
+FINGER_STIFFNESS_NM_PER_RAD = 1.6
 FINGER_DAMPING = 0.005  # (about critical for a finger's ~15 g, 3 cm)
 # the give joints' armature (kg m^2): the SO-101 model's joint default, which they inherited when the stiffness and the
 # friction were fitted (an explicit 0 changed the stalls by up to 0.8 units); it also keeps the chain's 0.6 g segments
@@ -474,10 +482,10 @@ def arm_spec(
         )
     if fingers is not None:
         _add_fingers(spec, model, arm, q, fingers, finger_model)
-    # friction that holds without creeping, for a grasp (MuJoCo's advice: an elliptic cone, a high impratio, no-slip)
+    # friction that holds without creeping, for a grasp (MuJoCo's advice: an elliptic cone, a high impratio; its no-slip
+    # solver too, until 2026-11-20: MuJoCo Warp has none, so neither has this; the fingers' give refitted without it)
     spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
     spec.option.impratio = 10.0
-    spec.option.noslip_iterations = 3
     # the gripper's servo as measured (`GRIPPER_KP_NM_PER_RAD`, `GRIPPER_FORCE_NM`)
     gripper = spec.actuator(GRIPPER)
     gripper.gainprm[0] = GRIPPER_KP_NM_PER_RAD
@@ -489,6 +497,7 @@ def arm_spec(
         servo.biasprm[1] = -kp
     for joint, friction in (ARM_FRICTIONLOSS_NM or {}).items():
         spec.joint(joint).frictionloss = friction
+        spec.joint(joint).solimp_friction = list(JOINT_FRICTION_SOLIMP)
     k = model.intrinsics
     _camera(
         spec.worldbody,

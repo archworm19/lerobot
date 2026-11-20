@@ -59,6 +59,22 @@ the code; a bucket pays from ~1 GB or many pods reading the same data. **Outputs
    10 of 12 (sim3 spot 2's refined, lifted on the robot, now slips; the physics draws' lifts 6, 6, 3 of 16 for the
    real lifts, 4, 0, 1, 2 for the real failures: as marginal as before). So: refit the contact without noslip
    (the finger model's give or the contact's softness, against the grip trials' loads), then the replays again.
+   **Refitted without noslip (2026-11-20; `robot.py` now has none):** noslip also held the joints' friction loss
+   (the arm servos' fitted friction) hard; without it they creep (the shadow's pinch points 2.3 / 2.0 / 2.8 mm mean
+   at the attacks / grasps / loaded). Two changes: the joints' friction constraint stiff (`JOINT_FRICTION_SOLIMP`
+   0.99-0.999; 0.004 s time constants scored the same) and the fingers' give 1.6 N m/rad (was 1.2; impratio 10, 30,
+   100 alike at 1.6; 2.2 erratic). Against the model with noslip:
+
+   | | with noslip | without |
+   | --- | --- | --- |
+   | shadow, pinch points mean (attack / grasp / loaded / other) | 2.0 / 1.4 / 1.9 / 1.5 mm | 1.7 / 1.4 / 1.8 / 1.5 mm |
+   | grip trials, stall RMS (pyri6 / feno2) | 0.23 / 0.39 units | ~0.3 / ~0.5 |
+   | grip trials, load RMS | 1.7 / 3.3 points | ~2.9 / ~4.4 (low) |
+   | grip trials, lifts as the robot's | 1 of 2 | 2 of 2 |
+   | feno replays (lifted or not) | 11 of 12 | 11 of 12 |
+   | physics draws lifted: real lifts / real failures | 4, 8, 3 / 1, 2, 0, 4 of 16 | 7, 7, 5 / 0, 0, 0, 4 |
+
+   MuJoCo Warp takes it (`put_model`); the arm the same to 0.000 deg, the bottle settling 0.7 mm apart.
 3. **The image in CI** (GHCR) and the rsync-and-run script; a CPU smoke test (mjlab imports, our scene steps once).
 4. **One RTX 4090 on RunPod** (deleted after): the replays on CUDA, then environments per second against their count;
    the same on an L40S.
