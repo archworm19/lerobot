@@ -54,11 +54,15 @@ class Box:
     rgba: tuple[float, float, float, float] = (0.5, 0.5, 0.5, 1.0)
 
 
-def from_primitive(primitive: "Primitive", name: str = "object", mass: float = 0.05) -> Cylinder:
+def from_primitive(
+    primitive: "Primitive", name: str = "object", mass: float = 0.05, table_z: float | None = None
+) -> Cylinder:
     """The simulator's object for a harness primitive (`harness.primitives`), standing on the table where it is.
 
-    Only an upright `Cylinder` so far (its bottom end's x, y; its radius and length); others are refused. The mass is
-    not geometry: an estimate, or a physics draw's.
+    Only an upright `Cylinder` so far (its bottom end's x, y; its radius and length); others are refused. With
+    `table_z`, it stands on the table up to the primitive's top: a fit of the part marked (`fit_cylinder`: the middle of
+    a bottle) is a bottle standing there (a fit 3 cm above the table, 6 cm long, stood on the table 6 cm tall, put its
+    grasps above it: sim1, 2026-11-19). The mass is not geometry: an estimate, or a physics draw's.
     """
     from lerobot.felix_jr.harness.primitives import Cylinder as CylinderPrimitive
 
@@ -67,7 +71,14 @@ def from_primitive(primitive: "Primitive", name: str = "object", mass: float = 0
     if abs(float(primitive.axis_root[2])) < 0.99:
         raise NotImplementedError("only upright cylinders stand in the simulator so far")
     bottom = primitive.bottom_root if primitive.axis_root[2] > 0 else primitive.top_root
-    return Cylinder(name, float(bottom[0]), float(bottom[1]), primitive.radius, primitive.length, mass)
+    height = primitive.length
+    if table_z is not None:
+        height = float(bottom[2]) + primitive.length - table_z
+        if height <= 0:
+            raise ValueError(
+                f"the object's top ({float(bottom[2]) + primitive.length:.3f} m) is under the table"
+            )
+    return Cylinder(name, float(bottom[0]), float(bottom[1]), primitive.radius, height, mass)
 
 
 @dataclass

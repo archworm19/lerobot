@@ -76,3 +76,68 @@ def test_a_logged_execution_is_replayed_compared_and_reported_through_the_harnes
     report = h.call("shadow_report")
     assert report.startswith("1 moves of 1 executions") and "attack (1)" in report
     assert sum(1 for c in h.calls if c["tool"] == "replay") == 1  # (the recorded replay reused)
+
+
+# sim2's spot-2 approach (2026-11-19, the right arm from rest): its wrist camera's board ran into the shoulder at step 6
+# (stopped by hand)
+SIM2_REST = {
+    "shoulder_pan.pos": -0.7,
+    "shoulder_lift.pos": -103.0,
+    "elbow_flex.pos": 96.4,
+    "wrist_flex.pos": 71.3,
+    "wrist_roll.pos": -0.2,
+    "gripper.pos": 2.0,
+}
+SIM2_APPROACH = [
+    {"gripper.pos": 38.6},
+    {
+        "shoulder_pan.pos": -26.4,
+        "shoulder_lift.pos": -55.2,
+        "elbow_flex.pos": 23.3,
+        "wrist_flex.pos": 80.7,
+        "wrist_roll.pos": 76.6,
+    },
+    {
+        "shoulder_pan.pos": -26.6,
+        "shoulder_lift.pos": -63.4,
+        "elbow_flex.pos": 41.0,
+        "wrist_flex.pos": 71.5,
+        "wrist_roll.pos": 76.4,
+    },
+    {
+        "shoulder_pan.pos": -26.7,
+        "shoulder_lift.pos": -68.0,
+        "elbow_flex.pos": 51.6,
+        "wrist_flex.pos": 65.6,
+        "wrist_roll.pos": 76.3,
+    },
+    {
+        "shoulder_pan.pos": -26.8,
+        "shoulder_lift.pos": -70.1,
+        "elbow_flex.pos": 56.7,
+        "wrist_flex.pos": 62.7,
+        "wrist_roll.pos": 76.2,
+    },
+]
+
+
+def test_a_watched_replay_flags_the_cameras_board_into_the_shoulder_and_not_the_rest_poses_own_contact(model):
+    """sim2's approach: the folded rest's gripper against the shoulder is the start's (not flagged); the camera's board
+    reaching the shoulder on the way in is. The same approach with the wrist unrolled stays clear."""
+    shadow = Shadow(model, "right", SIM2_REST, table_z=NO_TABLE_Z, watch=True)
+    for k, targets in enumerate(SIM2_APPROACH):
+        shadow.move(f"move {k}", targets, 20.0, 40.0)
+    hits = {(a, b) for _, a, b, _ in shadow.collisions}
+    assert ("gripper", "shoulder") in hits, shadow.collisions[:3]
+    assert all(
+        label != "move 0" for label, *_ in shadow.collisions
+    )  # (not at the start: the rest's own contact)
+    clear = Shadow(model, "right", SIM2_REST, table_z=NO_TABLE_Z, watch=True)
+    for k, targets in enumerate(SIM2_APPROACH):
+        clear.move(
+            f"move {k}",
+            {**targets, **({"wrist_roll.pos": 0.0} if "wrist_roll.pos" in targets else {})},
+            20.0,
+            40.0,
+        )
+    assert not clear.collisions, clear.collisions[:3]

@@ -40,6 +40,9 @@ if TYPE_CHECKING:
 JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")
 # a close of more than this (`gripper.pos`): the jaws on an object from there (phase 1: `loaded`), an opening ends it
 CLOSE_UNITS = 5.0
+# a new contact this deep: a collision (sim2, 2026-11-19: the camera's board into the shoulder registered 0.2 mm at once
+# and held at 0.7, the arm blocked; leaving the rest pose, its contact flickered back at 0.002 mm)
+COLLISION_M = 0.0001
 SESSIONS = Path(__file__).resolve().parents[1] / "harness" / "scratch" / "sessions"
 # the recorded sessions' replays without a table: their tables stood at other heights than the model's floor (a wrong
 # one put bowl4's wrist camera into it, `shortfalls`)
@@ -76,6 +79,9 @@ class Shadow:
     loaded: bool = False
     # called each tick (1/`WAYPOINT_HZ` s of simulated time) with the move's label: to film a replay (`failures`)
     on_tick: Callable[[str], None] | None = None
+    # with `watch`: every collision of the arm, each tick (`collisions`: (the move's label, the two bodies, how deep, m))
+    watch: bool = False
+    collisions: list[tuple[str, str, str, float]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Build the scene and pose the arm at the readings, the servos holding there."""
@@ -90,6 +96,8 @@ class Shadow:
         )
         self.scene.set_pose(dict(self.start))
         self.goal = dict(self.start)
+        self._objects = {self.scene.m.body(o.name).id for o in self.objects}
+        self._benign = set(self._touching())  # (the start pose's own contacts: the folded rest's)
 
     def reading(self) -> dict[str, float]:
         """The simulated joints (deg) and `gripper.pos`, as the servos would report them."""
@@ -111,8 +119,44 @@ class Shadow:
         per_tick = max(1, int(round(1.0 / WAYPOINT_HZ / m.opt.timestep)))
         for k in range(int(round(seconds / m.opt.timestep))):
             mujoco.mj_step(m, d)
-            if self.on_tick is not None and (k + 1) % per_tick == 0:
-                self.on_tick(label)
+            if (k + 1) % per_tick == 0:
+                self._tick(label)
+
+    def _tick(self, label: str) -> None:
+        if self.watch:
+            touching = self._touching()
+            self._benign &= set(touching)  # (a start-pose contact that has let go is benign no more)
+            for pair, depth in touching.items():
+                if pair not in self._benign and depth > COLLISION_M:
+                    self.collisions.append((label, pair[0], pair[1], depth))
+        if self.on_tick is not None:
+            self.on_tick(label)
+
+    def _touching(self) -> dict[tuple[str, str], float]:
+        """The arm's contacts now that are collisions if new, each pair's deepest (m).
+
+        Arm against arm (its camera's board too), arm against the table, and the arm but its fingers against an object.
+        """
+        m, d = self.scene.m, self.scene.d
+        out: dict[tuple[str, str], float] = {}
+        for c in d.contact[: d.ncon]:
+            b1, b2 = int(m.geom_bodyid[c.geom1]), int(m.geom_bodyid[c.geom2])
+            names = []
+            for g, b in ((c.geom1, b1), (c.geom2, b2)):
+                names.append("table" if m.geom(g).name == "table" else m.body(b).name)
+            arm = [
+                b not in self._objects and n != "table" and b != 0
+                for b, n in zip((b1, b2), names, strict=True)
+            ]
+            if not any(arm):
+                continue  # (the object on the table)
+            if any(b in self._objects for b in (b1, b2)):
+                other = names[1] if b1 in self._objects else names[0]
+                if other.startswith("finger_"):
+                    continue  # (the jaws on the object: a grasp)
+            pair = tuple(sorted(names))
+            out[pair] = max(out.get(pair, 0.0), -float(c.dist))  # type: ignore[index]
+        return out  # type: ignore[return-value]
 
     def _command(self, pose: Mapping[str, float]) -> None:
         m, d = self.scene.m, self.scene.d
@@ -155,8 +199,7 @@ class Shadow:
             for _ in range(per_tick):
                 mujoco.mj_step(m, d)
             t += tick
-            if self.on_tick is not None:
-                self.on_tick(label)
+            self._tick(label)
         self._command(dict(targets))
         joints = list(
             targets
@@ -168,8 +211,7 @@ class Shadow:
             for _ in range(per_tick):
                 mujoco.mj_step(m, d)
             held += tick
-            if self.on_tick is not None:
-                self.on_tick(label)
+            self._tick(label)
         self.goal.update({k: float(v) for k, v in targets.items()})
         r = self.reading()
         return MoveReplay(

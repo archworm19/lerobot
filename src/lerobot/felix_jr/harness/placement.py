@@ -122,8 +122,11 @@ def placement_spots(
     """
     from lerobot.felix_jr.calibration.joint_sim import REST
 
-    from .grasping import first_feasible
+    from .grasping import GraspSettings, first_feasible
     from .primitives import Cylinder
+
+    if settings is None:  # (the arm's plane checked before any IK: a spot nothing reaches is told in seconds)
+        settings = GraspSettings(rotation_bounds_deg=(15.0, 10.0, 10.0), arm_plane_tol_deg=15.0)
 
     base = model.frame_pose(f"{arm}_base_link", model.joint_vector())[:3, 3]
     capture: Any = SimpleNamespace(arms={arm: dict(rest or {**REST, "gripper.pos": 2.0})}, head_ticks=None)

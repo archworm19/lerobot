@@ -699,6 +699,34 @@ def placement_spots(h: Harness, diameter: float, height: float, arm: str = "righ
     return "\n".join(f"{k + 1}. x {x:+.3f}, y {y:+.3f}" for k, (x, y) in enumerate(spots)) or "none reachable"
 
 
+@tool(Effect.SOFTWARE, records=False)
+def check_collisions(
+    h: Harness, execution: Execution, target: Object, part: str | None = None, table_z: float | None = None
+) -> str:
+    """Whether `execution` collides, played once in the simulator first: a go/no-go before running it on the robot.
+
+    For a plan the simulator has not seen (`refine_grasp`'s already were: it refuses any that collides). "collides:"
+    the arm into itself (its wrist camera's board into its shoulder: sim2) or the table: do not run it. "bumps the
+    object:" the arm but its fingers into `target` where it was fitted: judge it. "clear": neither. Each with the
+    bodies, the move, how deep; the physics as fitted. The simulator's arm stands for the real one to a few mm: a graze it calls clear may
+    still touch. `table_z`: as `refine_grasp`'s. Needs the simulator (`--extra felix_jr_sim`). Nothing moves.
+    """
+    from lerobot.felix_jr.sim2real.refine import RefineSettings, collisions
+
+    primitive = target.part(part) if isinstance(target, Object) else target
+    if table_z is None:
+        tables = [node.obj for node in h.ws.nodes.values() if isinstance(node.obj, TableEstimate)]
+        table_z = max(tables, key=lambda t: t.n_inliers).h if tables else h.model.floor_z
+    arm = execution.poses.arm
+    start = execution.poses.capture.arms[arm]
+    arm_hits, object_hits = collisions(
+        h.model, arm, primitive, execution, start, RefineSettings(table_z=table_z)
+    )
+    lines = [f"collides: {'; '.join(arm_hits)}"] if arm_hits else []
+    lines += [f"bumps the object: {'; '.join(object_hits)}"] if object_hits else []
+    return "\n".join(lines) or "clear"
+
+
 @tool(Effect.SOFTWARE)
 def refine_grasp(
     h: Harness,
@@ -711,6 +739,7 @@ def refine_grasp(
     mass_kg: float = 0.08,
     max_batches: int = 5,
     workers: int = 6,
+    table_z: float | None = None,
 ) -> Any:
     """A grasp refined in the simulator (`docs/sim_harness.md`): samples around it, the first that holds taken.
 
@@ -725,9 +754,10 @@ def refine_grasp(
     `phase="head"`: `chosen` is `grasp_candidates`' result, `name` the candidate; the plan starts from their capture.
     `phase="wrist"`: `chosen` is an earlier `refine_grasp`'s plan, `capture` a fresh one at the attack point (the
     arm's reading there), `target` the object measured again; the approach's direction kept. `mass_kg`: the object's
-    estimate. Needs the simulator (`--extra felix_jr_sim`). Nothing moves.
+    estimate. `table_z`: the table the simulator stands it on (m; default the best `table_height`, else the
+    calibration's). Needs the simulator (`--extra felix_jr_sim`). Nothing moves.
     """
-    from lerobot.felix_jr.sim2real.refine import RefineSettings, planning_settings, refine
+    from lerobot.felix_jr.sim2real.refine import RefineSettings, refine
 
     _fresh(h, target, "the object")
     primitive = target.part(part) if isinstance(target, Object) else target
@@ -749,7 +779,8 @@ def refine_grasp(
         raise ValueError(f"phase: 'head' or 'wrist', not {phase!r}")
     arm = candidate.claw.arm
     tables = [node.obj for node in h.ws.nodes.values() if isinstance(node.obj, TableEstimate)]
-    table_z = max(tables, key=lambda t: t.n_inliers).h if tables else h.model.floor_z
+    if table_z is None:
+        table_z = max(tables, key=lambda t: t.n_inliers).h if tables else h.model.floor_z
     settings = RefineSettings(mass_kg=mass_kg, table_z=table_z, max_batches=max_batches, workers=workers)
     return refine(
         h.model,
@@ -758,10 +789,11 @@ def refine_grasp(
         initial,
         candidate.claw.fixed_side,
         plan_capture.arms[arm],
-        planning_settings(candidate.settings),
+        candidate.settings,  # (as it was found: the bank's tighter IK refused A itself; its sag allowance too)
         settings,
         phase,
         capture=plan_capture,
+        obstacles=[max(tables, key=lambda t: t.n_inliers)] if tables else None,  # (grasp_candidates' default)
     )
 
 

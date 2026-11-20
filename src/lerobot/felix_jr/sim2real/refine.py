@@ -58,6 +58,7 @@ from .grasp_check import physics_draws
 from .scene import from_primitive
 from .shadow import Shadow
 
+OBJECT = "object"  # the simulated object's body (`scene.from_primitive`'s default name)
 HELD_FRACTION = 0.75  # the object up this much of the planned lift: lifted
 HOLD_S = 2.0  # held this long after the lift
 PHASES = ("head", "wrist")
@@ -170,11 +171,13 @@ def plan_for(
     start: Mapping[str, float],
     phase: str = "head",
     capture: Any | None = None,
+    obstacles: Sequence[Any] | None = None,
 ) -> tuple[GraspCandidate, Execution] | str:
     """The harness's plan for `params` (the module docstring): the candidate and its execution, or why there is none.
 
     `capture`: the harness's capture the plan is made from (its poses' capture: `execute` checks it is fresh); else a
-    stand-in with the arm at `start`.
+    stand-in with the arm at `start`. `obstacles`: what the wrist camera keeps clear of (`grasp_candidates`'; None: a
+    plane at the object's lower end).
     """
     family = {k: v for k, v in params.items() if k not in ("depth", "offset")}
     grasp = primitive.grasp_at(family)
@@ -192,7 +195,7 @@ def plan_for(
         capture,
         {},
         _Timer(),
-        tuple(_default_obstacles(primitive)),
+        tuple(_default_obstacles(primitive) if obstacles is None else obstacles),
     )
     if not isinstance(found, GraspCandidate):
         return f"{found.stage}: {found.reason}"
@@ -222,6 +225,9 @@ class Outcome:
     jaws_touching: int  # the fingers whose pads touched the object when the jaws had closed (0, 1 or 2)
     # the jaw's `gripper.pos` past the object's contact then (not a miss's sign: the fingers give ~13 units)
     past_contact: float
+    # the arm's collisions (`Shadow.watch`: with itself, its camera's board, the table, the object but by the fingers):
+    # (the move's label, the two bodies, how deep), the first of each pair
+    collisions: tuple[tuple[str, str, str, float], ...] = ()
 
 
 def outcome(
@@ -243,10 +249,10 @@ def outcome(
     hold). `on_tick(shadow, label)`: each tick (to film it).
     """
     s = refine_settings
-    moved = from_primitive(primitive, mass=s.mass_kg * draw.get("mass_scale", 1.0))
+    moved = from_primitive(primitive, mass=s.mass_kg * draw.get("mass_scale", 1.0), table_z=s.table_z)
     moved = replace(moved, x=moved.x + float(offset_m[0]), y=moved.y + float(offset_m[1]))
     with physics({k: v for k, v in draw.items() if k.isupper()}):
-        shadow = Shadow(model, arm, start, s.table_z, [moved])
+        shadow = Shadow(model, arm, start, s.table_z, [moved], watch=True)
     if on_tick is not None:
         shadow.on_tick = lambda label: on_tick(shadow, label)
     start_xyz = shadow.object_position()
@@ -279,7 +285,10 @@ def outcome(
         mode = "one jaw"
     else:
         mode = "slipped"
-    return Outcome(rise, mode, tilt, pushed, touching, past)
+    first: dict[tuple[str, str], tuple[str, str, str, float]] = {}
+    for c in shadow.collisions:
+        first.setdefault((c[1], c[2]), c)
+    return Outcome(rise, mode, tilt, pushed, touching, past, tuple(first.values()))
 
 
 def _jaws_touching(shadow: Shadow) -> int:
@@ -321,15 +330,27 @@ def evaluate(
     refine_settings: RefineSettings,
     phase: str = "head",
     capture: Any | None = None,
+    obstacles: Sequence[Any] | None = None,
 ) -> tuple[Sample, tuple[GraspCandidate, Execution] | None]:
     """One sample: its plan, played under each of `world`'s draws (object offset, physics): its score."""
-    planned = plan_for(model, arm, primitive, params, fixed_side, grasp_settings, start, phase, capture)
+    planned = plan_for(
+        model, arm, primitive, params, fixed_side, grasp_settings, start, phase, capture, obstacles
+    )
     if isinstance(planned, str):
         return Sample(dict(params), 0.0, 0.0, refused=planned), None
-    rises = tuple(
-        rollout(model, arm, primitive, planned[1], start, offset, draw, refine_settings)
+    outcomes = [
+        outcome(model, arm, primitive, planned[1], start, offset, draw, refine_settings)
         for offset, draw in world
-    )
+    ]
+    # the arm into itself or the table: the same in every draw (the same commands), a safety matter: refused. Into the
+    # object (but by its fingers) depends on the draw: it counts through that draw's outcome only
+    collided = next((c for o in outcomes for c in o.collisions if OBJECT not in c[1:3]), None)
+    if collided is not None:
+        label, a, b, _ = collided
+        return Sample(
+            dict(params), 0.0, 0.0, refused=f"collides: {a} with {b} ({label.split(' (')[0][:30]})"
+        ), None
+    rises = tuple(o.rise for o in outcomes)
     lifted = float(np.mean([r > HELD_FRACTION * LIFT_M for r in rises]))
     rise = float(np.mean([min(max(r, 0.0), LIFT_M) for r in rises])) / LIFT_M
     return Sample(dict(params), lifted + 0.1 * rise, lifted, rises), planned
@@ -410,6 +431,7 @@ def _evaluate_job(params: dict[str, float]) -> tuple[Sample, tuple[GraspCandidat
         w["settings"],
         w["phase"],
         w["capture"],
+        w["obstacles"],
     )
 
 
@@ -425,6 +447,7 @@ def refine(
     phase: str = "head",
     where: Mapping[str, tuple[float, float]] | None = None,
     capture: Any | None = None,
+    obstacles: Sequence[Any] | None = None,
 ) -> RefinedPlan:
     """The grasp refined from `initial` (the module docstring): the first robust sample, or the best seen.
 
@@ -457,6 +480,7 @@ def refine(
         "settings": s,
         "phase": phase,
         "capture": capture,
+        "obstacles": obstacles,
     }
     started = time.perf_counter()
     samples: list[Sample] = []
@@ -491,8 +515,12 @@ def refine(
             pool.join()
     assert best is not None
     planned = best[1]
-    if planned is not None:  # planned again here: a worker's plan holds a copy of the capture, not the harness's own
-        again = plan_for(model, arm, primitive, best[0].params, fixed_side, g, start, phase, capture)
+    if (
+        planned is not None
+    ):  # planned again here: a worker's plan holds a copy of the capture, not the harness's own
+        again = plan_for(
+            model, arm, primitive, best[0].params, fixed_side, g, start, phase, capture, obstacles
+        )
         planned = again if not isinstance(again, str) else planned
     return RefinedPlan(
         best[0],
@@ -636,3 +664,26 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def collisions(
+    model: XleRobotModel,
+    arm: str,
+    primitive: Primitive,
+    execution: Execution,
+    start: Mapping[str, float],
+    refine_settings: RefineSettings,
+) -> tuple[list[str], list[str]]:
+    """`execution` played once in the simulator, the object at its estimate, the physics as fitted: its collisions.
+
+    A go/no-go before an execution the simulator has not seen run on the robot (`Shadow.watch`): `(arm, object)`, each
+    "<body> with <body> (<move>, <mm> deep)". `arm`: the arm into itself (its camera's board too) or the table, a
+    no-go; `object`: the arm but its fingers into the object at its estimate, for the person to judge.
+    """
+    out = outcome(model, arm, primitive, execution, start, np.zeros(2), {}, refine_settings)
+    found: tuple[list[str], list[str]] = ([], [])
+    for label, a, b, depth in out.collisions:
+        found[OBJECT in (a, b)].append(
+            f"{a} with {b} ({label.split(' (')[0][:30]}, {1000 * depth:.1f} mm deep)"
+        )
+    return found

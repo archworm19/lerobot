@@ -46,6 +46,10 @@ SKELETON = (
     "gripper_frame_link",
 )
 GRIPPER_ACTIONS = ("open", "close")
+# an opening settled within this of its target (`gripper.pos` units; a joint's 1.5 deg was its default): the jaw stops
+# 1-2 units short of an opening (the wiggle: 60 -> 58.9; sim3: 1.7 short, the execution stopped before the arm moved),
+# ~2-3 mm of opening against the 2 cm it is opened wider than the object (`OPEN_CLEARANCE_M`)
+GRIPPER_TOL_UNITS = 3.0
 START = "start"  # the grip key for "before the first move"
 
 
@@ -107,7 +111,7 @@ def prepare_execution(
     def gripper(key: str, where: str) -> Move:
         timeout, settle = settings[grip[key]]
         label = f"{where}: gripper {grip[key]} ({labels[grip[key]]})"
-        return Move(label, {"gripper.pos": positions[grip[key]]}, timeout, settle)
+        return Move(label, {"gripper.pos": positions[grip[key]]}, timeout, settle, GRIPPER_TOL_UNITS)
 
     moves = [gripper(START, "start")] if START in grip else []
     for i, joints in enumerate(steps.joints):

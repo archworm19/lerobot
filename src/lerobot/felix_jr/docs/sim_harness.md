@@ -214,6 +214,16 @@ Enter. Where it truly stands is then known, so the head's estimate's error is me
    missed, one jaw, knocked over, pushed away, slipped).
 5. The bottle back on its outline (`place_object` again).
 
+**Driven by** `python -m lerobot.felix_jr.sim2real.robot_session <name>` (`sim2real/robot_session.py`: every step
+through the harness, the moves asked first; the whole pick one `execute`, every move confirmed by the script but the
+one into the grasp, where the wrist frame is saved and you are asked; the outcome asked; `results.jsonl` and the
+harness's state in the session's folder). Rehearsed against the fake robot (2026-11-19): it ran; the head's table
+there was 0.20 m (the fake's depth), so the script asks when the table is 3 cm off the calibration's floor.
+
+**The simulator's prediction** (pyri at the 5 spots, from the real rest pose, 16 fresh draws each): today's grasps
+lift 11, 0 (a joint at its limit), 0, 10 and 10 of 16 (~39 %); refined, 15, 12, 8, 10 and 15 (~75 %), refining in
+17-33 s. Today's ranking took the bottle's top rim at every spot (`t` 0.13 of 0.13 m): marginal, watched at the attack.
+
 Every `execute` logs itself (`ExecutionLog`). After: `shadow_report()` (the moves' readings against their replays,
 out of sample), the outcomes against the simulator's predictions, and the head's estimates against the spots.
 **Safety:** `SAFE` approval before every move, 20 deg/s, the hold at the attack point. The refined grasps go deeper
