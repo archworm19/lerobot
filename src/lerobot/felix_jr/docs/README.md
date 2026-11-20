@@ -398,6 +398,8 @@ same check as the harness's: a recalibrated arm, a recalibrated gripper or flipp
 
 ## Setup notes
 
+- uv 0.11 or later (`brew upgrade uv`; CI pins 0.11.30): `pyproject.toml` declares conflicting extras
+  (`felix_jr_sim`'s MuJoCo 3.11 against upstream's `aloha`, `hilserl`, `libero`, `all`), which older uv cannot read.
 - Teleop needs `pyspacemouse`, the hidapi system library (`brew install hidapi` on macOS) and `placo`. They
   are installed in the project environment with `uv pip install`, not tracked in `pyproject.toml`, so a later
   `uv sync` removes them.
