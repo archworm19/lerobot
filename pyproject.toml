@@ -222,6 +222,10 @@ felix_jr = ["lerobot[placo-dep]", "lerobot[scipy-dep]", "lerobot[matplotlib-dep]
 # MuJoCo 3.11: the version mjlab 1.6 (GPU simulation, `docs/sim_deploy.md`) pins; gym-aloha pins <3.9, so the two
 # extras resolve apart (`[tool.uv] conflicts`)
 felix_jr_sim = ["lerobot[felix_jr]", "lerobot[mujoco-dep]", "mujoco>=3.11.0,<3.12.0"]
+# mjlab: many environments on the GPU (MuJoCo Warp; on macOS Warp's CPU, slow: `docs/sim_deploy.md`). Install it
+# with felix_jr_sim (`--extra felix_jr_sim --extra felix_jr_gpu`): uv locks an extra that includes a conflicting
+# extra's packages as "only with that extra enabled", so `lerobot[felix_jr_sim]` here would install nothing alone
+felix_jr_gpu = ["mjlab>=1.6.1,<1.7.0"]
 intelrealsense = [
     "pyrealsense2>=2.55.1.6486,<2.57.0 ; sys_platform != 'darwin'",
     "pyrealsense2-macosx>=2.54,<2.57.0 ; sys_platform == 'darwin'",
@@ -415,6 +419,10 @@ conflicts = [
     [{ extra = "felix_jr_sim" }, { extra = "hilserl" }],
     [{ extra = "felix_jr_sim" }, { extra = "libero" }],
     [{ extra = "felix_jr_sim" }, { extra = "all" }],
+    [{ extra = "felix_jr_gpu" }, { extra = "aloha" }],
+    [{ extra = "felix_jr_gpu" }, { extra = "hilserl" }],
+    [{ extra = "felix_jr_gpu" }, { extra = "libero" }],
+    [{ extra = "felix_jr_gpu" }, { extra = "all" }],
 ]
 
 [tool.uv.sources]

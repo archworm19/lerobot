@@ -48,6 +48,17 @@ the code; a bucket pays from ~1 GB or many pods reading the same data. **Outputs
    macOS stretched its 50 ms sleeps to 90-150 ms with the machine busy; it does not touch MuJoCo). Nothing refitted.
 2. **Our scene in MuJoCo Warp on the Mac's CPU:** what it refuses (the fingers' hinges and springs, the soft contacts,
    the mesh collisions), then a few environments' rollouts against CPU MuJoCo on the same replays.
+   **First look (2026-11-20):** mjlab 1.6.1 installed (`--extra felix_jr_sim --extra felix_jr_gpu`; Warp's CPU
+   device). `put_model` refuses one thing: **noslip** (`robot.py`: 3 iterations, with the elliptic cone and impratio
+   10, for friction that holds); with it off the scene loads (meshes, the fingers' hinges and springs, the elliptic
+   cone). The arm driven 25 deg by its servos for 2 s: Warp and CPU MuJoCo the same to 0.000 deg; the bottle settles
+   on the table 0.7 mm apart. Warp on the Mac's CPU: ~4 ms a step (CPU MuJoCo 0.03 ms): correctness only.
+   **Noslip off, on CPU MuJoCo** (the replays patched, nothing else): the grip trials' loads fall 4-6 points below
+   the robot's (RMS ~5 and ~6 points, pyri6 and feno2; with noslip ~2 and ~3) and the jaw stalls ~0.5 units further
+   closed; the lifts agree better (pyri6 now held, as on the robot; feno2 dropped, as it slipped); the feno replays
+   10 of 12 (sim3 spot 2's refined, lifted on the robot, now slips; the physics draws' lifts 6, 6, 3 of 16 for the
+   real lifts, 4, 0, 1, 2 for the real failures: as marginal as before). So: refit the contact without noslip
+   (the finger model's give or the contact's softness, against the grip trials' loads), then the replays again.
 3. **The image in CI** (GHCR) and the rsync-and-run script; a CPU smoke test (mjlab imports, our scene steps once).
 4. **One RTX 4090 on RunPod** (deleted after): the replays on CUDA, then environments per second against their count;
    the same on an L40S.
