@@ -18,6 +18,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_LINK_MODE=copy \
     MUJOCO_GL=egl \
+    NVIDIA_DRIVER_CAPABILITIES=all \
     PYTHONPATH=/workspace/lerobot/src \
     FELIX_JR_SIM_CACHE=/opt/felix/so101 \
     PATH=/opt/venv/bin:$PATH
@@ -44,6 +45,7 @@ RUN python -c "import importlib.util as u; s = u.spec_from_file_location('assets
 m = u.module_from_spec(s); s.loader.exec_module(m); print(m.so101_model())" \
     && rm -rf /opt/felix/build
 
+# (NVIDIA_DRIVER_CAPABILITIES: the CUDA base enables compute only; MuJoCo's EGL renders need graphics too)
 # what an ssh session sees (sshd does not pass the image's ENV on), the tag (a run checks it against its own lock)
 RUN printf '%s\n' \
         'export PATH=/opt/venv/bin:$PATH' \
