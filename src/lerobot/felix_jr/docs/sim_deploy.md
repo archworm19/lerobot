@@ -126,4 +126,26 @@ the code; a bucket pays from ~1 GB or many pods reading the same data. **Outputs
    worlds, the same chip) should reach the plateau at less than half the price: to measure. The grasps' contacts will
    cost more a step. The pod: `PUBLIC_KEY` was not passed (the key added in RunPod's settings after the deploy?), so
    the template now sets it itself.
-5. **The rollout batched** (`refine.rollout` / `outcome` over many environments): the refine and the bank on the GPU.
+5. **The simulator as an mjlab environment** (2026-11-21: the GPU is for training a policy with mjlab; the refine and
+   the bank stay on CPU MuJoCo): `sim2real/mjlab_env.py`. The robot entity is `robot.arm_spec` itself, its fitted
+   servos kept (`XmlActuatorCfg`); the object and the table as `scene` builds them; joint position targets every 17
+   steps (~30 Hz, the server's waypoint rate); resets and randomization with `grasp_check.physics_draws`' ranges; the
+   reward the object's rise (refine's lifted), the episode ended by a tip past 30 deg. mjlab drops a spec's options at
+   attach and its defaults differ (an implicit integrator, a pyramidal cone, impratio 1, 50 CCD iterations): restated
+   (`sim_cfg`). A fixed-base entity is wrapped in a mocap body at the origin: the arm keeps its calibrated pose in it.
+   **Checked (Warp's CPU device):**
+   - **The model:** the compiled model equals `scene.build`'s, every option and every joint, degree of freedom,
+     actuator, geom and body (`model_differences`), and the bodies' positions at a pose (`pose_differences`): a smoke
+     test (`smoke_tests/test_mjlab_env_smoke.py`).
+   - **The feno trials replayed open loop** (each trial's CPU run recorded step by step, `Recording`, its commands
+     played in a world of its own, `replay_in_env`): free moves and light contact 0.01-0.4 deg and 2-5 mm apart;
+     the loaded and slipping grasps up to 2.5 deg and 10-15 mm (the contact solver is not CPU MuJoCo's to the bit, and
+     open-loop commands do not correct a drift); the two knock-overs far apart, as chaos has it.
+   - **Under physics draws** (12 trials x 8 draws: the fingers' friction and give, the object's offset; the mass
+     nominal: varying it needs mjlab's recompute), each draw the same in its CPU run and its world
+     (`set_world_physics`): lifted or not the same in 89 of 96; all 7 differences lifted on CPU, not in mjlab (14 of 96
+     against 7). The trials that never lift never do in either. **mjlab's physics a little less grippy** (the replay's
+     rises ~1.5 mm lower over the 3 cm lift); these feno grasps sit at the threshold, which magnifies it.
+   **Next:** where the bias comes from (Warp's solver against MuJoCo's, or the open-loop replay), then the grip trials
+   (pyri6, feno2) in mjlab against the robot itself: if mjlab is as near the robot as CPU MuJoCo, the bias is noise
+   between two models; if not, fit mjlab's friction to the robot.
