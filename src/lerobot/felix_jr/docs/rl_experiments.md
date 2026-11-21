@@ -141,6 +141,7 @@ The easiest version that should work: if it does not learn, the environment is w
 | `train_smoke` | Mac CPU | 8 x 3 | 4 s | 0 (wiring only) | - |
 | `20261121_133937` | RTX 4090 | 4,096 x 20 | 37 s (1.8 s an iteration) | 81 / 0.3 / 97 / 98 / 99.8 % | (not measured: the bug below) |
 | `20261121_134628` | RTX 4090 | 4,096 x 1,500 | 42 min (1.67 s an iteration) | 99.2 / 99.5 / 98.7 / 99.9 / 100 % (train pool) | 98.0 / 98.7 / 98.7 / 96.9 / 95.4 % (train pool) |
+| `20261121_144032` | RTX 4090 | 4,096 x 1,000 | 27 min (1.6 s an iteration) | train 99.7 / 99.4 / 99.5 / 99.8 / 99.9 %; **held out 99.9 / 99.4 / 100 / 100 / 100 %** | train 97.5 / 98.4 / 99.5 / 96.0 / 95.9 %; **held out 98.3 / 98.7 / 100 / 97.5 / 97.1 %** |
 
 ### 2026-11-21: the first runs (the positive control)
 
@@ -174,3 +175,20 @@ Masking the held-out worlds' updates inside the training batch would still leak 
 checkpoint is evaluated, none chosen by its held-out score (choosing would need a third split). `eval.json`:
 `train_pool` and `held_out`, each by start pool. Next: a watcher process beside the trainer, evaluating and filming
 each checkpoint as it is saved (no pause in the training, no evaluation code in its process).
+
+### 2026-11-21: the bigger bank, held out, upright
+
+- **`20261121_144032`** (RTX 4090, 1,000 iterations x 4,096 worlds, 27 min; commit `b292a4e12`): the pool `pyri2_train`
+  (16,384 starts from 1,466 grasps on 405 placements; `pyri2`: 512 placements x up to 4 grasps, 476 anchored, 1,818
+  grasps) with the uniform mix; held only upright (10 deg) and the swing penalty; evaluated on `pyri2_test` too
+  (4,096 starts from 267 grasps on 71 placements never trained on, in an environment of its own). **Held at the end:
+  the training pool 97.5 %, held out 98.3 %** (attack 98.4 / 98.7, at_object 99.5 / 100, in_jaws 96.0 / 97.5, lifted
+  95.9 / 97.1): no gap; the policy generalizes to new placements of the same object on the same table (interpolation:
+  the held-out placements lie among the trained ones). Filmed (held-out starts): the bottles held upright now, the
+  tilted swinging grips gone; the grips still high on the bottle. The checkpoints' films in its tensorboard after the
+  fact (`videos --tensorboard`, on the pod). The pod stopped itself after (`runpodctl pod stop` with its pod-scoped key:
+  `POD_TTL`'s mechanism works).
+- **Read:** the positive control is solved, with privileged observations and 1 mm of noise on one object. Next,
+  away from it: the object pose's noise towards the head's real error, a spatial holdout (a region of the table: an
+  extrapolation test), the watcher process (each checkpoint evaluated on the held-out pool as it is saved), then more
+  objects (a 40-60 mm range) and fewer privileged observations (the finger contacts dropped).
