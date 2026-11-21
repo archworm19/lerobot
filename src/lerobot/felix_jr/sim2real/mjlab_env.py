@@ -51,6 +51,7 @@ REWARD_WEIGHTS = {  # (per step; a starting point, to tune from the curves)
     "rise": 1.0,
     "held": 2.0,
     "action_rate": -0.01,
+    "swing": -0.2,  # (the object's angular speed while lifted, rad/s: a bottle swinging at ~2 rad/s costs a fifth of held)
     "failed": -5.0,  # (an episode ended by a failure: the arm on the table, the object tipped)
 }
 # the start pool's mix (`start_pool`): uniform, as OmniReset samples its resets (no curriculum; 2026-11-21: the first
@@ -297,6 +298,7 @@ def env_cfg(
             "rise": RewardTermCfg(func=task.rise, weight=REWARD_WEIGHTS["rise"]),
             "held": RewardTermCfg(func=task.held, weight=REWARD_WEIGHTS["held"]),
             "action_rate": RewardTermCfg(func=base_mdp.action_rate_l2, weight=REWARD_WEIGHTS["action_rate"]),
+            "swing": RewardTermCfg(func=task.swing, weight=REWARD_WEIGHTS["swing"]),
             "failed": RewardTermCfg(func=base_mdp.is_terminated, weight=REWARD_WEIGHTS["failed"]),
         },
         terminations={

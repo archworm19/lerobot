@@ -18,7 +18,8 @@ simulator's truth (the object's pose with a little noise, the fingers' contacts)
 - **Rewards** (positive and staged: an all-negative reward with episodes ended by failure teaches ending them):
   reaching the grasp point (where the object's axis passes the pinch point in a grasp: `GRASP_POINT_M`, measured over
   the pool's starts in the jaws), the object between the jaws (`BETWEEN_*_M`), both fingers on it, its rise above
-  resting on the table towards the lift, held; a small action-rate penalty. **Terminations:**
+  resting on the table towards the lift, held (upright within `HELD_MAX_TILT_DEG`); a small action-rate penalty and
+  one on the object's swing while lifted. **Terminations:**
   the arm on the table, the object tipped past `refine.KNOCKED_DEG`; the episode's length (not success: the held reward
   keeps paying, so holding is learned, not rushing).
 """
@@ -63,6 +64,7 @@ BETWEEN_LOW_M = (
 )  # the box "between the jaws": the open jaws' starts and the closed ones'
 BETWEEN_HIGH_M = (-0.012, 0.015, 0.006)
 ON_BODY_MARGIN_M = 0.005  # the grasp's height this far inside the object's ends at least
+HELD_MAX_TILT_DEG = 10.0  # held only upright within this
 
 
 def gripper_rad_per_unit(model: XleRobotModel, arm: str) -> float:
@@ -296,9 +298,28 @@ def rise(env: "ManagerBasedRlEnv") -> "torch.Tensor":
     return ((data.root_link_pos_w[:, 2] - rest) / LIFT_M).clamp(0.0, 1.0)
 
 
+def tilt_cos(env: "ManagerBasedRlEnv") -> "torch.Tensor":
+    """The cosine of the object's tilt from upright (its axis's world z)."""
+    _, axis = _object(env)
+    return axis[:, 2]
+
+
 def held(env: "ManagerBasedRlEnv") -> "torch.Tensor":
-    """1 where the object is up `HELD_FRACTION` of the lift and both fingers on it (`refine`'s lifted)."""
-    return (rise(env) >= HELD_FRACTION).float() * both_fingers(env)
+    """1 where the object is up `HELD_FRACTION` of the lift, both fingers on it, and upright within `HELD_MAX_TILT_DEG`.
+
+    (Upright since 2026-11-21: the first run's policy held bottles tilted 20-30 deg, gripped high and swinging, which
+    the lift alone paid for in full.)
+    """
+    upright = tilt_cos(env) > float(np.cos(np.radians(HELD_MAX_TILT_DEG)))
+    return (rise(env) >= HELD_FRACTION).float() * both_fingers(env) * upright.float()
+
+
+def swing(env: "ManagerBasedRlEnv") -> "torch.Tensor":
+    """The object's angular speed (rad/s) while it is off the table (rise past a fifth of the lift): a penalty's term."""
+    import torch
+
+    speed = torch.linalg.norm(env.scene["object"].data.root_link_ang_vel_w, dim=1)
+    return speed * (rise(env) > 0.2).float()
 
 
 def tipped(env: "ManagerBasedRlEnv") -> "torch.Tensor":
