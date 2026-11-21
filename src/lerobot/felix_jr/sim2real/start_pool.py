@@ -2,6 +2,7 @@
 
   uv run --extra felix_jr_sim python -m lerobot.felix_jr.sim2real.start_pool <bank.jsonl> <out.npz>
       [--per-pool attack=1024 at_object=1024 in_jaws=1024 lifted=1024] [--seed 0] [--workers 6]
+      [--holdout 0.15 [--test-per-pool 1024]]   # a held-out split by placement: <out>_train.npz, <out>_test.npz
 
 A start (`starts.StartSampler`: an anchor of the bank, one of its pools, the arm arrived as the real one does, settled,
 checked) is a whole simulator state; drawing one is a short simulation in itself (the attack pool's arrival), too slow
@@ -72,6 +73,9 @@ class StartPool:
     anchor: np.ndarray
     object_size: tuple[float, float, float]  # radius, height (m), mass (kg)
     table_z: float
+    placements: np.ndarray | None = (
+        None  # the bank's placements drawn from (a split's: `--holdout`), None: all
+    )
 
     def __len__(self) -> int:
         """How many starts."""
@@ -88,6 +92,7 @@ class StartPool:
             anchor=self.anchor,
             object_size=np.array(self.object_size),
             table_z=np.array(self.table_z),
+            placements=np.array([] if self.placements is None else self.placements, dtype=int),
             **arrays,
         )
 
@@ -108,6 +113,7 @@ class StartPool:
             z["anchor"],
             (float(size[0]), float(size[1]), float(size[2])),
             float(z["table_z"]),
+            z["placements"] if "placements" in z.files and len(z["placements"]) else None,
         )
 
     def layout(self, m: "mujoco.MjModel") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -132,11 +138,11 @@ class StartPool:
 _sampler: Any = None
 
 
-def _init(model_path: str, bank_path: str) -> None:
+def _init(model_path: str, bank_path: str, placements: "set[int] | None" = None) -> None:
     global _sampler
     from .starts import StartSampler
 
-    _sampler = StartSampler(XleRobotModel.load(Path(model_path)), Path(bank_path))
+    _sampler = StartSampler(XleRobotModel.load(Path(model_path)), Path(bank_path), placements=placements)
 
 
 def _draw(task: tuple[str, int]) -> dict[str, Any]:
@@ -157,16 +163,23 @@ def _draw(task: tuple[str, int]) -> dict[str, Any]:
 
 
 def draw_pool(
-    model_path: Path, bank_path: Path, per_pool: Mapping[str, int], seed: int = 0, workers: int = 1
+    model_path: Path,
+    bank_path: Path,
+    per_pool: Mapping[str, int],
+    seed: int = 0,
+    workers: int = 1,
+    placements: "set[int] | None" = None,
 ) -> StartPool:
-    """`per_pool` starts of each pool from the bank's anchors, drawn on `workers` processes."""
+    """`per_pool` starts of each pool from the bank's anchors (`placements`' only, if given), on `workers` processes."""
     tasks = [(pool, seed * 1_000_003 + i) for pool, n in per_pool.items() for i in range(n)]
     if workers > 1:
         ctx = multiprocessing.get_context("spawn")
-        with ctx.Pool(workers, initializer=_init, initargs=(str(model_path), str(bank_path))) as pool:
+        with ctx.Pool(
+            workers, initializer=_init, initargs=(str(model_path), str(bank_path), placements)
+        ) as pool:
             rows = pool.map(_draw, tasks, chunksize=8)
     else:
-        _init(str(model_path), str(bank_path))
+        _init(str(model_path), str(bank_path), placements)
         rows = [_draw(t) for t in tasks]
     sizes = {r["object"] for r in rows}
     if len(sizes) != 1:
@@ -183,6 +196,7 @@ def draw_pool(
         np.array([r["anchor"] for r in rows]),
         rows[0]["object"],
         float(np.median([r["table_z"] for r in rows])),
+        None if placements is None else np.array(sorted(placements)),
     )
 
 
@@ -282,20 +296,46 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--model", type=Path, default=api.MODEL)
+    parser.add_argument(
+        "--holdout",
+        type=float,
+        default=0.0,
+        help="this share of the bank's anchored placements held out: <out>_train.npz and <out>_test.npz",
+    )
+    parser.add_argument("--test-per-pool", type=int, default=1024, help="the held-out pool's starts a pool")
     args = parser.parse_args(argv)
     per_pool = {k: int(v) for k, v in (item.split("=") for item in args.per_pool)}
     unknown = set(per_pool) - set(POOLS)
     if unknown:
         parser.error(f"unknown pools {sorted(unknown)} (known: {POOLS})")
     started = time.perf_counter()
-    pool = draw_pool(args.model, args.bank, per_pool, args.seed, args.workers)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    pool.save(args.out)
-    counts = {p: int((pool.pool == p).sum()) for p in POOLS}
-    print(
-        f"{len(pool)} starts {counts} from {len(set(pool.anchor.tolist()))} anchors in "
-        f"{time.perf_counter() - started:.0f} s: {args.out}"
-    )
+    if args.holdout <= 0:
+        jobs = [(args.out, per_pool, None)]
+    else:  # (split by placement: a placement's starts are near copies of each other, a split by start would leak)
+        from . import bank
+
+        anchored = sorted(
+            line["placement"]["index"] for line in bank.load(args.bank)[1] if line["anchor"] is not None
+        )
+        order = np.random.default_rng(args.seed).permutation(anchored)
+        n_test = max(1, int(round(args.holdout * len(order))))
+        test, train = set(order[:n_test].tolist()), set(order[n_test:].tolist())
+        stem = args.out.with_suffix("")
+        jobs = [
+            (stem.with_name(stem.name + "_train.npz"), per_pool, train),
+            (stem.with_name(stem.name + "_test.npz"), dict.fromkeys(per_pool, args.test_per_pool), test),
+        ]
+    for out, counts_wanted, placements in jobs:
+        pool = draw_pool(args.model, args.bank, counts_wanted, args.seed, args.workers, placements)
+        pool.save(out)
+        counts = {p: int((pool.pool == p).sum()) for p in POOLS}
+        which = "all" if placements is None else len(placements)
+        print(
+            f"{len(pool)} starts {counts} from {len(set(pool.anchor.tolist()))} anchors ({which} placements) in "
+            f"{time.perf_counter() - started:.0f} s: {out}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .run import ROOT, run
 
-DEFAULT_POOL = Path("src/lerobot/felix_jr/sim2real/scratch/pools/pyri1.npz")
+DEFAULT_POOL = Path("src/lerobot/felix_jr/sim2real/scratch/pools/pyri2_train.npz")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -43,6 +43,10 @@ def main(argv: list[str] | None = None) -> None:
     pool = args.pool if not args.pool.is_absolute() else args.pool.resolve().relative_to(ROOT)
     if not (ROOT / pool).is_file():
         parser.error(f"{pool}: no start pool there (`python -m lerobot.felix_jr.sim2real.start_pool`)")
+    send = [pool]
+    held_out = pool.with_name(pool.name.replace("_train.npz", "_test.npz"))
+    if pool.name.endswith("_train.npz") and (ROOT / held_out).is_file():
+        send.append(held_out)  # (the held-out pool beside it: `sim2real.train` finds it there)
     command = ["python", "-m", "lerobot.felix_jr.sim2real.train", "--pool", str(pool), *extra]
     sys.exit(
         run(
@@ -51,7 +55,7 @@ def main(argv: list[str] | None = None) -> None:
             command,
             args.key,
             any_image=args.any_image,
-            send=[pool],
+            send=send,
             detach=not args.attach,
         )
     )

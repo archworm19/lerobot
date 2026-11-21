@@ -117,8 +117,13 @@ def record(
     return path
 
 
-def make_video_env(settings: dict[str, Any], worlds: int, device: str) -> tuple[Any, Any]:
-    """A small environment as a run's (`settings.json`), every pool equally likely: (the env, its rsl_rl wrapper)."""
+def make_video_env(
+    settings: dict[str, Any], worlds: int, device: str, pool: str | Path | None = None
+) -> tuple[Any, Any]:
+    """An environment as a run's (`settings.json`), every pool equally likely: (the env, its rsl_rl wrapper).
+
+    `pool`: its starts (default: the run's held-out pool, `eval_pool`, if it has one, else its training pool).
+    """
     from mjlab.rl import RslRlVecEnvWrapper
 
     from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
@@ -129,7 +134,7 @@ def make_video_env(settings: dict[str, Any], worlds: int, device: str) -> tuple[
     cfg = me.env_cfg(
         XleRobotModel.load(api.MODEL),
         num_envs=worlds,
-        start_pool=settings["pool"],
+        start_pool=str(pool or settings.get("eval_pool") or settings["pool"]),
         pool_weights=dict.fromkeys(POOLS, 1.0),
         object_noise_m=float(settings.get("object_noise_m", me.OBJECT_NOISE_M)),
         randomize=True,

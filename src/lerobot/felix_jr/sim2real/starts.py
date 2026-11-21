@@ -104,7 +104,13 @@ class Start:
 class StartSampler:
     """Starts from the anchors of the bank at `path` (the module docstring)."""
 
-    def __init__(self, model: XleRobotModel, path: Path, config: StartConfig | None = None) -> None:
+    def __init__(
+        self,
+        model: XleRobotModel,
+        path: Path,
+        config: StartConfig | None = None,
+        placements: "set[int] | None" = None,
+    ) -> None:
         """The bank read (refused if built under other servos: its snapshots would not match) and its anchors kept."""
         require_package("mujoco", extra="felix_jr_sim")
         self.model = model
@@ -117,9 +123,11 @@ class StartSampler:
                 "would not match the scene; rebuild it"
             )
         # each grasp a placement accepted is an anchor of its own (`anchors`; a bank before it: `anchor` alone)
+        # (`placements`: only those placements' anchors, by index: a train or held-out split, `start_pool --holdout`)
         self.anchors = [
             {**line, "anchor": a}
             for line in lines
+            if placements is None or line["placement"]["index"] in placements
             for a in (line.get("anchors") or ([line["anchor"]] if line["anchor"] is not None else []))
         ]
         if not self.anchors:

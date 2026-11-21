@@ -135,7 +135,7 @@ The easiest version that should work: if it does not learn, the environment is w
 | --- | --- | --- | --- | --- | --- |
 | `train_smoke` | Mac CPU | 8 x 3 | 4 s | 0 (wiring only) | - |
 | `20261121_133937` | RTX 4090 | 4,096 x 20 | 37 s (1.8 s an iteration) | 81 / 0.3 / 97 / 98 / 99.8 % | (not measured: the bug below) |
-| `20261121_134628` | RTX 4090 | 4,096 x 1,500 | running | | |
+| `20261121_134628` | RTX 4090 | 4,096 x 1,500 | 42 min (1.67 s an iteration) | 99.2 / 99.5 / 98.7 / 99.9 / 100 % (train pool) | 98.0 / 98.7 / 98.7 / 96.9 / 95.4 % (train pool) |
 
 ### 2026-11-21: the first runs (the positive control)
 
@@ -147,5 +147,25 @@ The easiest version that should work: if it does not learn, the environment is w
   Episodes mostly ran their 12 s; ~4 ended on a tipped object and fewer than 1 on the table, each iteration (of
   ~170 episodes). "Held at the end" read 0 everywhere: every evaluation episode times out at its last step and mjlab
   resets the world within it, so the end was read after the reset; fixed (`f0a9ce27f`: held from the step before).
-- **1,500 iterations, RTX 4090** (`20261121_134628`, the fix included): running. To read: whether the easy starts are
-  held to the end (not only reached), whether the attack pool is learned at all in 1,500 iterations, the tipped rate.
+- **1,500 iterations, RTX 4090** (`20261121_134628`, the pool `pyri1`: 47 grasps; mix 0.2 / 0.5 / 0.2 / 0.1): 42 min.
+  The curves plateaued by iteration ~400-700 (held 1.84-1.87 of 2.0 a second of episode, both fingers 0.47 of 0.5,
+  rise 0.92-0.94, episodes their full 12 s, tipped terminations ~5 -> ~0.25 a batch); PPO's adaptive learning rate
+  fell to 1e-5. The evaluation (4,096 worlds, the training pool: not held out): held at the end 98.0 % (attack 98.7,
+  at_object 98.7, in_jaws 96.9, lifted 95.4), at some time 99.2 %. **The positive control works**, the attack's starts
+  included (0.3 % at iteration 20). **But the reward was too easy:** filmed (checkpoint 1,000, `sim2real/videos.py`
+  after the fact), every world holds by 1.5 s, the attack's too, and many bottles hang tilted 20-30 deg, gripped high
+  and swinging: "held" asked only 22.5 mm of rise and both fingers on, the episode ending past 30 deg. Changed for the
+  next run (`e23497965`): held only upright within 10 deg, and a penalty on the object's angular speed while lifted
+  (-0.2 a rad/s).
+
+### Held-out starts (2026-11-21)
+
+The evaluation so far was on the training pool. Now a split by placement (`start_pool --holdout 0.15`: a placement's
+starts are near copies of each other, so a split by start would leak): `<pool>_train.npz` and `<pool>_test.npz`, the
+held-out placement indices recorded in each. The held-out starts are in an environment of their own, which PPO never
+steps: its rollouts, its updates and its observation normalizer (which rsl_rl updates from every world it steps in
+training mode) only ever see the training pool's worlds; the held-out evaluation runs the frozen policy (eval mode).
+Masking the held-out worlds' updates inside the training batch would still leak through the normalizer. The final
+checkpoint is evaluated, none chosen by its held-out score (choosing would need a third split). `eval.json`:
+`train_pool` and `held_out`, each by start pool. Next: a watcher process beside the trainer, evaluating and filming
+each checkpoint as it is saved (no pause in the training, no evaluation code in its process).
