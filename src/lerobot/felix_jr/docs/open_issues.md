@@ -212,6 +212,19 @@ including the object being grasped. Revisit only if the model, given good render
     until the wrist phase's perception is designed (its smaller error may change how deep is right): then a depth
     bias in `sim2real.refine`, or the harness's default depth.
 
+20. **The wrist-view filter refuses every deep side grasp** (2026-11-21, building the RL bank: `sim_deploy.md`).
+    `GraspSettings.see_object` (the object's grasp in the wrist camera's picture at the attack point, clear of the
+    fingers) refused every grasp of pyri deeper than 10 mm (the fingers in the way of the view, it seems); without it
+    deep grasps are feasible at all tilts tried. So the harness on the robot can only plan fingertip-depth side grasps,
+    which item 19 says are fragile, and sim1-sim3's "too shallow" slips may owe more to it than to the estimates. To
+    check: whether the view the wrist phase needs really requires the grasp's contacts clear of the fingers, or only
+    the object in the picture. The bank turns it off (`bank.BankConfig.settings`).
+21. **`refine.outcome` judges a lift by the planned lift** (`HELD_FRACTION` of `LIFT_M`), as `grasp_check` did until
+    2026-11-21: the simulated arm sags and stops short (an open-loop lift: the jaws ~23-28 of 30 mm), which scored
+    grasps that held as slips; `grasp_check` now judges by the jaws' rise. The refine moves the arm by the server's
+    settle logic (nearer its targets) and matched the robot 11 of 12 (`sessions.md`, sim1-sim3), so it is unchanged; a
+    candidate for the same fix if its predictions read low.
+
 ## Tooling
 
 9. **The session CLI is a gitignored file.** `harness/scratch/` is ignored (`**/scratch/` in the root

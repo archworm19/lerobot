@@ -2,6 +2,7 @@
 
   uv run --extra felix_jr --extra felix_jr_sim python -m lerobot.felix_jr.sim2real.bank <out.jsonl>
       [--placements 20] [--arm right] [--seed 0] [--workers 1] [--model <calibration.urdf>]
+      [--object DIAMETER_MM HEIGHT_MM MASS_G]
 
 Per placement: an upright cylinder drawn (`BankConfig`: its diameter, height and mass, where it stands from the arm's
 base), a feasible grasp drawn at random through the harness's filters (`harness.grasping.first_feasible`, at each of
@@ -86,11 +87,19 @@ class BankConfig:
     seed: int = 0
 
     def settings(self) -> GraspSettings:
-        """The filters' settings."""
+        """The filters' settings.
+
+        No wrist view (`see_object`: the object's grasp in the wrist camera's picture at the attack point, clear of the
+        fingers, is for a policy steering by that camera; the grasp policy trained on the bank does not see it, and the
+        check refused every grasp deeper than 10 mm, the fingers in the way of the view: 2026-11-21), and the camera's
+        clearance at the attack only (the simulator judges the grasp's collisions, its board modeled; as the refine's).
+        """
         return GraspSettings(
             sag_lift=0.0,
             rotation_bounds_deg=self.rotation_bounds_deg,
             arm_plane_tol_deg=self.arm_plane_tol_deg,
+            see_object=False,
+            camera_clearance_at_grasp=False,
         )
 
     def depths(self, radius: float) -> tuple[float, ...]:
@@ -144,7 +153,14 @@ def _solution(s: FrameSolution | None) -> dict[str, Any] | None:
 
 
 def _trial(t: GraspTrial) -> dict[str, Any]:
-    return {"depth": t.depth, "draw": t.draw, "held": t.held, "rose_m": t.rose_m, "note": t.note}
+    return {
+        "depth": t.depth,
+        "draw": t.draw,
+        "held": t.held,
+        "rose_m": t.rose_m,
+        "jaws_rose_m": t.jaws_rose_m,
+        "note": t.note,
+    }
 
 
 def _grasp(model: XleRobotModel, c: GraspCandidate) -> dict[str, Any]:
@@ -331,8 +347,20 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--resume", action="store_true", help="continue a bank stopped part way")
     parser.add_argument("--model", type=Path, default=api.MODEL)
+    parser.add_argument(
+        "--object",
+        nargs=3,
+        type=float,
+        default=None,
+        metavar=("DIAMETER_MM", "HEIGHT_MM", "MASS_G"),
+        help="one object for every placement (default: drawn over `DIAMETER_M`, `HEIGHT_M`, `MASS_KG`)",
+    )
     args = parser.parse_args()
-    config = BankConfig(arm=args.arm, seed=args.seed)
+    one = {}
+    if args.object is not None:
+        d, h, g = (v / 1000 for v in args.object)
+        one = {"diameter_m": (d, d), "height_m": (h, h), "mass_kg": (g, g)}
+    config = BankConfig(arm=args.arm, seed=args.seed, **one)
     tally, started = Tally(), time.perf_counter()
     for line in build_bank(args.model, config, args.placements, args.out, args.workers, args.resume):
         tally.add(line, config.min_rate)

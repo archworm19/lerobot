@@ -156,3 +156,16 @@ the code; a bucket pays from ~1 GB or many pods reading the same data. **Outputs
      the differences both ways now: within the counts' noise.
    **Next:** training (mjlab's PPO, `rsl_rl`): the policy's observations, the action's scale and the episode, then a
    first run on a pod; the server's streaming mode before a policy runs on the robot.
+6. **The first experiment: a positive control** (2026-11-21, decided): actor and critic both privileged (the joints,
+   the object's pose in the root and the gripper's frame with a noise setting starting ~1 mm, the servos' loads, the
+   fingers' contacts, the last action); **delta joint targets** (the targets accumulate; ~1 deg a tick at 30 Hz, the
+   gap to the reading capped) as the prominent sim-to-real projects mostly do (OmniReset: delta end-effector pose;
+   ManiSkill's SO-100 sim-to-real: delta joint targets; IndustReal, AnyRotate, ClutterDexGrasp's arm: delta; only
+   mjlab's and IsaacLab's lift templates absolute); starts from the bank's pools (OmniReset's four reset kinds are
+   ours: reaching = attack, near-object = at_object, stable grasp = in_jaws / lifted; precomputed, no curriculum);
+   staged positive rewards. One object: pyri (45 x 130 mm, 80 g), which the robot holds and we have.
+   **The bank rebuilt for it** (test banks, 6 placements of pyri): first 1 of 6 anchored, 3 of 214 trials held. Two
+   causes: the wrist-view filter refused every grasp deeper than 10 mm (`open_issues.md` 20; the bank turns it off,
+   and the camera's clearance at the grasp, as the refine), and `grasp_check` judged a hold by the planned 30 mm lift
+   while the simulated arm's jaws rise ~23-28 mm (its sag), so held grasps scored as slips (now: the object up 75 % of
+   the jaws' rise). Then 6 of 6 anchored, at 0 to 27.5 mm deep, mostly the first grasp simulated, 6 s.

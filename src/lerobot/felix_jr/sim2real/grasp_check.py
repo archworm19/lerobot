@@ -3,7 +3,10 @@
 A grasp the harness's filters pass (`harness.grasping.first_feasible`: reachable, the paths clear, the object in the
 wrist camera's view) is simulated from its exact grasp pose: the object stood where its primitive is, the arm at the
 grasp with the jaws open (`ClawTarget.open_apart`), the jaws closed `reach.SQUEEZE_UNITS` past the object's contact, the
-arm moved to the solved lift, held; it held if the object rose with it (`HELD_FRACTION` of the lift). Not the start of
+arm moved to the solved lift, held; it held if the object rose with the jaws (`HELD_FRACTION` of how far the jaws rose,
+the jaws up `JAWS_MIN_FRACTION` of the lift at least: the simulated arm sags and stops short of a lift as the real one
+does, the jaws ~25 of a 30 mm lift, and the planned lift's fraction scored grasps that held as slips; 2026-11-21). Not
+the start of
 an episode: whether the grasp is physically possible at all (the real arm will not arrive there; the episodes' starts
 are offset from it).
 
@@ -45,7 +48,8 @@ SNAPSHOTS = ("at_object", "in_jaws", "lifted")
 CLOSE_S = 2.0
 LIFT_MOVE_S = 1.5
 LIFT_HOLD_S = 2.0  # the success criterion's hold (`docs/sim2real_grasp.md`)
-HELD_FRACTION = 0.75  # the object up by this much of the lift: held
+HELD_FRACTION = 0.75  # the object up by this much of the jaws' rise: held
+JAWS_MIN_FRACTION = 0.5  # the jaws up this much of the planned lift at least (else the lift itself failed)
 # the physics drawn about the fitted values (`robot.py`, `docs/sim2real_grasp.md`): each a factor, uniform in log
 FRICTION_RANGE = (0.8, 1.25)
 STIFFNESS_RANGE = (0.75, 1.33)
@@ -61,6 +65,7 @@ class GraspTrial:
     held: bool
     rose_m: float
     note: str = ""
+    jaws_rose_m: float = float("nan")  # how far the jaws rose (the gripper's body)
     # with `snapshots`: the simulator's state ("qpos", "qvel", "ctrl") at each stage (`SNAPSHOTS`), for the bank's pools
     states: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
 
@@ -140,6 +145,8 @@ def simulate_grasp(
     run(CLOSE_S)
     keep("in_jaws")
     z0 = float(d.xpos[body][2])
+    jaws = m.body(robot.GRIPPER).id
+    jaws_z0 = float(d.xpos[jaws][2])
     assert candidate.lift is not None
     begin = np.array(d.ctrl).copy()
     steps = int(LIFT_MOVE_S / m.opt.timestep)
@@ -156,9 +163,13 @@ def simulate_grasp(
     if np.linalg.norm(d.xpos[body] - start) > BLEW_UP_M:
         return GraspTrial(claw.depth, dict(draw), False, 0.0, "the simulation became unstable")
     lift = float(candidate.lift.root_from_pinch[2, 3] - candidate.grasp.root_from_pinch[2, 3])
-    held = rose > HELD_FRACTION * lift
+    jaws_rose = float(d.xpos[jaws][2]) - jaws_z0
+    if jaws_rose < JAWS_MIN_FRACTION * lift:
+        note = f"the jaws rose {1000 * jaws_rose:.0f} of {1000 * lift:.0f} mm"
+        return GraspTrial(claw.depth, dict(draw), False, rose, note, jaws_rose_m=jaws_rose, states=states)
+    held = rose > HELD_FRACTION * jaws_rose
     note = "" if held else "the object did not come up with the jaws"
-    return GraspTrial(claw.depth, dict(draw), held, rose, note, states)
+    return GraspTrial(claw.depth, dict(draw), held, rose, note, jaws_rose_m=jaws_rose, states=states)
 
 
 def start_overlap(
