@@ -49,6 +49,11 @@ EPISODE_S = 12.0
 OBJECT_SIGMA_M = 0.007  # the object's spread about its spot (`refine.RefineSettings.object_sigma_m`)
 FINGER_PADS = r"finger_.*_pad\d+"
 FINGER_GIVES = r"finger_.*_give"
+# the fingers' give in mjlab x this (`env_cfg`'s default): MuJoCo Warp's contact squeezed ~1.5 points less load than CPU
+# MuJoCo's at each grip trial's close (2026-11-21); x1.3 brings the stalls and loads to the robot's as near as CPU
+# MuJoCo's or nearer (stall / load RMS: pyri6 0.29 units / 2.7 points, CPU 0.28 / 2.9; feno2 0.21 / 2.9, CPU 0.45 /
+# 4.4), both lifts right (x1.15: 0.33 / 3.4, 0.36 / 3.4; x1.5: 0.35 / 2.2, 0.17 / 2.1)
+MJLAB_GIVE_SCALE = 1.3
 
 
 def sim_cfg() -> "SimulationCfg":
@@ -93,9 +98,13 @@ def _without_options(spec: "mujoco.MjSpec") -> "mujoco.MjSpec":
     return spec
 
 
-def robot_spec(model: XleRobotModel, arm: str) -> "mujoco.MjSpec":
-    """The arm as the CPU simulator builds it (`robot.arm_spec`), without its options."""
-    return _without_options(robot.arm_spec(model, arm))
+def robot_spec(model: XleRobotModel, arm: str, give_scale: float = 1.0) -> "mujoco.MjSpec":
+    """The arm as the CPU simulator builds it (`robot.arm_spec`), without its options, its fingers' give x `give_scale`."""
+    spec = _without_options(robot.arm_spec(model, arm))
+    for joint in spec.joints:
+        if joint.name.startswith("finger_") and "_give" in joint.name:
+            joint.stiffness = joint.stiffness * give_scale
+    return spec
 
 
 def object_spec(o: sc.Cylinder) -> "mujoco.MjSpec":
@@ -157,8 +166,13 @@ def env_cfg(
     num_envs: int = 1,
     object_sigma_m: float = OBJECT_SIGMA_M,
     randomize: bool = True,
+    give_scale: float = MJLAB_GIVE_SCALE,
 ) -> "ManagerBasedRlEnvCfg":
-    """The grasp-and-lift environment: `obj` on the table at `table_z`, the arm from `start` (the module docstring)."""
+    """The grasp-and-lift environment: `obj` on the table at `table_z`, the arm from `start` (the module docstring).
+
+    `give_scale`: mjlab's correction to the fingers' give (`MJLAB_GIVE_SCALE`); 1.0 for the CPU simulator's model as is
+    (`model_differences` then finds none).
+    """
     require_package("mjlab", extra="felix_jr_gpu")
     from mjlab.actuator import XmlActuatorCfg
     from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
@@ -177,7 +191,7 @@ def env_cfg(
     start = start or {**REST, "gripper.pos": 30.0}
     entities = {
         "robot": EntityCfg(
-            spec_fn=lambda: robot_spec(model, arm),
+            spec_fn=lambda: robot_spec(model, arm, give_scale),
             init_state=EntityCfg.InitialStateCfg(
                 joint_pos={**joint_targets(model, arm, start), FINGER_GIVES: 0.0}
             ),
@@ -500,12 +514,15 @@ class Recording:
         return patched()
 
 
-def replay_in_env(env: "ManagerBasedRlEnv", recordings: Sequence[Recording]) -> list[dict[str, Any]]:
+def replay_in_env(
+    env: "ManagerBasedRlEnv", recordings: Sequence[Recording], probes: Sequence[Sequence[int]] | None = None
+) -> list[dict[str, Any]]:
     """Each recording played open loop in its own world of `env` (its start, then its commands step by step).
 
     Per recording: the most the arm's joints (deg) and the object (mm) came apart from the CPU run's, checked every
     `DECIMATION` steps, and the object's rise (m) at the end in each. A recording's world holds its last command after
-    its end. `env.num_envs` must be at least `len(recordings)`.
+    its end. `env.num_envs` must be at least `len(recordings)`. `probes`: per recording, after which steps to keep its
+    world's state (`row["probes"]`: `{step: (qpos, actuator_force)}`, the environment's layouts).
     """
     import torch
 
@@ -528,11 +545,20 @@ def replay_in_env(env: "ManagerBasedRlEnv", recordings: Sequence[Recording]) -> 
     worst = [{"arm_deg": 0.0, "object_mm": 0.0} for _ in range(n)]
     ends: list[np.ndarray | None] = [None] * n
     ctrl_now = sim.data.ctrl.cpu().numpy().copy()
+    wanted = [set(p) for p in probes] if probes is not None else [set() for _ in range(n)]
+    kept: list[dict[int, tuple[np.ndarray, np.ndarray]]] = [{} for _ in range(n)]
     for k in range(steps):
         for w in range(n):
             ctrl_now[w] = ctrls[w][min(k, len(ctrls[w]) - 1)]
         sim.data.ctrl[:] = torch.as_tensor(ctrl_now, device=sim.data.ctrl.device, dtype=sim.data.ctrl.dtype)
         sim.step()
+        if probes is not None:
+            for w in range(n):
+                if k + 1 in wanted[w]:
+                    kept[w][k + 1] = (
+                        sim.data.qpos[w].cpu().numpy().copy(),
+                        sim.data.actuator_force[w].cpu().numpy().copy(),
+                    )
         if (k + 1) % DECIMATION == 0 or k + 1 == steps:
             now = sim.data.qpos.cpu().numpy()
             for w, r in enumerate(recordings):
@@ -552,6 +578,8 @@ def replay_in_env(env: "ManagerBasedRlEnv", recordings: Sequence[Recording]) -> 
     for w, r in enumerate(recordings):
         s, e = slices[w], eslices
         row: dict[str, Any] = dict(worst[w])
+        if probes is not None:
+            row["probes"] = kept[w]
         if "floating_base_joint" in s and r.qpos_every:
             z0 = r.qpos[s["floating_base_joint"]][2]
             row["cpu_rise_m"] = float(r.qpos_every[-1][s["floating_base_joint"]][2] - z0)
@@ -560,8 +588,12 @@ def replay_in_env(env: "ManagerBasedRlEnv", recordings: Sequence[Recording]) -> 
     return out
 
 
-def set_world_physics(env: "ManagerBasedRlEnv", world: int, cpu: "mujoco.MjModel") -> None:
+def set_world_physics(
+    env: "ManagerBasedRlEnv", world: int, cpu: "mujoco.MjModel", give_scale: float = MJLAB_GIVE_SCALE
+) -> None:
     """World `world`'s geoms' friction and joints' stiffness as `cpu`'s (a model built under a physics draw).
+
+    The fingers' give x `give_scale` (mjlab's correction, as `env_cfg`).
 
     Those fields must be per world in `env` (its config randomizes them: `env_cfg(randomize=True)`).
     """
@@ -584,7 +616,8 @@ def set_world_physics(env: "ManagerBasedRlEnv", world: int, cpu: "mujoco.MjModel
             if _strip(mujoco.mj_id2name(em, mujoco.mjtObj.mjOBJ_JOINT, j) or "") == name
         ]
         if ja >= 0 and jb:
-            model.jnt_stiffness[world, jb[0]] = float(cpu.jnt_stiffness[ja])
+            scale = give_scale if name.startswith("finger_") and "_give" in name else 1.0
+            model.jnt_stiffness[world, jb[0]] = float(cpu.jnt_stiffness[ja]) * scale
 
 
 def cpu_model(
@@ -607,7 +640,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     from lerobot.felix_jr.harness import api
 
     model = XleRobotModel.load(api.MODEL)
-    env = make_env(env_cfg(model, randomize=False))
+    env = make_env(env_cfg(model, randomize=False, give_scale=1.0))
     diffs = model_differences(cpu_model(model), env.sim.mj_model)
     print("\n".join(diffs) if diffs else "the environment's model equals the CPU simulator's")
 

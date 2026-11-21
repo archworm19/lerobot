@@ -146,6 +146,13 @@ the code; a bucket pays from ~1 GB or many pods reading the same data. **Outputs
      (`set_world_physics`): lifted or not the same in 89 of 96; all 7 differences lifted on CPU, not in mjlab (14 of 96
      against 7). The trials that never lift never do in either. **mjlab's physics a little less grippy** (the replay's
      rises ~1.5 mm lower over the 3 cm lift); these feno grasps sit at the threshold, which magnifies it.
-   **Next:** where the bias comes from (Warp's solver against MuJoCo's, or the open-loop replay), then the grip trials
-   (pyri6, feno2) in mjlab against the robot itself: if mjlab is as near the robot as CPU MuJoCo, the bias is noise
-   between two models; if not, fit mjlab's friction to the robot.
+   - **The grip trials in mjlab against the robot** (pyri6, feno2: open loop by design, so the replay is the trial run
+     in mjlab): the stalls as near as CPU MuJoCo's, the lifts both right, but the loads ~1.5 points lower at every
+     close (stall / load RMS against the robot: pyri6 0.43 units / 4.2 points, CPU 0.28 / 2.9; feno2 0.52 / 4.5, CPU
+     0.45 / 4.4): a lighter squeeze, less friction to hold with, the same bias as the lifts'. **Corrected:** mjlab's
+     fingers' give x1.3 (`MJLAB_GIVE_SCALE`, mjlab only: `env_cfg`'s default; `give_scale=1.0` is the CPU model as is):
+     pyri6 0.29 / 2.7, feno2 0.21 / 2.9 (nearer the robot than CPU MuJoCo), both lifts right (x1.15 and x1.5 scored
+     worse on one or the other). The 96 draws again: lifted 11 in mjlab against 14 on CPU (7 before), the same in 89,
+     the differences both ways now: within the counts' noise.
+   **Next:** training (mjlab's PPO, `rsl_rl`): the policy's observations, the action's scale and the episode, then a
+   first run on a pod; the server's streaming mode before a policy runs on the robot.
