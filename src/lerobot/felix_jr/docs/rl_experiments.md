@@ -26,6 +26,10 @@ uv run --extra felix_jr_sim --extra felix_jr_gpu python -m lerobot.felix_jr.sim2
 A run's folder (`cloud/scratch/runs/<id>/`): `commit`, `diff.patch`, `command`, `output.log`, `exit_code`, and
 `train/` (`settings.json`, tensorboard's events, `model_*.pt`, `eval.json`: the final policy played one episode in every
 world, held at the end and at any time, by start pool).
+At every checkpoint (`--video-every`, default each) the policy is filmed on a few random starts (`sim2real/videos.py`:
+6 worlds, every pool equally likely, a side view of each world's object, each tile labelled with its pool and state)
+into `train/videos/model_<iteration>.mp4` (~1 MB a world-episode), on the pod's GPU; a checkpoint after the fact:
+`python -m lerobot.felix_jr.sim2real.videos <run>/train [--checkpoint model_1400.pt]`.
 
 ## The environment: our simulator in mjlab
 

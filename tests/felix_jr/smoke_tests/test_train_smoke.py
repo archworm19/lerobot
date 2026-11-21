@@ -22,7 +22,7 @@ def test_training_runs_and_evaluates(tmp_path):
     out = tmp_path / "train"
     train.main(
         ["--pool", str(pool), "--device", "cpu", "--num-envs", "4", "--iterations", "2", "--steps-per-env", "4",
-         "--save-interval", "1", "--log-dir", str(out), "--pool-weights", *(f"{p}=1" for p in POOLS)]
+         "--save-interval", "1", "--log-dir", str(out), "--video-every", "0", "--pool-weights", *(f"{p}=1" for p in POOLS)]
     )  # fmt: skip
     assert (out / "model_final.pt").is_file() and (out / "settings.json").is_file()
     result = json.loads((out / "eval.json").read_text())

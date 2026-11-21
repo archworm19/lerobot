@@ -10,7 +10,8 @@ settings: mjlab's lift-cube task's (its YAM arm: actor and critic 512-256-128, E
 adaptive learning rate from 1e-3, 24 steps a world an update). The logs and checkpoints in `--log-dir`: `$RUN_DIR/train`
 on a pod (the run script's), else `sim2real/scratch/train/<time>/`. At the end the policy is played one episode in
 every world, deterministically: `eval.json`, the share of worlds holding the object at the end and at any time, by
-start pool (the positive control's measure: from the easy starts it should be high).
+start pool (the positive control's measure: from the easy starts it should be high). At every checkpoint
+(`--video-every`) the policy filmed on a few random starts (`videos.record`): `videos/model_<iteration>.mp4`.
 
 On a pod, through `cloud/train.py` (the pool sent along, the run in the background). On the Mac's CPU (`--device cpu`,
 a few worlds and iterations): to catch what is miswired before paying for a GPU.
@@ -68,6 +69,41 @@ def runner_cfg(iterations: int, seed: int, logger: str, save_interval: int, step
         logger=logger,
         seed=seed,
     )
+
+
+def filming_runner(base: Any) -> Any:
+    """`base` (mjlab's runner class) filming the policy at its checkpoints (`videos.record`), if given a video env."""
+
+    class FilmingRunner(base):  # type: ignore[misc,valid-type]
+        video: tuple[Any, Any, Path, int] | None = None  # (env, wrapper, folder, every n-th checkpoint)
+        _saved = 0
+
+        def save(self, path: str, infos: Any = None) -> None:
+            super().save(path, infos)
+            if self.video is None:
+                return
+            env, wrapped, folder, every = self.video
+            self._saved += 1
+            name = Path(path).stem
+            if every <= 0 or (name != "model_final" and (self._saved - 1) % every):
+                return
+            from .videos import record
+
+            try:  # (a failed film never stops the training)
+                out = record(
+                    env,
+                    wrapped,
+                    self.get_inference_policy(device=str(env.device)),
+                    folder / f"{name}.mp4",
+                    name,
+                )
+                print(f"filmed {name}: {out}", flush=True)
+            except Exception as e:  # noqa: BLE001
+                print(f"filming {name} failed: {e!r}", flush=True)
+            finally:
+                self.alg.train_mode()
+
+    return FilmingRunner
 
 
 def evaluate(env: Any, wrapped: Any, policy: Any) -> dict[str, Any]:
@@ -131,6 +167,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--log-dir", type=Path, default=None)
     parser.add_argument("--device", default=None, help="default cuda:0 if there is a GPU, else cpu")
     parser.add_argument("--model", type=Path, default=api.MODEL)
+    parser.add_argument(
+        "--video-every", type=int, default=1, help="film every n-th checkpoint (and the final one); 0: none"
+    )
+    parser.add_argument(
+        "--video-worlds", type=int, default=6, help="the worlds filmed (every pool equally likely)"
+    )
     args = parser.parse_args(argv)
 
     device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -177,7 +219,12 @@ def main(argv: list[str] | None = None) -> None:
     (log_dir / "settings.json").write_text(json.dumps(settings, indent=2, default=str))
     print(f"training on {device}, {num_envs} worlds, {args.iterations} iterations: {log_dir}", flush=True)
 
-    runner = MjlabOnPolicyRunner(wrapped, asdict(agent), str(log_dir), device)
+    runner = filming_runner(MjlabOnPolicyRunner)(wrapped, asdict(agent), str(log_dir), device)
+    if args.video_every > 0:
+        from .videos import make_video_env
+
+        video_env, video_wrapped = make_video_env(settings, args.video_worlds, device)
+        runner.video = (video_env, video_wrapped, log_dir / "videos", args.video_every)
     started = time.perf_counter()
     runner.learn(num_learning_iterations=args.iterations, init_at_random_ep_len=True)
     seconds = time.perf_counter() - started
