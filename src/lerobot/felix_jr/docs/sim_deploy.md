@@ -179,3 +179,18 @@ the code; a bucket pays from ~1 GB or many pods reading the same data. **Outputs
    object 0.5-2 mm (the table contact's settle, as CPU against Warp), the lifted ones still up, the arm under 0.8 deg,
    nothing unstable (smoke test: `test_start_pool_smoke.py`). The pool is under `scratch/` (gitignored): the run
    script does not send it; draw it on the pod (CPU) or send it along.
+   **The task's terms** (`sim2real/mjlab_task.py`, assembled by `env_cfg`): the action, 6 delta joint targets (1 deg a
+   step, the target within 5 deg of the reading; the jaw 2 units a step within 15: the sessions' settled moves stop
+   0.9-2.7 deg and the jaw 3 units short, every logged execution; mjlab's relative action steps from the reading and
+   cannot build a gap past one step); 42 observations (the joints' positions and velocities, the object's center and
+   axis in the root frame and in the pinch frame, with `object_noise_m` 1 mm, the servos' loads, each finger's pads on
+   the object, the last action); staged rewards (`REWARD_WEIGHTS`: reach 0.2, between the jaws 0.3, both fingers 0.5,
+   rise 1, held 2, action rate -0.01, a failure -5); terminations: the arm on the table (a contact sensor over the arm),
+   the object tipped, the episode's 12 s. The grasp point and the box "between the jaws" are measured from the pool:
+   where the object's axis passes the pinch point (not its center: the grasps are at all heights of the bottle) in
+   the jaws (-16, 1, -11) mm, the jaws open around it (-30, 2, -12), at the attack (-30, -1, +34). On the pool's
+   starts: reach 0.34 / 0.69 / 0.88 / 0.82 and between 0 / 0.88 / 0.94 / 0.81 (attack, at_object, in_jaws, lifted),
+   both fingers 1.0 in the jaws; held still under zero actions (1 of 32 at_object starts begins a fingertip on the
+   table). Driven: a closing jaw takes the object in every world; each in_jaws start lifted by its anchor's lift
+   joints through the action keeps it in both fingers, up 63 % of the lift (the arm's sag, as the bank's), so held
+   (75 %) asks the policy to lift more than the plan.

@@ -68,3 +68,30 @@ def test_a_reset_writes_a_start_of_the_pool_into_each_world(tmp_path):
         assert np.allclose(env.sim.data.ctrl[w].cpu().numpy(), ctrl[row], atol=1e-6)
         z = me._joint_slices(env.sim.mj_model)["floating_base_joint"].start + 2
         assert float(env.felix_object_z0[w]) == pytest.approx(qpos[row, z], abs=1e-6)
+
+
+def test_the_task_steps_from_pool_starts(tmp_path):
+    """The task's terms (`mjlab_task`) on pool starts: the observations' shape, a delta action, the rewards finite."""
+    import torch
+
+    model = XleRobotModel.load(api.MODEL)
+    path = tmp_path / "pool.npz"
+    _pool(model).save(path)
+    env = me.make_env(
+        me.env_cfg(
+            model, num_envs=4, randomize=False, start_pool=path, pool_weights=dict.fromkeys(POOLS, 1.0)
+        )
+    )
+    obs, _ = env.reset()
+    assert (
+        obs["actor"].shape == (4, 42) and env.action_manager.total_action_dim == 6
+    )  # (8+8 joints, 6+6 pose, 6, 2, 6)
+    term = env.action_manager.get_term("joint_targets")
+    before = term.targets.clone()
+    action = torch.zeros(4, 6)
+    action[:, 0] = 1.0  # the pan a full step
+    _, reward, _, _, _ = env.step(action)
+    assert torch.isfinite(reward).all()
+    assert torch.allclose(
+        term.targets[:, 0] - before[:, 0], torch.full((4,), float(np.radians(1.0))), atol=1e-5
+    )

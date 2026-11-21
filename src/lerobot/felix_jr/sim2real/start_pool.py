@@ -224,6 +224,10 @@ def reset_from_pool(
         }
         env._felix_pool = cache  # type: ignore[attr-defined]
         env.felix_object_z0 = torch.zeros(env.num_envs, device=dev)  # type: ignore[attr-defined]
+        # resting on the table: what the object's rise is measured from (`mjlab_task.rise`)
+        env.felix_object_rest_z = torch.full(  # type: ignore[attr-defined]
+            (env.num_envs,), pool.table_z + pool.object_size[1] / 2, device=dev
+        )
     ids = torch.arange(env.num_envs, device=sim.data.qpos.device) if env_ids is None else env_ids
     if len(ids) == 0:
         return

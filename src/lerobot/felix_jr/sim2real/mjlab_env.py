@@ -13,8 +13,7 @@ The same robot, physics and control as the CPU simulator (`robot`, `scene`, `sha
   every 17 physics steps (`DECIMATION`: ~30 Hz, the server's waypoint rate, `trajectory.WAYPOINT_HZ`).
 - **Resets and randomization:** the arm at `start` (LeRobot's readings), the object within `object_sigma_m` of its
   spot, the fingers' friction and give and the object's mass drawn as `grasp_check.physics_draws` draws them.
-- **Reward / termination:** the object's rise towards the lift (`refine`'s lifted: `HELD_FRACTION` of `LIFT_M`); the
-  episode ends at its length or when the object tips past `refine.KNOCKED_DEG`.
+- **The task** (`mjlab_task`): delta joint targets, the privileged observations, the staged rewards, the terminations.
 
 `model_differences` compares this environment's compiled model with `scene.build`'s, field by field: the check that
 nothing changed on the way (`docs/sim_deploy.md`).
@@ -29,16 +28,13 @@ import numpy as np
 
 from lerobot.felix_jr.calibration.joint_sim import REST
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
-from lerobot.felix_jr.harness.grasping import LIFT_M
 from lerobot.utils.import_utils import require_package
 
 from . import robot, scene as sc
 from .grasp_check import FRICTION_RANGE, MASS_RANGE, STIFFNESS_RANGE
-from .refine import HELD_FRACTION, KNOCKED_DEG
 
 if TYPE_CHECKING:
     import mujoco
-    import torch
     from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
     from mjlab.sim import SimulationCfg
 
@@ -47,6 +43,16 @@ DECIMATION = (
 )
 NCONMAX, NJMAX = 64, 400  # per world (`cloud/warp_check.py`: ~1 MB a world)
 EPISODE_S = 12.0
+OBJECT_NOISE_M = 0.001  # the object pose's noise in the actor's observations: the positive control's, ~1 mm
+REWARD_WEIGHTS = {  # (per step; a starting point, to tune from the curves)
+    "reach": 0.2,
+    "between_jaws": 0.3,
+    "both_fingers": 0.5,
+    "rise": 1.0,
+    "held": 2.0,
+    "action_rate": -0.01,
+    "failed": -5.0,  # (an episode ended by a failure: the arm on the table, the object tipped)
+}
 # the start pool's mix (`start_pool`): mostly the jaws open around the object, the positive control's easy start
 POOL_WEIGHTS = {"attack": 0.2, "at_object": 0.5, "in_jaws": 0.2, "lifted": 0.1}
 OBJECT_SIGMA_M = 0.007  # the object's spread about its spot (`refine.RefineSettings.object_sigma_m`)
@@ -134,35 +140,6 @@ def table_spec(model: XleRobotModel, arm: str, table_z: float) -> "mujoco.MjSpec
 # ---- the task's terms ----------------------------------------------------------------------------------------------
 
 
-def object_rise(env: "ManagerBasedRlEnv", object_name: str = "object") -> "torch.Tensor":
-    """How far the object is above where it started, as a fraction of the lift, capped at 1 (the reward)."""
-    obj = env.scene[object_name]
-    # (where it started: the start pool's height for each world, `start_pool.reset_from_pool`; else its default)
-    start = getattr(env, "felix_object_z0", None)
-    if start is None:
-        start = obj.data.default_root_state[:, 2]
-    return ((obj.data.root_link_pos_w[:, 2] - start) / LIFT_M).clamp(min=0.0, max=1.0)
-
-
-def object_lifted(env: "ManagerBasedRlEnv", object_name: str = "object") -> "torch.Tensor":
-    """1 where the object is up `HELD_FRACTION` of the lift (`refine`'s lifted)."""
-    return (object_rise(env, object_name) >= HELD_FRACTION).float()
-
-
-def object_tipped(env: "ManagerBasedRlEnv", object_name: str = "object") -> "torch.Tensor":
-    """Where the object's axis is past `refine.KNOCKED_DEG` from upright (knocked over: the episode ends)."""
-    import torch
-
-    quat = env.scene[object_name].data.root_link_quat_w  # (w, x, y, z)
-    up_z = 1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2)  # the body z axis's world z
-    return up_z < torch.cos(torch.deg2rad(torch.tensor(KNOCKED_DEG, device=quat.device)))
-
-
-def object_position(env: "ManagerBasedRlEnv", object_name: str = "object") -> "torch.Tensor":
-    """The object's position in the root frame (an observation; the policy's estimate, noise added by the group)."""
-    return env.scene[object_name].data.root_link_pos_w
-
-
 def env_cfg(
     model: XleRobotModel,
     arm: str = "right",
@@ -175,6 +152,7 @@ def env_cfg(
     give_scale: float = MJLAB_GIVE_SCALE,
     start_pool: str | Path | None = None,
     pool_weights: Mapping[str, float] | None = None,
+    object_noise_m: float = OBJECT_NOISE_M,
 ) -> "ManagerBasedRlEnvCfg":
     """The grasp-and-lift environment: `obj` on the table at `table_z`, the arm from `start` (the module docstring).
 
@@ -182,21 +160,23 @@ def env_cfg(
     default `POOL_WEIGHTS`), the object and the table the pool's; `obj`, `table_z`, `start`, `object_sigma_m` unused.
 
     `give_scale`: mjlab's correction to the fingers' give (`MJLAB_GIVE_SCALE`); 1.0 for the CPU simulator's model as is
-    (`model_differences` then finds none).
+    (`model_differences` then finds none). The task's action, observations, rewards and terminations: `mjlab_task`;
+    `object_noise_m` the object pose's noise in the actor's observations (std, m; the axis's a tenth, unitless).
     """
     require_package("mjlab", extra="felix_jr_gpu")
     from mjlab.actuator import XmlActuatorCfg
     from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
     from mjlab.envs import ManagerBasedRlEnvCfg, mdp as base_mdp
     from mjlab.envs.mdp import dr
-    from mjlab.envs.mdp.actions import JointPositionActionCfg
     from mjlab.managers.event_manager import EventTermCfg
     from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
     from mjlab.managers.reward_manager import RewardTermCfg
     from mjlab.managers.scene_entity_config import SceneEntityCfg
     from mjlab.managers.termination_manager import TerminationTermCfg
     from mjlab.scene import SceneCfg
-    from mjlab.utils.noise import UniformNoiseCfg as Unoise
+    from mjlab.utils.noise import GaussianNoiseCfg, UniformNoiseCfg as Unoise
+
+    from . import mjlab_task as task
 
     if start_pool is not None:
         from .start_pool import StartPool
@@ -221,10 +201,22 @@ def env_cfg(
         ),
         "table": EntityCfg(spec_fn=lambda: table_spec(model, arm, table_z)),
     }
+    pose_noise = (
+        GaussianNoiseCfg(
+            std=tuple(
+                [object_noise_m] * 3 + [object_noise_m / 10] * 3
+            )  # (the center's m; the axis's, unitless)
+        )
+        if object_noise_m > 0
+        else None
+    )
     terms = {
-        "joint_pos": ObservationTermCfg(func=base_mdp.joint_pos_rel, noise=Unoise(n_min=-0.005, n_max=0.005)),
+        "joint_pos": ObservationTermCfg(func=base_mdp.joint_pos_rel, noise=Unoise(n_min=-0.002, n_max=0.002)),
         "joint_vel": ObservationTermCfg(func=base_mdp.joint_vel_rel),
-        "object_pos": ObservationTermCfg(func=object_position, noise=Unoise(n_min=-0.005, n_max=0.005)),
+        "object_in_root": ObservationTermCfg(func=task.object_in_root, noise=pose_noise),
+        "object_in_pinch": ObservationTermCfg(func=task.object_in_pinch, noise=pose_noise),
+        "servo_loads": ObservationTermCfg(func=task.servo_loads),
+        "finger_contacts": ObservationTermCfg(func=task.finger_contacts),
         "actions": ObservationTermCfg(func=base_mdp.last_action),
     }
     events: dict[str, EventTermCfg] = {
@@ -288,25 +280,28 @@ def env_cfg(
             ),
         }
     return ManagerBasedRlEnvCfg(
-        scene=SceneCfg(num_envs=num_envs, env_spacing=0.0, entities=entities),
+        scene=SceneCfg(num_envs=num_envs, env_spacing=0.0, entities=entities, sensors=task.sensors()),
         observations={
             "actor": ObservationGroupCfg(terms, enable_corruption=True),
             "critic": ObservationGroupCfg(dict(terms), enable_corruption=False),
         },
-        actions={
-            "joint_pos": JointPositionActionCfg(
-                entity_name="robot", actuator_names=(".*",), scale=1.0, use_default_offset=False
-            )
-        },
+        actions={"joint_targets": task.delta_action_cfg(model, arm)},
         events=events,
-        rewards={
-            "rise": RewardTermCfg(func=object_rise, weight=1.0),
-            "lifted": RewardTermCfg(func=object_lifted, weight=1.0),
-            "action_rate": RewardTermCfg(func=base_mdp.action_rate_l2, weight=-0.01),
+        rewards={  # (staged, each stage paying more than the one before: `mjlab_task`'s docstring)
+            "reach": RewardTermCfg(func=task.reach, weight=REWARD_WEIGHTS["reach"]),
+            "between_jaws": RewardTermCfg(
+                func=task.between_jaws, weight=REWARD_WEIGHTS["between_jaws"], params={"height": obj.height}
+            ),
+            "both_fingers": RewardTermCfg(func=task.both_fingers, weight=REWARD_WEIGHTS["both_fingers"]),
+            "rise": RewardTermCfg(func=task.rise, weight=REWARD_WEIGHTS["rise"]),
+            "held": RewardTermCfg(func=task.held, weight=REWARD_WEIGHTS["held"]),
+            "action_rate": RewardTermCfg(func=base_mdp.action_rate_l2, weight=REWARD_WEIGHTS["action_rate"]),
+            "failed": RewardTermCfg(func=base_mdp.is_terminated, weight=REWARD_WEIGHTS["failed"]),
         },
         terminations={
             "time_out": TerminationTermCfg(func=base_mdp.time_out, time_out=True),
-            "tipped": TerminationTermCfg(func=object_tipped),
+            "tipped": TerminationTermCfg(func=task.tipped),
+            "arm_on_table": TerminationTermCfg(func=task.arm_on_table),
         },
         sim=sim_cfg(),
         decimation=DECIMATION,
