@@ -86,17 +86,17 @@ def evaluate(env: Any, wrapped: Any, policy: Any) -> dict[str, Any]:
     ever = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     done = torch.zeros_like(ever)
     held_at_end = torch.zeros_like(ever)
+    holding = task.held(env) > 0
     with torch.inference_mode():
         for _ in range(int(env.max_episode_length)):
+            before = holding  # (a world whose episode ends in this step is reset within it: its end is the step before)
             obs, _, dones, _ = wrapped.step(policy(obs))
             holding = task.held(env) > 0
-            ever |= holding & ~done
             ended = dones.bool() & ~done
-            held_at_end |= (
-                ended & holding
-            )  # (an ended world was reset: its held is the next episode's; approximate)
+            held_at_end |= ended & before
+            ever |= (holding & ~done & ~ended) | (ended & before)
             done |= ended
-        held_at_end |= ~done & (task.held(env) > 0)
+        held_at_end |= ~done & holding
     out: dict[str, Any] = {"worlds": env.num_envs}
     for name in ("all", *POOLS):
         mask = np.ones(env.num_envs, bool) if name == "all" else which == name
