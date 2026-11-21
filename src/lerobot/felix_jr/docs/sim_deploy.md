@@ -92,13 +92,20 @@ the code; a bucket pays from ~1 GB or many pods reading the same data. **Outputs
    took 10 minutes on a free runner.
 2. **A pod:** RunPod, "Deploy" a GPU pod with a custom image, `ghcr.io/<owner>/felix-sim:<tag>` (`run.py tag` names the
    tag), TCP port 22 exposed, your ssh public key in RunPod's settings (it reaches the pod as `$PUBLIC_KEY`). The
-   pod's "Connect" shows `ssh root@<ip> -p <port>`.
+   pod's "Connect" shows `ssh root@<ip> -p <port>`. The dev template (2026-11-21): `felix-sim:latest`, an RTX 4090,
+   20 GB container disk and no volume, TCP 22 exposed (on a Public IP host), no start command (the image's starts sshd),
+   `NVIDIA_DRIVER_CAPABILITIES=all` (now in the image too), `POD_TTL`, CUDA 12.8 and up (the cu128 wheels' minimum;
+   a newer driver runs them).
 3. **A run:** `uv run python -m lerobot.felix_jr.cloud.run --host root@<ip> --port <port> -- python -m
    lerobot.felix_jr.sim2real.<module> ...`: the code synced (what git tracks or would: `scratch/` stays home), the
    commit and `git diff` saved with the run, its output streamed, `$RUN_DIR`'s files fetched into
    `cloud/scratch/runs/<id>/`. Again after a code change: only the changes go.
-4. **Stop the pod** when done (RunPod's console or `runpodctl stop pod <id>`): it bills until stopped, its disk until
-   deleted.
+4. **Stop the pod** when done (RunPod's console or `runpodctl pod stop <id>`): it bills until stopped, its disk until
+   deleted. **`POD_TTL`** (the template's env, e.g. `4h`; `30m`, `1d`, plain seconds) makes it stop itself that long
+   after it starts (`docker/felix_sim_start.sh`: `runpodctl pod stop` with the pod-scoped `$RUNPOD_API_KEY` RunPod
+   gives every pod; `runpodctl` 3.0.1 in the image, its checksum checked); the run script prints when
+   (`/opt/felix/stop_at`). Stopped, not deleted: the disk bills until the pod is deleted. A backstop: RunPod stops every
+   pod when the prepaid balance reaches $0.
 4. **One RTX 4090 on RunPod** (deleted after): the replays on CUDA, then environments per second against their count;
    the same on an L40S.
 5. **The rollout batched** (`refine.rollout` / `outcome` over many environments): the refine and the bank on the GPU.

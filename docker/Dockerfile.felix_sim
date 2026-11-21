@@ -13,6 +13,9 @@ FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu${OS_VERSION}
 ARG PYTHON_VERSION=3.12
 ARG UV_VERSION=0.11.30
 ARG IMAGE_TAG=dev
+# runpodctl, for the pod to stop itself (`POD_TTL`, the start script): a release out a few weeks, its checksum checked
+ARG RUNPODCTL_VERSION=3.0.1
+ARG RUNPODCTL_SHA256=b66d11eca8cacbf18a2de6943c6e18a79ffbdc8a3c30aa13a49dc6cfc15d4239
 
 ENV DEBIAN_FRONTEND=noninteractive \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
@@ -30,6 +33,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libglib2.0-0 libgl1 libegl1 libgomp1 ffmpeg \
         openssh-server rsync \
     && curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+    && curl -fsSL -o /usr/local/bin/runpodctl \
+        https://github.com/runpod/runpodctl/releases/download/v${RUNPODCTL_VERSION}/runpodctl-linux-amd64 \
+    && echo "${RUNPODCTL_SHA256}  /usr/local/bin/runpodctl" | sha256sum -c - \
+    && chmod +x /usr/local/bin/runpodctl \
     && mkdir -p /run/sshd /workspace /opt/felix \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 

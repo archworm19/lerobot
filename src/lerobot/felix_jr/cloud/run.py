@@ -92,6 +92,10 @@ def run(
             print(f"{message}: start the pod on felix-sim:{local_tag} (or --any-image)", file=sys.stderr)
             return 2
         print(f"warning: {message}", file=sys.stderr)
+    stop_at = subprocess.run(  # nosec B603: ssh, an argument list
+        [*ssh, "cat /opt/felix/stop_at 2>/dev/null || true"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    print(f"the pod stops itself at {stop_at} (POD_TTL)" if stop_at else "no POD_TTL: stop the pod when done")
 
     rsync = rsync_base(port, key)
     subprocess.run(  # nosec B603: rsync, an argument list
