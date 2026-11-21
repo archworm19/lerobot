@@ -1,5 +1,7 @@
 # Simulation on rented GPUs (plan, 2026-11-20)
 
+The RL experiments themselves (the environment's validation, the runs, their results): [rl_experiments.md](rl_experiments.md).
+
 The simulator (`sim2real/`: the refine, the bank, the shadow's replays) runs on this Mac's CPU, one rollout per
 worker. Training a grasp policy, or refining over thousands of draws, needs many environments stepped in parallel
 on a GPU: mjlab (MuJoCo Warp, the GPU MuJoCo, with torch) on a rented GPU. Branch `sim_deploy`.

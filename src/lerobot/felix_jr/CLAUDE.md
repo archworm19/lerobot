@@ -31,6 +31,8 @@ running anything on the robot, and update it when what you do changes what it sa
   - `docs/head.md`: the head servos.
 - **Experiments** (what was tried, with numbers):
   - `docs/sessions.md`: each harness session on the robot, newest first: setup, what happened, takeaways.
+  - `docs/rl_experiments.md`: the grasp policy's RL runs in mjlab: how the environment matches our simulator and
+    the robot (and what was checked), the experiments' setup, a log of runs with results.
   - `docs/tuning_notes.md`: hardware tuning findings, marked *measured* / *inferred* / *open*.
   - `docs/hardware_risks.md`: what on the robot can change unannounced and spoil a calibration or a measurement
     (the wrist cameras moving on their mounts, ...): how to tell, what to do.
