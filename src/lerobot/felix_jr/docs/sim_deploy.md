@@ -100,6 +100,11 @@ the code; a bucket pays from ~1 GB or many pods reading the same data. **Outputs
    lerobot.felix_jr.sim2real.<module> ...`: the code synced (what git tracks or would: `scratch/` stays home), the
    commit and `git diff` saved with the run, its output streamed, `$RUN_DIR`'s files fetched into
    `cloud/scratch/runs/<id>/`. Again after a code change: only the changes go.
+   **A training run:** `uv run python -m lerobot.felix_jr.cloud.train --host root@<ip> --port <port> [-- <train's
+   options>]`: the start pool sent along (`--send`: it is under `scratch/`), `sim2real.train` started in the background
+   (`--detach`: a run outlives the ssh session; its output in the run's `output.log`, the exit code in `exit_code`);
+   `python -m lerobot.felix_jr.cloud.run fetch --host ... --port ... <run id>` brings the run home (tensorboard's logs,
+   the checkpoints, `eval.json`: held at the end and ever, by start pool). `--attach` streams it instead.
 4. **Stop the pod** when done (RunPod's console or `runpodctl pod stop <id>`): it bills until stopped, its disk until
    deleted. **`POD_TTL`** (the template's env, e.g. `4h`; `30m`, `1d`, plain seconds) makes it stop itself that long
    after it starts (`docker/felix_sim_start.sh`: `runpodctl pod stop` with the pod-scoped `$RUNPOD_API_KEY` RunPod
@@ -194,3 +199,8 @@ the code; a bucket pays from ~1 GB or many pods reading the same data. **Outputs
    table). Driven: a closing jaw takes the object in every world; each in_jaws start lifted by its anchor's lift
    joints through the action keeps it in both fingers, up 63 % of the lift (the arm's sag, as the bank's), so held
    (75 %) asks the policy to lift more than the plan.
+   **Training** (`sim2real/train.py`): mjlab's PPO runner (rsl_rl) with its lift-cube task's settings (actor and critic
+   512-256-128, ELU, observations normalized, adaptive learning rate from 1e-3, 24 steps a world an update), the
+   environment from the pool with the physics randomized; `settings.json` with the run, at the end the policy played
+   an episode in every world (`eval.json`). On the Mac's CPU (8 worlds, 3 iterations): it runs end to end (a smoke
+   test, `test_train_smoke.py`). On a pod: `cloud/train.py` (above).

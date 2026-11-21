@@ -54,3 +54,10 @@ def test_ssh_and_rsync_use_the_pods_port_and_key(tmp_path):
     key = tmp_path / "id"
     assert ssh_base("root@1.2.3.4", 2222, key)[-3:] == ["-i", str(key), "root@1.2.3.4"]
     assert "-p 2222" in rsync_base(2222, key)[-1] and str(key) in rsync_base(2222, key)[-1]
+
+
+def test_a_detached_command_runs_in_the_background_and_keeps_its_output_and_exit_code():
+    line = remote_command(["python", "-m", "mod"], "/workspace/runs/1", detach=True)
+    assert line.startswith("nohup bash -c ") and line.endswith("&")
+    inner = shlex.split(shlex.split(line)[3])  # (the background script's words)
+    assert "/workspace/runs/1/output.log" in inner and "/workspace/runs/1/exit_code" in inner

@@ -3,6 +3,8 @@
   uv run python -m lerobot.felix_jr.cloud.run --host root@<ip> --port <port> [--key ~/.ssh/id_ed25519] \
       [--fetch <remote dir>] -- python -m lerobot.felix_jr.sim2real.<module> ...
   python src/lerobot/felix_jr/cloud/run.py tag       # the image tag this checkout's dependencies build (CI uses it)
+  uv run python -m lerobot.felix_jr.cloud.run fetch --host root@<ip> --port <port> <run id>   # a run's folder, again
+  (`--send <file>`: a file the sync leaves out, e.g. a start pool under scratch/; `--detach`: in the background)
 
 The pod runs the `felix-sim` image (`docker/Dockerfile.felix_sim`: the dependencies, sshd). Each run:
 
@@ -65,10 +67,42 @@ def tracked_files(root: Path = ROOT) -> bytes:
     ).stdout
 
 
-def remote_command(command: Sequence[str], run_dir: str) -> str:
-    """`command` as the pod runs it: in the code's folder, with the image's environment and `RUN_DIR` set."""
+def remote_command(command: Sequence[str], run_dir: str, detach: bool = False) -> str:
+    """`command` as the pod runs it: in the code's folder, with the image's environment and `RUN_DIR` set.
+
+    `detach`: started in the background (`nohup`), its output into `RUN_DIR/output.log` and its exit code into
+    `RUN_DIR/exit_code` when it ends; the ssh session returns at once (a training run outlives it).
+    """
     inner = f"cd {REMOTE_CODE} && export RUN_DIR={shlex.quote(run_dir)} && {shlex.join(command)}"
-    return f"bash -lc {shlex.quote(inner)}"
+    if not detach:
+        return f"bash -lc {shlex.quote(inner)}"
+    log, code = shlex.quote(f"{run_dir}/output.log"), shlex.quote(f"{run_dir}/exit_code")
+    background = f"nohup bash -lc {shlex.quote(inner)} > {log} 2>&1; echo $? > {code}"
+    return f"nohup bash -c {shlex.quote(background)} > /dev/null 2>&1 &"
+
+
+def send_files(host: str, port: int, key: Path | None, paths: Sequence[Path], root: Path = ROOT) -> None:
+    """`paths` (files the sync leaves out: under `scratch/`, say) to the same place under the pod's code folder."""
+    names = []
+    for path in paths:
+        full = (root / path).resolve() if not Path(path).is_absolute() else Path(path)
+        if not full.is_file():
+            raise FileNotFoundError(f"{path}: no such file to send")
+        names.append(str(full.relative_to(root.resolve())))
+    if names:
+        subprocess.run(  # nosec B603: rsync, an argument list
+            [*rsync_base(port, key), "--relative", *names, f"{host}:{REMOTE_CODE}/"], cwd=root, check=True
+        )
+
+
+def fetch_run(host: str, port: int, run_id: str, key: Path | None = None) -> Path:
+    """Run `run_id`'s folder from the pod into `cloud/scratch/runs/<run_id>/` (again: only what changed)."""
+    local = LOCAL_RUNS / run_id
+    local.mkdir(parents=True, exist_ok=True)
+    subprocess.run(  # nosec B603: rsync, an argument list
+        [*rsync_base(port, key), f"{host}:{REMOTE_RUNS}/{run_id}/", f"{local}/"], check=False
+    )
+    return local
 
 
 def run(
@@ -79,8 +113,14 @@ def run(
     fetch: Sequence[str] = (),
     any_image: bool = False,
     root: Path = ROOT,
+    send: Sequence[Path] = (),
+    detach: bool = False,
 ) -> int:
-    """Steps 1-5 of the module docstring; the command's exit code."""
+    """Steps 1-5 of the module docstring; the command's exit code (0 once started, `detach`).
+
+    `send`: files to send along (`send_files`). `detach`: started in the background, nothing fetched (`fetch`
+    later); the run's id printed.
+    """
     ssh = ssh_base(host, port, key)
     remote_tag = subprocess.run(  # nosec B603: ssh, an argument list
         [*ssh, "cat /opt/felix/image_tag"], check=True, capture_output=True, text=True
@@ -104,6 +144,7 @@ def run(
         input=tracked_files(root),
         check=True,
     )
+    send_files(host, port, key, send, root)
 
     run_id = time.strftime("%Y%m%d_%H%M%S")
     run_dir = f"{REMOTE_RUNS}/{run_id}"
@@ -120,6 +161,14 @@ def run(
     )
 
     print(f"run {run_id} on {host}:{port} (felix-sim:{remote_tag}, {commit[:9]}): {shlex.join(command)}")
+    if detach:
+        subprocess.run([*ssh, remote_command(command, run_dir, detach=True)], check=True)  # nosec B603: ssh
+        where = f"--host {host} --port {port}" + (f" --key {key}" if key else "")
+        print(
+            f"started in the background: {run_dir}/output.log on the pod; fetch with\n"
+            f"  python -m lerobot.felix_jr.cloud.run fetch {where} {run_id}"
+        )
+        return 0
     code = subprocess.run([*ssh, remote_command(command, run_dir)]).returncode  # nosec B603: ssh
 
     local = LOCAL_RUNS / run_id
@@ -135,6 +184,15 @@ def main() -> None:
     if sys.argv[1:] == ["tag"]:
         print(image_tag())
         return
+    if sys.argv[1:2] == ["fetch"]:
+        fetcher = argparse.ArgumentParser(description="a run's folder from the pod")
+        fetcher.add_argument("--host", required=True)
+        fetcher.add_argument("--port", type=int, default=22)
+        fetcher.add_argument("--key", type=Path, default=None)
+        fetcher.add_argument("run_id")
+        a = fetcher.parse_args(sys.argv[2:])
+        print(f"fetched into {fetch_run(a.host, a.port, a.run_id, a.key)}")
+        return
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--host", required=True, help="the pod's ssh user@address (RunPod: root@<ip>)")
     parser.add_argument(
@@ -144,13 +202,32 @@ def main() -> None:
     parser.add_argument("--fetch", action="append", default=[], help="a remote folder to fetch after, too")
     parser.add_argument("--any-image", action="store_true", help="run even if the pod's image is another tag")
     parser.add_argument(
+        "--send",
+        action="append",
+        type=Path,
+        default=[],
+        help="a file the sync leaves out to send (scratch/...)",
+    )
+    parser.add_argument("--detach", action="store_true", help="start it in the background; `fetch` later")
+    parser.add_argument(
         "command", nargs=argparse.REMAINDER, help="after --: what to run in the code's folder"
     )
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("no command (after --)")
-    sys.exit(run(args.host, args.port, command, args.key, args.fetch, args.any_image))
+    sys.exit(
+        run(
+            args.host,
+            args.port,
+            command,
+            args.key,
+            args.fetch,
+            args.any_image,
+            send=args.send,
+            detach=args.detach,
+        )
+    )
 
 
 if __name__ == "__main__":
