@@ -3,11 +3,12 @@
 `record(env, policy, path)`: one episode in each of `env`'s worlds (a few: the training's own worlds are too many to
 watch), from fresh resets, rendered every policy step (~30 fps) by MuJoCo's renderer from a camera aimed at each world's
 object, the tiles side by side, each labelled with its start pool and what is happening (holding, both fingers on, the
-object tipped, the arm on the table), into an mp4. `sim2real/train.py` calls it at every checkpoint (`--video-every`),
+object tipped, the arm on the table), into an mp4; and into tensorboard (`log_to_tensorboard`: an animated GIF and a
+contact sheet at the checkpoint's iteration, in its Images tab). `sim2real/train.py` calls it at every checkpoint (`--video-every`),
 on the pod's GPU (EGL); `main` films a checkpoint after the fact.
 
   uv run --extra felix_jr_sim --extra felix_jr_gpu python -m lerobot.felix_jr.sim2real.videos <run's train/ folder>
-      [--checkpoint model_1400.pt] [--worlds 6] [--device cpu]
+      [--checkpoint model_1400.pt] [--worlds 6] [--device cpu] [--tensorboard]
 """
 
 import argparse
@@ -31,6 +32,8 @@ CAMERA = {
     "azimuth": 90.0,
     "elevation": -35.0,
 }  # (from the side, above: the arm, jaws and object)
+GIF_EVERY, GIF_SCALE = 2, 0.5  # (tensorboard's: every other frame, half size; the mp4 keeps them all)
+SHEET_AT_S = (0.0, 1.5, 4.0, 11.5)  # the contact sheet's moments
 COLORS = {"held": (0, 200, 0), "fingers": (255, 200, 0), "tipped": (230, 0, 0), "table": (230, 0, 0)}
 
 
@@ -50,9 +53,17 @@ def _label(image: np.ndarray, lines: list[tuple[str, tuple[int, int, int]]]) -> 
 
 
 def record(
-    env: "ManagerBasedRlEnv", wrapped: Any, policy: Callable[[Any], Any], path: Path, title: str = ""
+    env: "ManagerBasedRlEnv",
+    wrapped: Any,
+    policy: Callable[[Any], Any],
+    path: Path,
+    title: str = "",
+    frames: list[np.ndarray] | None = None,
 ) -> Path:
-    """One episode in each world of `env` (`wrapped`: its rsl_rl wrapper) by `policy`, filmed into `path` (mp4)."""
+    """One episode in each world of `env` (`wrapped`: its rsl_rl wrapper) by `policy`, filmed into `path` (mp4).
+
+    `frames`: every `GIF_EVERY`-th frame appended to it too, at `GIF_SCALE` (for tensorboard: `log_to_tensorboard`).
+    """
     import mujoco
     import torch
 
@@ -99,7 +110,12 @@ def record(
                         [(f"{title} {pools[w]}  t {step * env.step_dt:4.1f} s", (255, 255, 255)), *state],
                     )
                     tiles.append(tile)
-                writer.write(cv2.cvtColor(np.hstack(tiles), cv2.COLOR_RGB2BGR))
+                strip = np.hstack(tiles)
+                writer.write(cv2.cvtColor(strip, cv2.COLOR_RGB2BGR))
+                if frames is not None and step % GIF_EVERY == 0:
+                    frames.append(
+                        cv2.resize(strip, None, fx=GIF_SCALE, fy=GIF_SCALE, interpolation=cv2.INTER_AREA)
+                    )
                 obs, _, dones, _ = wrapped.step(policy(obs))
                 tm = env.termination_manager
                 for w in np.flatnonzero(dones.cpu().numpy()):
@@ -115,6 +131,36 @@ def record(
         writer.release()
         renderer.close()
     return path
+
+
+def log_to_tensorboard(writer: Any, tag: str, frames: list[np.ndarray], step: int, fps: float) -> None:
+    """`frames` into tensorboard at `step`: an animated GIF (its Images tab plays them) and a contact sheet.
+
+    The GIF goes in as an image summary of GIF bytes, which is what `add_video` writes (without needing moviepy).
+    """
+    import io
+
+    import imageio.v3 as iio
+    from tensorboard.compat.proto.summary_pb2 import Summary
+
+    if not frames:
+        return
+    buffer = io.BytesIO()
+    iio.imwrite(buffer, np.stack(frames), extension=".gif", duration=1000.0 * GIF_EVERY / fps, loop=0)
+    h, w = frames[0].shape[:2]
+    gif = Summary.Image(height=h, width=w, colorspace=3, encoded_image_string=buffer.getvalue())
+    writer._get_file_writer().add_summary(
+        Summary(value=[Summary.Value(tag=f"{tag}/episode", image=gif)]), step
+    )
+    picks = [frames[min(len(frames) - 1, int(t * fps / GIF_EVERY))] for t in SHEET_AT_S]
+    writer.add_image(f"{tag}/sheet", np.vstack(picks), step, dataformats="HWC")
+    writer.flush()
+
+
+def checkpoint_step(name: str, final_step: int) -> int:
+    """A checkpoint's training iteration from its name (`model_<n>`; `model_final`: `final_step`)."""
+    tail = name.removeprefix("model_")
+    return int(tail) if tail.isdigit() else final_step
 
 
 def make_video_env(
@@ -157,6 +203,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--checkpoint", default=None, help="default: the latest model_*.pt")
     parser.add_argument("--worlds", type=int, default=6)
     parser.add_argument("--device", default=None)
+    parser.add_argument("--tensorboard", action="store_true", help="also log it into the run's tensorboard")
     args = parser.parse_args(argv)
     settings = json.loads((args.train_dir / "settings.json").read_text())
     device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -168,14 +215,24 @@ def main(argv: list[str] | None = None) -> None:
     agent = runner_cfg(1, 0, "tensorboard", 1, 24)
     runner = MjlabOnPolicyRunner(wrapped, asdict(agent), str(args.train_dir / "videos"), device)
     runner.load(str(checkpoint))
+    frames: list[np.ndarray] = []
     out = record(
         env,
         wrapped,
         runner.get_inference_policy(device=device),
         args.train_dir / "videos" / f"{checkpoint.stem}.mp4",
         checkpoint.stem,
+        frames,
     )
     print(f"filmed {checkpoint.name}: {out}")
+    if args.tensorboard:  # (an event file of its own in the run's folder: tensorboard reads them all)
+        from torch.utils.tensorboard import SummaryWriter
+
+        step = checkpoint_step(checkpoint.stem, runner.current_learning_iteration)
+        tb = SummaryWriter(log_dir=str(args.train_dir))
+        log_to_tensorboard(tb, "policy", frames, step, 1.0 / env.step_dt)
+        tb.close()
+        print(f"in tensorboard at step {step}: {args.train_dir}")
 
 
 if __name__ == "__main__":

@@ -29,7 +29,12 @@ world, held at the end and at any time, by start pool).
 At every checkpoint (`--video-every`, default each) the policy is filmed on a few random starts (`sim2real/videos.py`:
 6 worlds, every pool equally likely, a side view of each world's object, each tile labelled with its pool and state)
 into `train/videos/model_<iteration>.mp4` (~1 MB a world-episode), on the pod's GPU; a checkpoint after the fact:
-`python -m lerobot.felix_jr.sim2real.videos <run>/train [--checkpoint model_1400.pt]`.
+`python -m lerobot.felix_jr.sim2real.videos <run>/train [--checkpoint model_1400.pt]`. Each filmed checkpoint is also in tensorboard's
+Images tab at its iteration (`policy/episode`: an animated GIF, every other frame at half size, ~0.75 MB; `policy/sheet`:
+the tiles at 0, 1.5, 4 and 11.5 s), so the slider steps through training (`--tensorboard` adds one after the fact).
+Tensorboard: `ssh -L 6006:localhost:6006 -p <port> root@<ip> 'bash -lc "tensorboard --logdir /workspace/runs/<id>/train
+--host 127.0.0.1 --port 6006"'` (live, http://localhost:6006), or `tensorboard --logdir cloud/scratch/runs` on fetched
+runs (each a curve).
 
 ## The environment: our simulator in mjlab
 

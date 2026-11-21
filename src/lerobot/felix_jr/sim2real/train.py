@@ -92,13 +92,21 @@ def filming_runner(base: Any) -> Any:
             from .videos import record
 
             try:  # (a failed film never stops the training)
+                from .videos import checkpoint_step, log_to_tensorboard
+
+                frames: list[Any] = []
                 out = record(
                     env,
                     wrapped,
                     self.get_inference_policy(device=str(env.device)),
                     folder / f"{name}.mp4",
                     name,
+                    frames,
                 )
+                writer = getattr(self.logger, "writer", None)
+                if writer is not None and hasattr(writer, "add_image"):  # (tensorboard's: its Images tab)
+                    step = checkpoint_step(name, self.current_learning_iteration)
+                    log_to_tensorboard(writer, "policy", frames, step, 1.0 / env.step_dt)
                 print(f"filmed {name}: {out}", flush=True)
             except Exception as e:  # noqa: BLE001
                 print(f"filming {name} failed: {e!r}", flush=True)
