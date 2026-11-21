@@ -53,8 +53,9 @@ REWARD_WEIGHTS = {  # (per step; a starting point, to tune from the curves)
     "action_rate": -0.01,
     "failed": -5.0,  # (an episode ended by a failure: the arm on the table, the object tipped)
 }
-# the start pool's mix (`start_pool`): mostly the jaws open around the object, the positive control's easy start
-POOL_WEIGHTS = {"attack": 0.2, "at_object": 0.5, "in_jaws": 0.2, "lifted": 0.1}
+# the start pool's mix (`start_pool`): uniform, as OmniReset samples its resets (no curriculum; 2026-11-21: the first
+# runs' mix, attack 0.2 / at_object 0.5 / in_jaws 0.2 / lifted 0.1, had the easy pools solved in 20 iterations)
+POOL_WEIGHTS = {"attack": 0.25, "at_object": 0.25, "in_jaws": 0.25, "lifted": 0.25}
 OBJECT_SIGMA_M = 0.007  # the object's spread about its spot (`refine.RefineSettings.object_sigma_m`)
 FINGER_PADS = r"finger_.*_pad\d+"
 FINGER_GIVES = r"finger_.*_give"

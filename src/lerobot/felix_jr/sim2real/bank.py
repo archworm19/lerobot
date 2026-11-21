@@ -2,7 +2,7 @@
 
   uv run --extra felix_jr --extra felix_jr_sim python -m lerobot.felix_jr.sim2real.bank <out.jsonl>
       [--placements 20] [--arm right] [--seed 0] [--workers 1] [--model <calibration.urdf>]
-      [--object DIAMETER_MM HEIGHT_MM MASS_G]
+      [--object DIAMETER_MM HEIGHT_MM MASS_G] [--anchors N]
 
 Per placement: an upright cylinder drawn (`BankConfig`: its diameter, height and mass, where it stands from the arm's
 base), a feasible grasp drawn at random through the harness's filters (`harness.grasping.first_feasible`, at each of
@@ -79,6 +79,8 @@ class BankConfig:
     max_tries: int = MAX_TRIES
     n_draws: int = 3
     min_rate: float = 2 / 3
+    # distinct grasps accepted a placement (`grasp_check.SimAccept.want`): the pools' anchors, all of them
+    anchors_per_placement: int = 1
     finger_model: str = "sprung"
     # the filters' settings that differ from the harness's: no sag (the real arm's), the solves near the ideal pose
     # (loose bounds put the gripper's body in the object), the arm-plane check before any IK (`GraspSettings`)
@@ -197,6 +199,7 @@ def run_placement(model: XleRobotModel, config: BankConfig, placement: Placement
         min_rate=config.min_rate,
         finger_model=config.finger_model,
         snapshots=True,
+        want=config.anchors_per_placement,
     )
     found = first_feasible(
         target,
@@ -210,26 +213,32 @@ def run_placement(model: XleRobotModel, config: BankConfig, placement: Placement
         max_tries=config.max_tries,
         accept=accept,
     )
-    simulated = []
-    anchor = None
-    for candidate, runs in zip(accept.candidates, accept.trials, strict=True):
+    simulated, anchors = [], []
+    for i, (candidate, runs) in enumerate(zip(accept.candidates, accept.trials, strict=True)):
         row = _grasp(model, candidate) | {
             "trials": [_trial(t) for t in runs],
             "rate": sum(t.held for t in runs) / len(runs),
         }
         simulated.append(row)
-        if candidate is found.candidate:
+        if (
+            i in accept.accepted
+        ):  # (every distinct grasp accepted: the first is `found.candidate` with one wanted)
             held = next(t for t in runs if t.held)
-            anchor = row | {
-                "states": {
-                    stage: {k: v.tolist() for k, v in state.items()} for stage, state in held.states.items()
-                },
-                "states_draw": held.draw,
-            }
+            anchors.append(
+                row
+                | {
+                    "states": {
+                        stage: {k: v.tolist() for k, v in state.items()}
+                        for stage, state in held.states.items()
+                    },
+                    "states_draw": held.draw,
+                }
+            )
     return {
         "kind": "placement",
         "placement": asdict(placement),
-        "anchor": anchor,
+        "anchor": anchors[0] if anchors else None,  # (the first: a bank's readers before `anchors`)
+        "anchors": anchors,
         "simulated": simulated,
         "tried": found.tried,
         "rejected_by_stage": found.rejected_by_stage,
@@ -311,6 +320,7 @@ class Tally:
 
     placements: int = 0
     anchors: int = 0
+    anchored: int = 0
     simulated: int = 0
     seconds: float = 0.0
     by_depth: dict[str, list[int]] = field(default_factory=dict)  # depth -> [simulated, accepted]
@@ -318,7 +328,8 @@ class Tally:
     def add(self, line: dict[str, Any], min_rate: float) -> None:
         """Count one placement's line."""
         self.placements += 1
-        self.anchors += line["anchor"] is not None
+        self.anchors += len(line.get("anchors") or ([line["anchor"]] if line["anchor"] else []))
+        self.anchored += line["anchor"] is not None
         self.simulated += len(line["simulated"])
         self.seconds += line["seconds"]
         for g in line["simulated"]:
@@ -330,7 +341,7 @@ class Tally:
         """One line: the counts, the accepted by depth, the time a placement."""
         depth = ", ".join(f"{k}: {a}/{s}" for k, (s, a) in sorted(self.by_depth.items()))
         return (
-            f"{self.anchors}/{self.placements} placements anchored, {self.simulated} grasps simulated "
+            f"{self.anchored}/{self.placements} placements anchored ({self.anchors} anchors), {self.simulated} grasps simulated "
             f"(accepted by depth {depth or '-'}), {self.seconds / max(self.placements, 1):.1f} s a placement"
         )
 
@@ -355,12 +366,15 @@ def main() -> None:
         metavar=("DIAMETER_MM", "HEIGHT_MM", "MASS_G"),
         help="one object for every placement (default: drawn over `DIAMETER_M`, `HEIGHT_M`, `MASS_KG`)",
     )
+    parser.add_argument(
+        "--anchors", type=int, default=1, help="distinct grasps accepted a placement (its anchors)"
+    )
     args = parser.parse_args()
-    one = {}
+    one: dict[str, tuple[float, float]] = {}
     if args.object is not None:
         d, h, g = (v / 1000 for v in args.object)
         one = {"diameter_m": (d, d), "height_m": (h, h), "mass_kg": (g, g)}
-    config = BankConfig(arm=args.arm, seed=args.seed, **one)
+    config = BankConfig(arm=args.arm, seed=args.seed, anchors_per_placement=args.anchors, **one)
     tally, started = Tally(), time.perf_counter()
     for line in build_bank(args.model, config, args.placements, args.out, args.workers, args.resume):
         tally.add(line, config.min_rate)
@@ -369,7 +383,12 @@ def main() -> None:
         print(
             f"placement {p['index']}: {2000 * p['radius']:.0f} mm x {1000 * p['height']:.0f} mm, "
             f"{1000 * p['mass_kg']:.0f} g; {line['tried']} tried, {len(line['simulated'])} simulated, "
-            + (f"anchor at depth {1000 * a['depth']:.0f} mm (rate {a['rate']:.2f})" if a else "no anchor")
+            + (
+                f"{len(line.get('anchors') or [a])} anchors, the first at depth {1000 * a['depth']:.0f} mm "
+                f"(rate {a['rate']:.2f})"
+                if a
+                else "no anchor"
+            )
             + f"; {line['seconds']:.1f} s",
             flush=True,
         )

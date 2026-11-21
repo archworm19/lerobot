@@ -90,6 +90,11 @@ into `train/videos/model_<iteration>.mp4` (~1 MB a world-episode), on the pod's 
   anchored, 0-27.5 mm deep (most 20-27.5), 26 s. Two fixes first (a test bank anchored 1 of 6): the wrist-view filter
   refused every grasp deeper than 10 mm (off in the bank; `open_issues.md` 20 for the harness), and `grasp_check`
   judged a hold by the planned 30 mm lift while the simulated arm's jaws rise ~25 mm (its sag): now by the jaws' rise.
+- **Several grasps a placement** (`bank --anchors N`, 2026-11-21): OmniReset computes 1,000 feasible grasps an object
+  and found narrower grasp sampling worse; `pyri1` had one grasp a placement (47 in all), however many starts were
+  drawn. Now `grasp_check.SimAccept` keeps accepting until N distinct grasps (by depth, height, tilt, roll), each an
+  anchor (`anchors` in the line; `StartSampler` takes them all). A test bank: 4 placements, 16 anchors, 0-27.5 mm deep,
+  ~11 s a placement. `pyri2`: 512 placements x up to 4 anchors, its pool 4,096 starts a pool (building).
 - **The pool** (`start_pool`): 1,024 starts a pool (attack, at_object, in_jaws, lifted: OmniReset's reaching,
   near-object and stable-grasp resets) drawn ahead on CPU (`starts.StartSampler`: the attack's arrival as the real arm
   arrives), saved by joint and actuator name; a reset event writes one into each world. **Checked:** held a second in

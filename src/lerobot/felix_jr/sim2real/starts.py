@@ -116,7 +116,12 @@ class StartSampler:
                 f"{path} was built with other servos ({meta['servos']}; now {bank.servos()}): its snapshots "
                 "would not match the scene; rebuild it"
             )
-        self.anchors = [line for line in lines if line["anchor"] is not None]
+        # each grasp a placement accepted is an anchor of its own (`anchors`; a bank before it: `anchor` alone)
+        self.anchors = [
+            {**line, "anchor": a}
+            for line in lines
+            for a in (line.get("anchors") or ([line["anchor"]] if line["anchor"] is not None else []))
+        ]
         if not self.anchors:
             raise ValueError(f"{path} has no anchors")
         weights = np.array([self.config.pool_weights.get(p, 0.0) for p in POOLS], dtype=float)

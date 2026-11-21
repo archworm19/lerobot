@@ -215,6 +215,17 @@ def _touching(m: "mujoco.MjModel", d: "mujoco.MjData", body: int) -> str:
     )
 
 
+def _grasp_key(candidate: GraspCandidate) -> tuple[Any, ...]:
+    """What makes two grasps the same for the bank: the depth (mm), the height (cm), the tilt and roll (10 deg)."""
+    p = candidate.claw.grasp.params
+    return (
+        round(1000 * candidate.claw.depth),
+        round(100 * float(p.get("t", 0.0))),
+        round(float(p.get("psi", 0.0)) / 10),
+        round(float(p.get("phi", 0.0)) / 10),
+    )
+
+
 @dataclass
 class SimAccept:
     """`first_feasible`'s `accept`: a grasp held in at least `min_rate` of `n_draws` physics draws (the module docstring).
@@ -232,8 +243,12 @@ class SimAccept:
     min_rate: float = 2 / 3
     finger_model: str = "sprung"
     snapshots: bool = False
+    # how many distinct grasps to accept before `first_feasible` stops (the bank's anchors per placement: diverse
+    # grasps, OmniReset's lever); each accepted one's index in `candidates` is in `accepted`
+    want: int = 1
     trials: list[list[GraspTrial]] = field(default_factory=list)
     candidates: list[GraspCandidate] = field(default_factory=list)
+    accepted: list[int] = field(default_factory=list)
 
     def __call__(self, candidate: GraspCandidate) -> bool:
         """Simulate `candidate` under `n_draws` draws; accept at `min_rate` (refused at once if it starts in the object)."""
@@ -257,7 +272,12 @@ class SimAccept:
             for draw in physics_draws(self.rng, self.n_draws)
         ]
         self.trials.append(runs)
-        return sum(r.held for r in runs) >= self.min_rate * len(runs)
+        if sum(r.held for r in runs) < self.min_rate * len(runs):
+            return False
+        key = _grasp_key(candidate)
+        if all(_grasp_key(self.candidates[i]) != key for i in self.accepted):  # (a distinct grasp)
+            self.accepted.append(len(self.candidates) - 1)
+        return len(self.accepted) >= self.want
 
     def summary(self) -> dict[str, Any]:
         """Per depth tried: grasps simulated, and how many were accepted."""
