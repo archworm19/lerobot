@@ -108,4 +108,22 @@ the code; a bucket pays from ~1 GB or many pods reading the same data. **Outputs
    pod when the prepaid balance reaches $0.
 4. **One RTX 4090 on RunPod** (deleted after): the replays on CUDA, then environments per second against their count;
    the same on an L40S.
+   **First run (2026-11-21, an L40S, `cloud/warp_check.py` through `cloud/run.py`):** the scene (the arm driven 25 deg,
+   feno standing; no grasp) on CUDA the same as CPU MuJoCo to 0.0002 deg, the bottle 0.68 mm (as on the Mac's CPU).
+   The worlds stepped together (one step a CUDA graph):
+
+   | worlds | steps/s | x real time | GPU memory |
+   | --- | --- | --- | --- |
+   | 1 | 1,239 | 2 | |
+   | 1,024 | 0.90 M | 1,795 | |
+   | 4,096 | 2.57 M | 5,139 | 4.7 GB |
+   | 8,192 | 3.30 M | 6,608 | 8.8 GB |
+   | 16,384 | 3.91 M | 7,816 | 16.9 GB |
+   | 24,576 | 4.03 M | 8,067 | 25.0 GB |
+
+   Flat from ~16k worlds at ~4 M steps/s; ~1 MB a world (`NCONMAX` 64, `NJMAX` 400 per world: room to shrink); 32,768
+   out of the 46 GB. The Mac's six CPU workers: ~0.2 M steps/s on this scene, so ~20x. An RTX 4090 (24 GB, ~20k
+   worlds, the same chip) should reach the plateau at less than half the price: to measure. The grasps' contacts will
+   cost more a step. The pod: `PUBLIC_KEY` was not passed (the key added in RunPod's settings after the deploy?), so
+   the template now sets it itself.
 5. **The rollout batched** (`refine.rollout` / `outcome` over many environments): the refine and the bank on the GPU.
