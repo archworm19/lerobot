@@ -22,6 +22,7 @@ nothing changed on the way (`docs/sim_deploy.md`).
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -46,6 +47,8 @@ DECIMATION = (
 )
 NCONMAX, NJMAX = 64, 400  # per world (`cloud/warp_check.py`: ~1 MB a world)
 EPISODE_S = 12.0
+# the start pool's mix (`start_pool`): mostly the jaws open around the object, the positive control's easy start
+POOL_WEIGHTS = {"attack": 0.2, "at_object": 0.5, "in_jaws": 0.2, "lifted": 0.1}
 OBJECT_SIGMA_M = 0.007  # the object's spread about its spot (`refine.RefineSettings.object_sigma_m`)
 FINGER_PADS = r"finger_.*_pad\d+"
 FINGER_GIVES = r"finger_.*_give"
@@ -134,7 +137,10 @@ def table_spec(model: XleRobotModel, arm: str, table_z: float) -> "mujoco.MjSpec
 def object_rise(env: "ManagerBasedRlEnv", object_name: str = "object") -> "torch.Tensor":
     """How far the object is above where it started, as a fraction of the lift, capped at 1 (the reward)."""
     obj = env.scene[object_name]
-    start = obj.data.default_root_state[:, 2]
+    # (where it started: the start pool's height for each world, `start_pool.reset_from_pool`; else its default)
+    start = getattr(env, "felix_object_z0", None)
+    if start is None:
+        start = obj.data.default_root_state[:, 2]
     return ((obj.data.root_link_pos_w[:, 2] - start) / LIFT_M).clamp(min=0.0, max=1.0)
 
 
@@ -167,8 +173,13 @@ def env_cfg(
     object_sigma_m: float = OBJECT_SIGMA_M,
     randomize: bool = True,
     give_scale: float = MJLAB_GIVE_SCALE,
+    start_pool: str | Path | None = None,
+    pool_weights: Mapping[str, float] | None = None,
 ) -> "ManagerBasedRlEnvCfg":
     """The grasp-and-lift environment: `obj` on the table at `table_z`, the arm from `start` (the module docstring).
+
+    `start_pool` (a `start_pool.StartPool` file): each reset draws a start from it instead (a pool by `pool_weights`,
+    default `POOL_WEIGHTS`), the object and the table the pool's; `obj`, `table_z`, `start`, `object_sigma_m` unused.
 
     `give_scale`: mjlab's correction to the fingers' give (`MJLAB_GIVE_SCALE`); 1.0 for the CPU simulator's model as is
     (`model_differences` then finds none).
@@ -187,6 +198,13 @@ def env_cfg(
     from mjlab.scene import SceneCfg
     from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
+    if start_pool is not None:
+        from .start_pool import StartPool
+
+        pool = StartPool.load(Path(start_pool))
+        radius, height, mass = pool.object_size
+        table_z = pool.table_z
+        obj = sc.Cylinder("object", -0.35, 0.13, radius, height, mass)  # (where: each start's own)
     obj = obj or sc.Cylinder("object", -0.356, 0.132, 0.0265, 0.11, 0.116)  # feno at one of sim3's spots
     start = start or {**REST, "gripper.pos": 30.0}
     entities = {
@@ -224,6 +242,17 @@ def env_cfg(
             },
         ),
     }
+    if start_pool is not None:
+        from .start_pool import reset_from_pool
+
+        events = {
+            "reset_scene": events["reset_scene"],
+            "reset_from_pool": EventTermCfg(
+                func=reset_from_pool,
+                mode="reset",
+                params={"path": str(start_pool), "pool_weights": dict(pool_weights or POOL_WEIGHTS)},
+            ),
+        }
     if randomize:  # (`grasp_check.physics_draws`' ranges, about the fitted values; log-uniform as there)
         events |= {
             "finger_friction": EventTermCfg(

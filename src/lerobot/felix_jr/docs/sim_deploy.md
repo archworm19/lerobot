@@ -169,3 +169,13 @@ the code; a bucket pays from ~1 GB or many pods reading the same data. **Outputs
    and the camera's clearance at the grasp, as the refine), and `grasp_check` judged a hold by the planned 30 mm lift
    while the simulated arm's jaws rise ~23-28 mm (its sag), so held grasps scored as slips (now: the object up 75 % of
    the jaws' rise). Then 6 of 6 anchored, at 0 to 27.5 mm deep, mostly the first grasp simulated, 6 s.
+   **The bank and its starts** (2026-11-21): `pyri1` (48 placements of pyri, `bank --object 45 130 80`): 47 anchored,
+   at 0-27.5 mm deep (most 20-27.5), 26 s on six workers. **The start pool** (`sim2real/start_pool.py`): 1,024 starts
+   a pool (attack, at_object, in_jaws, lifted) drawn ahead on CPU MuJoCo (`starts.StartSampler`), 110 s on six
+   workers, 414 KB: each joint's position and velocity and each actuator's command, by name. In the environment
+   (`env_cfg(start_pool=..., pool_weights=...)`) a reset event (`reset_from_pool`) writes a start into each world;
+   its commands go in as the robot's joint position targets (mjlab derives the controls from them at every step and
+   reset; a write to the controls alone is overwritten). Held a second in mjlab, each pool's starts stay put: the
+   object 0.5-2 mm (the table contact's settle, as CPU against Warp), the lifted ones still up, the arm under 0.8 deg,
+   nothing unstable (smoke test: `test_start_pool_smoke.py`). The pool is under `scratch/` (gitignored): the run
+   script does not send it; draw it on the pod (CPU) or send it along.
