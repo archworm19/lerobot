@@ -263,4 +263,11 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
   `in_pinch`, `axis_from_pinch`, `grasp_point`, `between_jaws`). `mjlab_task`'s rewards and terminations are generic
   over the object (each takes it in its params and asks it for what its stage needs); `PoolReset` draws starts, writes
   state, and has the object write itself.
+  **Profiled (2026-11-22, `sim2real/reset_bench.py`, RTX 4090, 4,096 worlds, random actions):** a multi-size step
+  took 104.7 ms against one object's 70.6, nearly all of it the constants' refresh after a reset (`set_const` over
+  every world, ~31 ms; every step resets some world at 4,096); the solver's iterations were the same (the slowest
+  world's median 8). The object now writes the constants that change with it itself (a free body's closed forms:
+  subtree mass, body and dof inverse weights; a test holds them equal to `set_const`'s), and nothing is recomputed:
+  69.2 ms against 67.7. The first multi-size run (`20261122_164732`, stopped at ~iteration 250 to profile) ran at
+  3.0 s an iteration; held out 90.7 % at 100 iterations, 95.3 % at 200 (on par with one object's runs).
 - Then fewer privileged observations (the finger contacts dropped).

@@ -186,3 +186,56 @@ def test_a_sized_pool_resizes_each_worlds_object(tmp_path):
         assert after[w] == pytest.approx(TABLE_Z + SIZES[row][1] / 2, abs=2e-3), (
             f"world {w}: the object moved"
         )
+
+
+def test_the_resized_objects_constants_are_set_consts(tmp_path):
+    """The constants derived from each world's object, written at its reset by the object itself (no `set_const`: it
+    cost ~31 ms a step), are what MuJoCo Warp's own `set_const` computes, every world and body; and nothing else it
+    recomputes depends on the object."""
+    from mjlab.managers.event_manager import RecomputeLevel
+
+    from lerobot.felix_jr.sim2real.mjlab_object import DERIVED_FIELDS
+
+    model = XleRobotModel.load(api.MODEL)
+    path = tmp_path / "sized.npz"
+    _sized_pool(model).save(path)
+    env = me.make_env(
+        me.env_cfg(model, num_envs=8, randomize=True, start_pool=path, pool_weights=dict.fromkeys(POOLS, 1.0))
+    )
+    env.reset()
+    m = env.sim.model
+    ours = {name: getattr(m, name).cpu().numpy().copy() for name in DERIVED_FIELDS}
+    others = {name: getattr(m, name).cpu().numpy().copy() for name in ("actuator_acc0",)}
+    env.sim.recompute_constants(RecomputeLevel.set_const)
+    for name, value in ours.items():
+        np.testing.assert_allclose(value, getattr(m, name).cpu().numpy(), rtol=1e-4, atol=1e-7, err_msg=name)
+    for name, value in others.items():
+        np.testing.assert_allclose(value, getattr(m, name).cpu().numpy(), rtol=1e-4, atol=1e-7, err_msg=name)
+
+
+def test_a_worlds_object_changes_size_only_at_its_reset(tmp_path):
+    """Short episodes, random actions (many resets): a world's object size changes only on a step its episode ended,
+    and is always its start's object's (the reset term's row)."""
+    import torch
+
+    from lerobot.felix_jr.sim2real import mjlab_object as obj
+
+    model = XleRobotModel.load(api.MODEL)
+    path = tmp_path / "sized.npz"
+    _sized_pool(model).save(path)
+    cfg = me.env_cfg(
+        model, num_envs=8, randomize=True, start_pool=path, pool_weights=dict.fromkeys(POOLS, 1.0)
+    )
+    cfg.episode_length_s = 0.5
+    env = me.make_env(cfg)
+    env.reset()
+    cyl, term = obj.of(env), pool_reset(env)
+    before, resets = cyl.dims(env).clone(), 0
+    for _ in range(40):
+        _, _, terminated, truncated, _ = env.step(2 * torch.rand(8, 6) - 1)
+        done, now = terminated | truncated, cyl.dims(env).clone()
+        moved = (now - before).abs().max(dim=1).values > 1e-9
+        assert not bool((moved & ~done).any()), "an object changed size mid-episode"
+        assert torch.allclose(now, term.objects[term.rows][:, :2], atol=1e-6), "an object is not its start's"
+        before, resets = now, resets + int(done.sum())
+    assert resets > 8  # (enough resets for the check to mean something)

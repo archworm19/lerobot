@@ -46,6 +46,8 @@ if TYPE_CHECKING:
 ENTITY = "object"  # the object's entity's name in the scene, by default
 # the model fields a world's object needs rewritten when sizes vary: the cylinder's size, its bounds, its mass, inertia
 SIZED_FIELDS = ("geom_size", "geom_rbound", "geom_aabb", "body_mass", "body_inertia")
+# and the constants derived from them that change with the object (`write` computes them: no `set_const`)
+DERIVED_FIELDS = ("body_subtreemass", "body_invweight0", "dof_invweight0")
 # the size the actor is told, off by an error drawn at each reset and kept for the episode (std, m): what a size
 # estimated from a camera is off by (a bias, not noise that averages away); the critic told the true size
 SIZE_ERROR_M = 0.002
@@ -153,7 +155,7 @@ class MjlabCylinder:
         return int(bodies[0]), int(geoms[0])
 
     def declaration(self) -> tuple[tuple[str, ...], Any]:
-        """What a reset term that resizes it declares to mjlab: (its `model_fields`, its `recompute`).
+        """What a reset term that resizes it declares to mjlab: (its `model_fields`, its `recompute`: none).
 
         MuJoCo Warp keeps one compiled model for every world; each model field is stored with a world dimension, one
         copy by default (every world reads it) or one a world once expanded. mjlab expands the fields an event term
@@ -162,38 +164,40 @@ class MjlabCylinder:
         write to `model.geom_size[world]` would land on the one shared copy. The fields (`SIZED_FIELDS`): the
         cylinder's size (radius, half height), its bounding sphere and box (`geom_rbound`, `geom_aabb`: what the
         collision broadphase reads, not `geom_size`; stale, contacts are missed or phantom), its body's mass and
-        inertia. `requires_model_fields` adds the fields derived from those (`body_subtreemass`, `body_invweight0`,
-        `dof_invweight0`, ...: per world too). `recompute`: after the reset events fire, mjlab recomputes those derived
-        constants (`sim.recompute_constants`, MuJoCo Warp's `set_const`, which saves and restores the simulation
-        state): the object's mass and inertia change its subtree mass and the inverse weights the constraint solver
-        scales its contacts by.
+        inertia, and the constants derived from them (`DERIVED_FIELDS`: its subtree mass, its body's and its dofs'
+        inverse weights, which the constraint solver scales its contacts by). `write` computes those itself (closed
+        forms for a free body: `write`), so nothing is recomputed: mjlab's full refresh (`recompute=set_const`, MuJoCo
+        Warp's `set_const` over every world) cost ~31 ms a step at 4096 worlds, where nearly every step resets some
+        world (`reset_bench`, 2026-11-22: 104.7 ms a step with it, 73.8 without; one object's pool 70.6).
         """
-        from mjlab.managers.event_manager import RecomputeLevel, requires_model_fields
+        from mjlab.managers.event_manager import RecomputeLevel
 
-        def declared() -> None:  # (only to carry the declaration, its derived fields included; never called)
-            pass
-
-        fields = requires_model_fields(*SIZED_FIELDS, recompute=RecomputeLevel.set_const)(
-            declared
-        ).model_fields
-        return tuple(fields), RecomputeLevel.set_const
+        return (*SIZED_FIELDS, *DERIVED_FIELDS), RecomputeLevel.none
 
     def write(self, env: "ManagerBasedRlEnv", env_ids: "torch.Tensor", rows: "torch.Tensor") -> None:
         """The object in each world of `env_ids` made its row's (`ObjectRecord.vectors`: radius, height, mass).
 
         The primitive's batched geometry (`bounding_radius`, `half_extents`, `inertia_per_kg`) on the rows' device,
         written as MuJoCo keeps it: the geom's size (radius, half height), its bounding sphere and box, the body's mass
-        (times a log-uniform draw in `mass_range`) and its inertia. The fields must be per world (`declaration`); mjlab
-        recomputes the constants after.
+        (times a log-uniform draw in `mass_range`) and its inertia; and the constants derived from them, as MuJoCo's
+        `set_const` would (a test holds them equal): the object is a free body, its center of mass at its origin and its
+        principal axes its frame's, so at `qpos0` its block of the inverse mass matrix is diag(1/m, 1/m, 1/m, 1/Ixx,
+        1/Iyy, 1/Izz), its own; its subtree mass is its mass, the world's the sum of every body's; its body's inverse
+        weights (translation, rotation) the means of those diagonals' halves, and its six dofs' likewise. The fields
+        must be per world (`declaration`).
         """
         import torch
 
         m = env.sim.model
         body, geom = self.ids(env)
+        dofs = env.scene[
+            self.entity
+        ].indexing.free_joint_v_adr  # (its free joint's six dofs: translation, rotation)
         record = ObjectRecord.from_vectors(rows, self.template.primitive.SHAPE)
         p = cast("Cylinder", record.primitive)
         lo, hi = np.log(self.mass_range[0]), np.log(self.mass_range[1])
         mass = record.mass_kg * torch.exp(lo + (hi - lo) * torch.rand(len(env_ids), device=rows.device))
+        inertia = mass[:, None] * p.inertia_per_kg()
         m.geom_size[env_ids, geom, 0] = p.radius.to(
             m.geom_size.dtype
         )  # (MuJoCo's cylinder: radius, half height)
@@ -201,7 +205,18 @@ class MjlabCylinder:
         m.geom_rbound[env_ids, geom] = p.bounding_radius().to(m.geom_rbound.dtype)
         m.geom_aabb[env_ids, geom, 1] = p.half_extents().to(m.geom_aabb.dtype)
         m.body_mass[env_ids, body] = mass.to(m.body_mass.dtype)
-        m.body_inertia[env_ids, body] = (mass[:, None] * p.inertia_per_kg()).to(m.body_inertia.dtype)
+        m.body_inertia[env_ids, body] = inertia.to(m.body_inertia.dtype)
+        # the derived constants (`DERIVED_FIELDS`), as `set_const` computes them for a free body
+        translation, rotation = 1.0 / mass, (1.0 / inertia).mean(dim=1)
+        m.body_subtreemass[env_ids, body] = mass.to(m.body_subtreemass.dtype)
+        m.body_subtreemass[env_ids, 0] = m.body_mass[env_ids, 1:].sum(
+            dim=1
+        )  # (the world body's: every body's)
+        m.body_invweight0[env_ids, body] = torch.stack([translation, rotation], dim=1).to(
+            m.body_invweight0.dtype
+        )
+        weights = torch.stack([translation] * 3 + [rotation] * 3, dim=1).to(m.dof_invweight0.dtype)
+        m.dof_invweight0[env_ids[:, None], dofs[None, :]] = weights
 
     def draw_size_error(self, n: int, device: Any) -> "torch.Tensor":
         """`n` episodes' errors in the radius and height the actor is told ((n, 2), m: normal, `size_error_m`)."""
