@@ -149,6 +149,7 @@ The easiest version that should work: if it does not learn, the environment is w
 | `20261121_133937` | RTX 4090 | 4,096 x 20 | 37 s (1.8 s an iteration) | 81 / 0.3 / 97 / 98 / 99.8 % | (not measured: the bug below) |
 | `20261121_134628` | RTX 4090 | 4,096 x 1,500 | 42 min (1.67 s an iteration) | 99.2 / 99.5 / 98.7 / 99.9 / 100 % (train pool) | 98.0 / 98.7 / 98.7 / 96.9 / 95.4 % (train pool) |
 | `20261121_144032` | RTX 4090 | 4,096 x 1,000 | 27 min (1.6 s an iteration) | train 99.7 / 99.4 / 99.5 / 99.8 / 99.9 %; **held out 99.9 / 99.4 / 100 / 100 / 100 %** | train 97.5 / 98.4 / 99.5 / 96.0 / 95.9 %; **held out 98.3 / 98.7 / 100 / 97.5 / 97.1 %** |
+| `20261121_205721` | RTX 4090 | 4,096 x 1,000 | 29 min (1.7 s an iteration, the watcher beside it) | train 99.9 / 100 / 99.9 / 99.8 / 99.9 %; **side held out 98.7 / 95.8 / 99 / 100 / 100 %** | train 97.3 / 98.1 / 99 / 96.5 / 95.8 %; **side held out 95.6 / 90.5 / 99 / 96.5 / 96.4 %** |
 
 ### 2026-11-21: the first runs (the positive control)
 
@@ -196,6 +197,23 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
   fact (`videos --tensorboard`, on the pod). The pod stopped itself after (`runpodctl pod stop` with its pod-scoped key:
   `POD_TTL`'s mechanism works).
 - **Read:** the positive control is solved, with privileged observations and 1 mm of noise on one object.
+
+### 2026-11-21: a spatial holdout (the side's high quarter)
+
+- **`20261121_205721`** (RTX 4090, 1,000 iterations x 4,096 worlds, 29 min; commit `a555978ee`): the pool
+  `pyri2side_train` (16,384 starts from 1,313 grasps on 357 placements) against `pyri2side_test` (4,096 starts from
+  417 grasps on the 119 placements 80-150 mm to the arm's side, `start_pool --split side --holdout 0.25`: where the arm
+  never trained, turned further); otherwise as `20261121_144032`. The first run with the watcher: each checkpoint on
+  the held-out band as it was saved, training ~8 % slower for it (29 min against 27). **Held at the end: the training
+  pool 97.3 %, the side held out 95.6 %**: a small gap, nearly all of it the attack starts (90.5 against 98.1 %: the
+  approach from where it never trained); from at the object, in the jaws or lifted the band makes no difference (99.0,
+  96.5, 96.4 %).
+- **The held-out curve** (the watcher's, held at the end, all / attack, %): 100 it. 91.9 / 83.7, 200 95.4 / 91.3,
+  300 96.5 / 95.3, **400 97.4 / 95.1**, 500 96.9 / 95.1, 600 96.4 / 91.1, 800 96.6 / 94.0, 999 95.6 / 90.5. It peaks at
+  400 and drifts down while the training pool's holds (2,048 worlds: past the noise, ~0.4 %, overall), some
+  overfitting to the trained region; choosing a checkpoint by it would need a third split.
+- **Read:** the policy extrapolates in angle, a little worse on the approach. More of the table in training (the bank's
+  reach and side as wide as the arm allows) is the cheap fix; the size grid next.
 
 ### Next (decided 2026-11-21)
 
