@@ -152,6 +152,7 @@ The easiest version that should work: if it does not learn, the environment is w
 | `20261121_205721` | RTX 4090 | 4,096 x 1,000 | 29 min (1.7 s an iteration, the watcher beside it) | train 99.9 / 100 / 99.9 / 99.8 / 99.9 %; **side held out 98.7 / 95.8 / 99 / 100 / 100 %** | train 97.3 / 98.1 / 99 / 96.5 / 95.8 %; **side held out 95.6 / 90.5 / 99 / 96.5 / 96.4 %** |
 | `20261122_171622` | RTX 4090 | 4,096 x 700 (stopped) | 27 min (2.25 s an iteration, the watcher beside it) | **multi-size held out 99.3 / 99.6 / 100 / 98.4 / 99.2 %** | **multi-size held out 96.9 / 98.5 / 99.6 / 94.1 / 95.4 %** |
 | `20261122_174436` | RTX 4090 | 4,096 x 700 | 25 min (the watcher beside it) | train 96.2 % at the end; **no finger contacts, held out 99.4 / 99.8 / 100 / 99.2 / 98.6 %** | **no finger contacts, held out 97.1 / 98.3 / 99.8 / 95.7 / 94.6 %** |
+| `20261122_181122` | RTX 4090 | 4,096 x 700 | 25 min (the watcher beside it) | train 88.0 % at the end; **estimated pose, held out 98.5 / 97.9 / 98.8 / 98.4 / 99.0 %** | **estimated pose, held out 88.9 / 88.8 / 95.4 / 84.1 / 87.1 %** |
 
 ### 2026-11-21: the first runs (the positive control)
 
@@ -256,6 +257,21 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
   gripper's position against its target, the servos' loads, the joints) tells it as much, with the object's live pose
   still told. Whether that holds without the live pose is experiment B2. The drops (in the jaws, lifted: ~95 %) are
   unchanged: the gripper's random walk is not about contact sensing.
+
+### 2026-11-22: experiment B1, the actor told a pose estimated at the reset (finger contacts kept)
+
+- **`20261122_181122`** (RTX 4090, 4,096 worlds x 700 iterations, 25 min; commit `7319a57cd`): the pools `multi1p`
+  (`multi1` drawn again, each start with where perception put its object: an attack start's gripper move), the actor
+  told the pose estimated at the episode's reset and frozen (`--object-pose estimated`: the true center plus the
+  start's own perception offset plus 3 mm of noise, the axis tilted ~2 deg from vertical; in the root frame and in the
+  live pinch frame), the critic the truth; finger contacts kept. **Held at the end on the held-out placements: 88.9 %**
+  (attack 88.8, at the object 95.4, in the jaws 84.1, lifted 87.1; the training pool 88.0 %), against 96.9-97.1 % told
+  the live pose; held at some point 98.5 % (about as often as with the live pose). The curve (all, %): 100 it. 79.0,
+  200 83.9, 300 84.3, 400 87.4, 500 88.0, 600 88.3, 699 88.9: still rising slowly.
+- **Read:** without the live pose the policy still gets the object nearly always; it keeps it less: the starts already
+  gripping hold to the end 84-87 % (95 % with the live pose). Unable to see the object move in its grip, the gripper's
+  random walk (above) costs more. A squeeze term or a latched gripper (the drops' fixes) would likely help most here;
+  a live but noisy, delayed pose (the wrist camera's tracking) is the other lever.
 
 ### Next (decided 2026-11-21)
 
