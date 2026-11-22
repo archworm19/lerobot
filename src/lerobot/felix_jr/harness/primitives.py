@@ -241,7 +241,10 @@ class Cylinder:
     PARAMS: ClassVar[tuple[str, ...]] = ("radius", "height")
 
     def __post_init__(self) -> None:
-        """Refuse shapes that are not batches, frames that are not rigid transforms, sizes that are not positive."""
+        """Refuse shapes that are not batches, frames that are not rigid transforms, sizes that are not positive.
+
+        The values are checked on numpy arrays only (planning's): a GPU batch's shapes.
+        """
         xp = namespace(self.params, self.root_from_obj)
         if self.params.ndim != 2 or self.params.shape[1] != 2:
             raise ValueError(f"params must be (N, 2): radius, height; got {tuple(self.params.shape)}")
@@ -249,11 +252,15 @@ class Cylinder:
             raise ValueError(
                 f"root_from_obj must be ({self.params.shape[0]}, 4, 4), got {tuple(self.root_from_obj.shape)}"
             )
-        if bool(xp.any(self.params <= 0)):
+        if (
+            xp is not np
+        ):  # (on a GPU, checking values would make it wait for the host at every call: shapes only)
+            return
+        if bool(np.any(self.params <= 0)):
             raise ValueError(f"radius and height must be positive: {self.params}")
         rotation = self.root_from_obj[:, :3, :3]
-        gap = xp.matmul(xp.matrix_transpose(rotation), rotation) - xp.eye(3, dtype=rotation.dtype)
-        if len(self) and float(xp.max(xp.abs(gap))) > 1e-6:
+        gap = np.matmul(np.swapaxes(rotation, -1, -2), rotation) - np.eye(3)
+        if len(self) and float(np.max(np.abs(gap))) > 1e-6:
             raise ValueError("a cylinder's frame is not a rotation")
 
     def __setstate__(self, state: dict[str, Any]) -> None:

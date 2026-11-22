@@ -230,3 +230,31 @@ def test_an_object_is_written_down_one_way():
         ObjectRecord.from_record(record | {"shape": "torus"})
     with pytest.raises(ValueError, match="one object"):
         two.to_record()
+
+
+def test_a_batch_stays_on_its_device():
+    """Everything a batch computes, built or read, stays on its tensors' device (a GPU's: mixing the host's in would
+    fail there, as the first multi-size run did); MPS or CUDA, whichever this machine has."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("array_api_compat")
+    from lerobot.felix_jr.harness.primitives import ObjectRecord
+
+    devices = [
+        d for d, ok in (("mps", torch.backends.mps.is_available()), ("cuda", torch.cuda.is_available())) if ok
+    ]
+    if not devices:
+        pytest.skip("no accelerator here")
+    for device in devices:
+        rows = torch.tensor([[0.0225, 0.13, 0.08], [0.03, 0.19, 0.1]], device=device)
+        record = ObjectRecord.from_vectors(rows)
+        p = record.primitive
+        outs = [
+            p.bounding_radius(),
+            p.half_extents(),
+            p.inertia_per_kg(),
+            p.volume(),
+            p.centroid_obj(),
+            record.vectors(),
+        ]
+        outs.append(p.surface_distance(torch.zeros(3, 3, device=device)))
+        assert all(o.device.type == device for o in outs), device
