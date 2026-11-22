@@ -21,7 +21,8 @@ from typing import TYPE_CHECKING, Any
 import cv2
 import numpy as np
 
-from . import mjlab_task as task
+from . import mjlab_object as obj, mjlab_task as task
+from .mjlab_object import SIZE_ERROR_M
 from .start_pool import POOLS
 
 if TYPE_CHECKING:
@@ -69,12 +70,12 @@ def record(
         CAMERA["azimuth"],
         CAMERA["elevation"],
     )
-    from .pool_reset import object_ids, pool_reset
+    from .pool_reset import pool_reset
 
     term = pool_reset(env)
     n = env.num_envs
     pools = term.pools_of_worlds() if term is not None else [""] * n
-    _, object_geom = object_ids(env)
+    _, object_geom = obj.object_ids(env)
     # each world's object size (its own once resized: the copy of the model rendering each world is given it)
     sizes = env.sim.model.geom_size[..., object_geom, :].cpu().numpy().reshape(-1, 3)
     ended: list[str | None] = [None] * n
@@ -86,7 +87,7 @@ def record(
             for step in range(int(env.max_episode_length)):
                 qpos = env.sim.data.qpos.cpu().numpy()
                 qvel = env.sim.data.qvel.cpu().numpy()
-                obj = task._object(env)[0].cpu().numpy()
+                centers = obj.object_pose(env)[0].cpu().numpy()
                 held = (task.held(env) > 0).cpu().numpy()
                 fingers = task.finger_contacts(env).cpu().numpy()
                 tiles = []
@@ -94,7 +95,7 @@ def record(
                     d.qpos[:], d.qvel[:] = qpos[w], qvel[w]
                     m.geom_size[object_geom] = sizes[min(w, len(sizes) - 1)]
                     mujoco.mj_forward(m, d)
-                    camera.lookat[:] = obj[w] + np.array([0.0, 0.0, 0.02])
+                    camera.lookat[:] = centers[w] + np.array([0.0, 0.0, 0.02])
                     renderer.update_scene(d, camera)
                     tile = renderer.render().copy()
                     state = (
@@ -182,7 +183,7 @@ def make_video_env(
         start_pool=str(pool or settings.get("eval_pool") or settings["pool"]),
         pool_weights=dict.fromkeys(POOLS, 1.0),
         object_noise_m=float(settings.get("object_noise_m", me.OBJECT_NOISE_M)),
-        size_error_m=float(settings.get("size_error_m", me.SIZE_ERROR_M)),
+        size_error_m=float(settings.get("size_error_m", SIZE_ERROR_M)),
         randomize=True,
     )
     env = me.make_env(cfg, device=device)

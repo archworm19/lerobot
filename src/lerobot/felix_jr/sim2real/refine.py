@@ -593,9 +593,7 @@ def main() -> None:
 
     with args.out.open("a") as out:
         for line in anchored:
-            placement = bank.Placement(
-                **{k: tuple(v) if isinstance(v, list) else v for k, v in line["placement"].items()}
-            )
+            placement = bank.Placement.from_record(line["placement"])
             primitive = placement.primitive()
             bottle = f"{2000 * placement.radius:.0f} x {1000 * placement.height:.0f} mm, {1000 * placement.mass_kg:.0f} g"
             for kind in args.starts:

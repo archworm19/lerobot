@@ -20,7 +20,6 @@ nothing changed on the way (`docs/sim_deploy.md`).
 """
 
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -28,10 +27,12 @@ import numpy as np
 
 from lerobot.felix_jr.calibration.joint_sim import REST
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
+from lerobot.felix_jr.harness.primitives import RigidBody
 from lerobot.utils.import_utils import require_package
 
 from . import robot, scene as sc
 from .grasp_check import FRICTION_RANGE, MASS_RANGE, STIFFNESS_RANGE
+from .mjlab_object import SIZE_ERROR_M
 
 if TYPE_CHECKING:
     import mujoco
@@ -118,15 +119,6 @@ def robot_spec(model: XleRobotModel, arm: str, give_scale: float = 1.0) -> "mujo
     return spec
 
 
-def object_spec(o: sc.Cylinder) -> "mujoco.MjSpec":
-    """The object as `scene` builds it, its body at the origin (its pose is the entity's initial state)."""
-    import mujoco
-
-    spec = mujoco.MjSpec()
-    sc._add_object(spec, replace(o, x=0.0, y=0.0), table_z=-o.height / 2)
-    return spec
-
-
 def table_spec(model: XleRobotModel, arm: str, table_z: float) -> "mujoco.MjSpec":
     """`scene_spec`'s table, in a body of its own (an entity needs one)."""
     import mujoco
@@ -142,29 +134,10 @@ def table_spec(model: XleRobotModel, arm: str, table_z: float) -> "mujoco.MjSpec
 # ---- the task's terms ----------------------------------------------------------------------------------------------
 
 
-# the size the actor is told, off by an error drawn at each reset and kept for the episode (std, m): what a size
-# estimated from a camera is off by (a bias, not noise that averages away); the critic told the true size
-SIZE_ERROR_M = 0.002
-
-
-def object_size(env: Any, estimated: bool = False) -> Any:
-    """Each world's object's radius and height (m, `mjlab_task.object_dims`): an observation.
-
-    For a pool whose objects vary in size; `estimated`: off by the episode's error (`pool_reset.PoolReset.size_error`:
-    the actor's view).
-    """
-    from . import mjlab_task as task
-    from .pool_reset import pool_reset
-
-    dims = task.object_dims(env)
-    term = pool_reset(env) if estimated else None
-    return dims if term is None else dims + term.size_error
-
-
 def env_cfg(
     model: XleRobotModel,
     arm: str = "right",
-    obj: sc.Cylinder | None = None,
+    body: RigidBody | None = None,
     table_z: float = sc.TABLE_Z,
     start: Mapping[str, float] | None = None,
     num_envs: int = 1,
@@ -176,10 +149,11 @@ def env_cfg(
     object_noise_m: float = OBJECT_NOISE_M,
     size_error_m: float = SIZE_ERROR_M,
 ) -> "ManagerBasedRlEnvCfg":
-    """The grasp-and-lift environment: `obj` on the table at `table_z`, the arm from `start` (the module docstring).
+    """The grasp-and-lift environment: `body` on the table at `table_z`, the arm from `start` (the module docstring).
 
     `start_pool` (a `start_pool.StartPool` file): each reset draws a start from it instead (a pool by `pool_weights`,
-    default `POOL_WEIGHTS`), the object and the table the pool's; `obj`, `table_z`, `start`, `object_sigma_m` unused.
+    default `POOL_WEIGHTS`), the object and the table the pool's; `body`, `table_z`, `start`, `object_sigma_m` unused.
+    `body`: the object, standing where it stands (`harness.primitives.RigidBody`; default `mjlab_object.default_body`).
 
     `give_scale`: mjlab's correction to the fingers' give (`MJLAB_GIVE_SCALE`); 1.0 for the CPU simulator's model as is
     (`model_differences` then finds none). The task's action, observations, rewards and terminations: `mjlab_task`;
@@ -200,19 +174,19 @@ def env_cfg(
     from mjlab.scene import SceneCfg
     from mjlab.utils.noise import GaussianNoiseCfg, UniformNoiseCfg as Unoise
 
-    from . import mjlab_task as task
+    from . import mjlab_object as obj, mjlab_task as task
 
     if start_pool is not None:
         from .start_pool import StartPool
 
         pool = StartPool.load(Path(start_pool))
         sized = pool.sizes_vary  # (the object resized per world at each reset: `pool_reset.PoolReset`)
-        radius, height, mass = (float(v) for v in pool.objects[0])
         table_z = pool.table_z
-        obj = sc.Cylinder("object", -0.35, 0.13, radius, height, mass)  # (where: each start's own)
+        # the object the environment is built with: the first start's (where it stands: each start's own state)
+        body = RigidBody.from_vector(pool.objects[0], pool.shape, np.array([-0.35, 0.13, table_z]))
     else:
         sized = False
-    obj = obj or sc.Cylinder("object", -0.356, 0.132, 0.0265, 0.11, 0.116)  # feno at one of sim3's spots
+    body = body or obj.default_body(table_z)
     start = start or {**REST, "gripper.pos": 30.0}
     entities = {
         "robot": EntityCfg(
@@ -222,10 +196,7 @@ def env_cfg(
             ),
             articulation=EntityArticulationInfoCfg(actuators=(XmlActuatorCfg(target_names_expr=(".*",)),)),
         ),
-        "object": EntityCfg(
-            spec_fn=lambda: object_spec(obj),
-            init_state=EntityCfg.InitialStateCfg(pos=(obj.x, obj.y, table_z + obj.height / 2)),
-        ),
+        obj.ENTITY: obj.entity_cfg(body),
         "table": EntityCfg(spec_fn=lambda: table_spec(model, arm, table_z)),
     }
     pose_noise = (
@@ -240,17 +211,17 @@ def env_cfg(
     terms = {
         "joint_pos": ObservationTermCfg(func=base_mdp.joint_pos_rel, noise=Unoise(n_min=-0.002, n_max=0.002)),
         "joint_vel": ObservationTermCfg(func=base_mdp.joint_vel_rel),
-        "object_in_root": ObservationTermCfg(func=task.object_in_root, noise=pose_noise),
-        "object_in_pinch": ObservationTermCfg(func=task.object_in_pinch, noise=pose_noise),
+        "object_in_root": ObservationTermCfg(func=obj.object_in_root, noise=pose_noise),
+        "object_in_pinch": ObservationTermCfg(func=obj.object_in_pinch, noise=pose_noise),
         "servo_loads": ObservationTermCfg(func=task.servo_loads),
         "finger_contacts": ObservationTermCfg(func=task.finger_contacts),
         "actions": ObservationTermCfg(func=base_mdp.last_action),
     }
     if sized:  # (one object's runs keep their observations: their checkpoints still load)
-        terms["object_size"] = ObservationTermCfg(func=object_size, params={"estimated": True})
+        terms["object_size"] = ObservationTermCfg(func=obj.object_size, params={"estimated": True})
     critic_terms = dict(terms)  # (the true size: the actor's is off by the episode's error)
     if sized:
-        critic_terms["object_size"] = ObservationTermCfg(func=object_size)
+        critic_terms["object_size"] = ObservationTermCfg(func=obj.object_size)
     events: dict[str, EventTermCfg] = {
         "reset_scene": EventTermCfg(func=base_mdp.reset_scene_to_default, mode="reset"),
         "reset_object": EventTermCfg(
@@ -336,7 +307,7 @@ def env_cfg(
         events=events,
         rewards={  # (staged, each stage paying more than the one before: `mjlab_task`'s docstring)
             "reach": RewardTermCfg(func=task.reach, weight=REWARD_WEIGHTS["reach"]),
-            "between_jaws": RewardTermCfg(func=task.between_jaws, weight=REWARD_WEIGHTS["between_jaws"]),
+            "between_jaws": RewardTermCfg(func=obj.between_jaws, weight=REWARD_WEIGHTS["between_jaws"]),
             "both_fingers": RewardTermCfg(func=task.both_fingers, weight=REWARD_WEIGHTS["both_fingers"]),
             "rise": RewardTermCfg(func=task.rise, weight=REWARD_WEIGHTS["rise"]),
             "held": RewardTermCfg(func=task.held, weight=REWARD_WEIGHTS["held"]),
@@ -691,11 +662,12 @@ def set_world_physics(
 
 
 def cpu_model(
-    model: XleRobotModel, arm: str = "right", obj: sc.Cylinder | None = None, table_z: float = sc.TABLE_Z
+    model: XleRobotModel, arm: str = "right", body: RigidBody | None = None, table_z: float = sc.TABLE_Z
 ) -> "mujoco.MjModel":
-    """The CPU simulator's compiled model of the same scene (`scene.build`)."""
-    obj = obj or sc.Cylinder("object", -0.356, 0.132, 0.0265, 0.11, 0.116)
-    return sc.build(model, arm, [obj], table_z=table_z).m
+    """The CPU simulator's compiled model of the same scene (`scene.build`; default `mjlab_object.default_body`)."""
+    from .mjlab_object import default_body
+
+    return sc.build(model, arm, [sc.from_body(body or default_body(table_z))], table_z=table_z).m
 
 
 def make_env(cfg: "ManagerBasedRlEnvCfg", device: str = "cpu") -> "ManagerBasedRlEnv":

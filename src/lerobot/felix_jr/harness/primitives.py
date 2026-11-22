@@ -13,6 +13,12 @@ at any values in it (what an optimizer samples: `sim2real.refine`); the grid is 
 
 Names say their frame (`docs/object_grasping.md`, "Frames and names"): `root_from_obj` maps the object frame to the root
 frame, `center_root` is a point in the root frame.
+
+A primitive also says what it is, in numbers anything else can use: its shape's name (`SHAPE`) and parameters
+(`shape_params`, e.g. a cylinder's radius and height), its bounds (`bounding_radius`, `half_extents`) and a solid's
+inertia for a mass (`solid_inertia`). A `RigidBody` is a primitive with a mass, and its record (`to_record`,
+`from_record`) is the one way it is written down: the grasp bank's placements (`sim2real/bank.py`) and the start pools
+(`sim2real/start_pool.py`) both go through it, so the simulators read the object the bank planned on.
 """
 
 from collections.abc import Mapping
@@ -181,6 +187,8 @@ class Cylinder:
     length: float
 
     SPACING = {"t": 0.01, "phi": 30.0, "psi": 15.0}
+    SHAPE = "cylinder"
+    PARAMS = ("radius", "height")  # (`shape_params`' names: the height is the length, end to end)
 
     def __post_init__(self) -> None:
         """Refuse a frame that is not a rigid transform, or a size that is not positive."""
@@ -221,6 +229,35 @@ class Cylinder:
     def top_root(self) -> np.ndarray:
         """The top end's center."""
         return self.bottom_root + self.length * self.axis_root
+
+    def shape_params(self) -> dict[str, float]:
+        """The shape's parameters by name (`PARAMS`, m): radius and height (its length, end to end)."""
+        return {"radius": float(self.radius), "height": float(self.length)}
+
+    @classmethod
+    def from_shape_params(cls, params: Mapping[str, float], root_from_obj: np.ndarray) -> "Cylinder":
+        """`shape_params`' values at the pose `root_from_obj` (its bottom end's center, its axis along z)."""
+        return cls(np.asarray(root_from_obj, dtype=float), float(params["radius"]), float(params["height"]))
+
+    @property
+    def center_obj(self) -> np.ndarray:
+        """The center (of mass, for a solid), object frame: half way up the axis."""
+        return np.array([0.0, 0.0, self.length / 2])
+
+    @property
+    def bounding_radius(self) -> float:
+        """The smallest sphere about the center that holds it (m)."""
+        return float(np.hypot(self.radius, self.length / 2))
+
+    @property
+    def half_extents(self) -> np.ndarray:
+        """The half sizes of the box about the center that holds it, object frame (m)."""
+        return np.array([self.radius, self.radius, self.length / 2])
+
+    def solid_inertia(self, mass: float) -> np.ndarray:
+        """A solid cylinder's principal moments of inertia about its center, along the object frame's axes (kg m^2)."""
+        side = mass * (3 * self.radius**2 + self.length**2) / 12
+        return np.array([side, side, mass * self.radius**2 / 2])
 
     def approach_preference(self, approach_root: np.ndarray) -> float:
         """How far (deg) an approach is off square to the axis: 0 from the side, 90 along it (from above or below).
@@ -299,3 +336,79 @@ class Cylinder:
             else f"({', '.join(f'{v:.2f}' for v in a)}), {tilt:.0f} deg from vertical"
         )
         return f"cylinder, radius {_cm(self.radius)} cm, {where}"
+
+
+SHAPES = {Cylinder.SHAPE: Cylinder}  # the shapes a record can name
+
+
+@dataclass(frozen=True)
+class RigidBody:
+    """A primitive with a mass: an object as a simulator needs it, and as the grasp bank and the start pools record it.
+
+    The record (`to_record`) is the shape's name (`"shape"`), its parameters by name (`Cylinder.PARAMS`), the mass, and
+    where it stands: `bottom_root`, standing upright on it (a cylinder's bottom end's center), or the full pose
+    (`root_from_obj`) when it is not upright. `vector` / `from_vector` are the same numbers as a row (the start pools'
+    arrays: `columns` names them).
+    """
+
+    shape: Cylinder
+    mass_kg: float
+
+    @property
+    def inertia(self) -> np.ndarray:
+        """Its principal moments of inertia about its center (a solid of uniform density, kg m^2)."""
+        return self.shape.solid_inertia(self.mass_kg)
+
+    @classmethod
+    def upright(
+        cls, shape: str, params: Mapping[str, float], mass_kg: float, bottom_root: np.ndarray
+    ) -> "RigidBody":
+        """`shape` of `params`, standing upright on `bottom_root`."""
+        frame = frame_along(np.array([0.0, 0.0, 1.0]), np.asarray(bottom_root, dtype=float))
+        return cls(SHAPES[shape].from_shape_params(params, frame), float(mass_kg))
+
+    @staticmethod
+    def columns(shape: str = Cylinder.SHAPE) -> tuple[str, ...]:
+        """`vector`'s names: the shape's parameters, then the mass."""
+        return (*SHAPES[shape].PARAMS, "mass_kg")
+
+    def vector(self) -> np.ndarray:
+        """Its shape's parameters and its mass as a row (`columns`)."""
+        return np.array([*self.shape.shape_params().values(), self.mass_kg], dtype=np.float64)
+
+    @classmethod
+    def from_vector(
+        cls, row: np.ndarray, shape: str = Cylinder.SHAPE, bottom_root: np.ndarray | None = None
+    ) -> "RigidBody":
+        """`vector`'s row back (standing upright on `bottom_root`, default the origin)."""
+        names = SHAPES[shape].PARAMS
+        params = dict(zip(names, (float(v) for v in row[: len(names)]), strict=True))
+        return cls.upright(
+            shape, params, float(row[len(names)]), np.zeros(3) if bottom_root is None else bottom_root
+        )
+
+    def to_record(self) -> dict[str, object]:
+        """Its record (the class docstring): plain JSON values."""
+        frame = self.shape.root_from_obj
+        record: dict[str, object] = {
+            "shape": self.shape.SHAPE,
+            **self.shape.shape_params(),
+            "mass_kg": self.mass_kg,
+        }
+        if np.allclose(frame[:3, 2], [0.0, 0.0, 1.0], atol=1e-9):
+            record["bottom_root"] = [float(v) for v in frame[:3, 3]]
+        else:
+            record["root_from_obj"] = frame.tolist()
+        return record
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> "RigidBody":
+        """`to_record`'s record back; one without a shape (written before shapes were named) is a cylinder."""
+        shape = str(record.get("shape", Cylinder.SHAPE))
+        if shape not in SHAPES:
+            raise ValueError(f"unknown shape {shape!r} (known: {sorted(SHAPES)})")
+        params = {name: float(record[name]) for name in SHAPES[shape].PARAMS}  # type: ignore[arg-type]
+        mass = float(record["mass_kg"])  # type: ignore[arg-type]
+        if "root_from_obj" in record:
+            return cls(SHAPES[shape].from_shape_params(params, np.array(record["root_from_obj"])), mass)
+        return cls.upright(shape, params, mass, np.array(record["bottom_root"]))

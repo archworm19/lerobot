@@ -16,8 +16,8 @@ simulator's truth (the object's pose with a little noise, the fingers' contacts)
   actuators' torque over the servo's stall torque: the real servos report a load), each finger's pads touching the
   object (privileged), the last action.
 - **Rewards** (positive and staged: an all-negative reward with episodes ended by failure teaches ending them):
-  reaching the grasp point (where the object's axis passes the pinch point in a grasp: `grasp_point`, measured over
-  the pool's starts in the jaws), the object between the jaws (`BETWEEN_*_M`), both fingers on it, its rise above
+  reaching the grasp point (where the object's axis passes the pinch point in a grasp: `mjlab_object.grasp_point`,
+  fit over the pool's starts in the jaws), the object between the jaws (`mjlab_object.between_jaws`), both fingers on it, its rise above
   resting on the table towards the lift, held (upright within `HELD_MAX_TILT_DEG`); a small action-rate penalty and
   one on the object's swing while lifted. **Terminations:**
   the arm on the table, the object tipped past `refine.KNOCKED_DEG`; the episode's length (not success: the held reward
@@ -33,7 +33,7 @@ import numpy as np
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 from lerobot.felix_jr.harness.grasping import LIFT_M
 
-from . import robot
+from . import mjlab_object as obj, robot
 from .refine import HELD_FRACTION, KNOCKED_DEG
 
 if TYPE_CHECKING:
@@ -52,21 +52,6 @@ GRIPPER_CAP_UNITS = 15.0
 STALL_NM = robot.GRIPPER_STALL_NM  # (the STS3215's, every joint's servo)
 FIXED_PADS, MOVING_PADS, ARM_TABLE = "fixed_pads", "moving_pads", "arm_table"  # the contact sensors' names
 REACH_STD_M = 0.05
-# where the object's axis passes the pinch point, in the pinch frame (x across the jaws, z along the gripper): measured
-# over the pyri pool's starts (2026-11-21; the pinch to the axis line, the grasp's height along the axis apart): in the
-# jaws (-16, 1, -11) mm (5th-95th: x -18 to -15, y +-7, z -18 to +2); the jaws open around it (-30, 2, -12) (x -36 to
-# -24); at the attack (-30, -1, +34) (z +20 to +52)
-# For objects of several sizes, refit over the multi1 pool's starts (radius 20-30 mm; 2026-11-21): across the jaws the
-# axis sits about a radius from the pinch point, in the jaws x = -0.79 r + 2.0 mm (residual 1.0 mm; at pyri's 22.5 mm
-# -15.8, as measured), z = +0.67 r - 24.1 (residual 6.7); the jaws open around it x = -1.10 r - 4.9 (residual 3.2).
-# Each axis (per metre of radius, at no radius; m):
-GRASP_POINT_FIT = ((-0.79, 0.0020), (0.0, 0.001), (0.67, -0.0241))
-# the box "between the jaws", from the open jaws' starts to the closed ones': across the jaws its ends follow the radius
-# as those do (at pyri's radius -38 and -12 mm, as measured); y and z fixed
-BETWEEN_X_FIT = ((-1.10, -0.0049 - 0.0084), (-0.79, 0.0020 + 0.0038))  # low, high
-BETWEEN_LOW_M = (None, -0.015, -0.025)
-BETWEEN_HIGH_M = (None, 0.015, 0.006)
-ON_BODY_MARGIN_M = 0.005  # the grasp's height this far inside the object's ends at least
 HELD_MAX_TILT_DEG = 10.0  # held only upright within this
 
 
@@ -175,28 +160,10 @@ def delta_action_cfg(model: XleRobotModel, arm: str) -> DeltaJointTargetActionCf
     )
 
 
-# ---- geometry -------------------------------------------------------------------------------------------------------
+# ---- the robot ------------------------------------------------------------------------------------------------------
 
 
-def _rotate_inverse(quat: "torch.Tensor", v: "torch.Tensor") -> "torch.Tensor":
-    """`v` rotated by the inverse of `quat` (w, x, y, z), batched."""
-    import torch
-
-    w, xyz = quat[:, :1], quat[:, 1:]
-    t = 2.0 * torch.cross(-xyz, v, dim=1)
-    return v + w * t + torch.cross(-xyz, t, dim=1)
-
-
-def _rotate(quat: "torch.Tensor", v: "torch.Tensor") -> "torch.Tensor":
-    """`v` rotated by `quat` (w, x, y, z), batched."""
-    import torch
-
-    w, xyz = quat[:, :1], quat[:, 1:]
-    t = 2.0 * torch.cross(xyz, v, dim=1)
-    return v + w * t + torch.cross(xyz, t, dim=1)
-
-
-def _pinch(env: "ManagerBasedRlEnv") -> tuple["torch.Tensor", "torch.Tensor"]:
+def pinch_pose(env: "ManagerBasedRlEnv") -> tuple["torch.Tensor", "torch.Tensor"]:
     """The pinch site's position and orientation (w, x, y, z), world frame (= the root frame here)."""
     rob = env.scene["robot"]
     cache = getattr(env, "_felix_pinch_id", None)
@@ -204,33 +171,6 @@ def _pinch(env: "ManagerBasedRlEnv") -> tuple["torch.Tensor", "torch.Tensor"]:
         ids, _ = rob.find_sites("pinch")
         cache = env._felix_pinch_id = ids[0]  # type: ignore[attr-defined]
     return rob.data.site_pos_w[:, cache], rob.data.site_quat_w[:, cache]
-
-
-def _object(env: "ManagerBasedRlEnv") -> tuple["torch.Tensor", "torch.Tensor"]:
-    """The object's center and axis (its body z), world frame."""
-    import torch
-
-    data = env.scene["object"].data
-    z = torch.zeros_like(data.root_link_pos_w)
-    z[:, 2] = 1.0
-    return data.root_link_pos_w, _rotate(data.root_link_quat_w, z)
-
-
-def object_in_pinch(env: "ManagerBasedRlEnv") -> "torch.Tensor":
-    """The object's center (3) and axis (3) in the pinch frame."""
-    import torch
-
-    center, axis = _object(env)
-    pos, quat = _pinch(env)
-    return torch.cat([_rotate_inverse(quat, center - pos), _rotate_inverse(quat, axis)], dim=1)
-
-
-def object_in_root(env: "ManagerBasedRlEnv") -> "torch.Tensor":
-    """The object's center (3) and axis (3) in the root frame."""
-    import torch
-
-    center, axis = _object(env)
-    return torch.cat([center, axis], dim=1)
 
 
 def servo_loads(env: "ManagerBasedRlEnv") -> "torch.Tensor":
@@ -253,63 +193,12 @@ def finger_contacts(env: "ManagerBasedRlEnv") -> "torch.Tensor":
 # ---- rewards and terminations ---------------------------------------------------------------------------------------
 
 
-def axis_from_pinch(env: "ManagerBasedRlEnv") -> tuple["torch.Tensor", "torch.Tensor"]:
-    """Where the object's axis passes the pinch point, and the grasp's height along it.
-
-    The pinch to the axis line (pinch frame, (N, 3)) and how far along the axis from the object's center (N,): a
-    cylinder's grasp is the first, at a height the second.
-    """
-    o = object_in_pinch(env)
-    center, axis = o[:, :3], o[:, 3:]
-    along = (center * axis).sum(dim=1)
-    return center - along[:, None] * axis, along
-
-
-def object_dims(env: "ManagerBasedRlEnv", entity: str = "object") -> "torch.Tensor":
-    """Each world's object's radius and height ((N, 2), m), read from the model.
-
-    The cylinder's size field: one for every world, or each world's own once a pool of objects of several sizes has
-    resized it (`pool_reset.PoolReset`).
-    """
-    geom = int(env.scene[entity].indexing.geom_ids[0])
-    size = env.sim.model.geom_size[..., geom, :2].reshape(-1, 2).float()
-    dims = size * size.new_tensor([1.0, 2.0])  # (radius, half height): radius, height
-    return dims.expand(env.num_envs, 2) if len(dims) == 1 else dims
-
-
-def grasp_point(env: "ManagerBasedRlEnv") -> "torch.Tensor":
-    """Where the object's axis passes the pinch point in a grasp, for each world's radius (pinch frame, (N, 3))."""
-    import torch
-
-    r = object_dims(env)[:, 0]
-    return torch.stack([a * r + b for a, b in GRASP_POINT_FIT], dim=1)
-
-
 def reach(env: "ManagerBasedRlEnv", std: float = REACH_STD_M) -> "torch.Tensor":
-    """exp(-|the object's axis from the grasp point (`grasp_point`)| / std)."""
+    """exp(-|the object's axis from the grasp point (`mjlab_object.grasp_point`)| / std)."""
     import torch
 
-    perp, _ = axis_from_pinch(env)
-    return torch.exp(-torch.linalg.norm(perp - grasp_point(env), dim=1) / std)
-
-
-def between_jaws(env: "ManagerBasedRlEnv") -> "torch.Tensor":
-    """1 where the object's axis is in the box between the jaws (for its radius) and the grasp on its body."""
-    import torch
-
-    perp, along = axis_from_pinch(env)
-    dims = object_dims(env)
-    r, height = dims[:, 0], dims[:, 1]
-    (a_lo, b_lo), (a_hi, b_hi) = BETWEEN_X_FIT
-    n = len(r)
-    low = torch.stack(
-        [a_lo * r + b_lo, *(torch.full((n,), v, device=env.device) for v in BETWEEN_LOW_M[1:])], dim=1
-    )
-    high = torch.stack(
-        [a_hi * r + b_hi, *(torch.full((n,), v, device=env.device) for v in BETWEEN_HIGH_M[1:])], dim=1
-    )
-    inside = ((perp > low) & (perp < high)).all(dim=1)
-    return (inside & (along.abs() < height / 2 - ON_BODY_MARGIN_M)).float()
+    perp, _ = obj.axis_from_pinch(env)
+    return torch.exp(-torch.linalg.norm(perp - obj.grasp_point(env), dim=1) / std)
 
 
 def both_fingers(env: "ManagerBasedRlEnv") -> "torch.Tensor":
@@ -317,28 +206,10 @@ def both_fingers(env: "ManagerBasedRlEnv") -> "torch.Tensor":
     return finger_contacts(env).prod(dim=1)
 
 
-def rest_z(env: "ManagerBasedRlEnv", entity: str = "object") -> "torch.Tensor":
-    """Each world's object's center height standing on the table (N,).
-
-    The entity's default height (the table and half the object the environment was built with), moved by how much
-    taller each world's object is than that one (`object_dims`; the host model keeps the built size).
-    """
-    obj = env.scene[entity]
-    geom = int(obj.indexing.geom_ids[0])
-    built_half = float(env.sim.mj_model.geom_size[geom, 1])
-    return obj.data.default_root_state[:, 2] + object_dims(env, entity)[:, 1] / 2 - built_half
-
-
 def rise(env: "ManagerBasedRlEnv") -> "torch.Tensor":
-    """The object's height above standing on the table (`rest_z`), over the lift, in [0, 1]."""
-    z = env.scene["object"].data.root_link_pos_w[:, 2]
-    return ((z - rest_z(env)) / LIFT_M).clamp(0.0, 1.0)
-
-
-def tilt_cos(env: "ManagerBasedRlEnv") -> "torch.Tensor":
-    """The cosine of the object's tilt from upright (its axis's world z)."""
-    _, axis = _object(env)
-    return axis[:, 2]
+    """The object's height above standing on the table (`mjlab_object.rest_z`), over the lift, in [0, 1]."""
+    z = env.scene[obj.ENTITY].data.root_link_pos_w[:, 2]
+    return ((z - obj.rest_z(env)) / LIFT_M).clamp(0.0, 1.0)
 
 
 def held(env: "ManagerBasedRlEnv") -> "torch.Tensor":
@@ -347,7 +218,7 @@ def held(env: "ManagerBasedRlEnv") -> "torch.Tensor":
     (Upright since 2026-11-21: the first run's policy held bottles tilted 20-30 deg, gripped high and swinging, which
     the lift alone paid for in full.)
     """
-    upright = tilt_cos(env) > float(np.cos(np.radians(HELD_MAX_TILT_DEG)))
+    upright = obj.upright(env, HELD_MAX_TILT_DEG)
     return (rise(env) >= HELD_FRACTION).float() * both_fingers(env) * upright.float()
 
 
@@ -355,14 +226,13 @@ def swing(env: "ManagerBasedRlEnv") -> "torch.Tensor":
     """The object's angular speed (rad/s) while it is off the table (rise past a fifth of the lift): a penalty's term."""
     import torch
 
-    speed = torch.linalg.norm(env.scene["object"].data.root_link_ang_vel_w, dim=1)
+    speed = torch.linalg.norm(env.scene[obj.ENTITY].data.root_link_ang_vel_w, dim=1)
     return speed * (rise(env) > 0.2).float()
 
 
 def tipped(env: "ManagerBasedRlEnv") -> "torch.Tensor":
     """Where the object's axis is past `refine.KNOCKED_DEG` from upright."""
-    _, axis = _object(env)
-    return axis[:, 2] < float(np.cos(np.radians(KNOCKED_DEG)))
+    return ~obj.upright(env, KNOCKED_DEG)
 
 
 def arm_on_table(env: "ManagerBasedRlEnv") -> "torch.Tensor":

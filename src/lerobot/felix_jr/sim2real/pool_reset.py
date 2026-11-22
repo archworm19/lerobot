@@ -7,14 +7,14 @@ read, laid out as the environment's model lays out its state, put on the device.
 world being reset: a pool drawn by `pool_weights`, then a start of it at random; its joints' positions and velocities,
 its actuators' commands (and the robot's joint position targets, which mjlab derives the controls from) written.
 
-A pool whose objects vary in size (`StartPool.sizes_vary`) also has each reset world's object made its start's: the
-cylinder's size, its bounding sphere and box (what the collision broadphase reads), the body's mass (times a
-log-uniform draw in `mass_range`) and a solid cylinder's inertia. Those model fields are per world for it
-(`SIZED_FIELDS`: the term declares them, `model_fields`, and mjlab expands them before the first step) and the
-constants that depend on them recomputed after each reset (`recompute`: `set_const`). The model is then where each
-world's object size is kept (`mjlab_task.object_dims` reads it); the term keeps only what is not in the model: each
-world's start (`rows`: its pool, `pools_of_worlds`) and the error in the size the actor is told (`size_error`, drawn at
-each reset, `size_error_m`). A pool of one object writes no model field and recomputes nothing.
+A pool whose objects vary in size (`StartPool.sizes_vary`) also has each reset world's object made its start's
+(`mjlab_object.write_bodies`: the shape's fields, its mass times a log-uniform draw in `mass_range`), the fields it
+writes declared per world and the constants recomputed after (`mjlab_object.sized_declaration`: this term's
+`model_fields` and `recompute`, read by mjlab once the term is built). Everything that knows the object's shape is
+`mjlab_object`'s; this term draws starts and writes state. The model is where each world's object size is kept
+(`mjlab_object.object_dims` reads it); the term keeps only what is not in the model: each world's start (`rows`: its
+pool, `pools_of_worlds`) and the error in the size the actor is told (`size_error`, drawn at each reset,
+`size_error_m`). A pool of one object declares nothing: no field per world, nothing recomputed.
 
 `pool_reset(env)`: the environment's term (mjlab's event manager keeps a built term in its config's `func`).
 """
@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from . import mjlab_object as obj
 from .start_pool import POOLS, StartPool, _layout
 
 if TYPE_CHECKING:
@@ -32,22 +33,6 @@ if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
 TERM = "reset_from_pool"  # the event term's name in `mjlab_env.env_cfg`
-SIZED_FIELDS = ("geom_size", "geom_rbound", "geom_aabb", "body_mass", "body_inertia")
-
-
-def object_ids(env: "ManagerBasedRlEnv", entity: str = "object") -> tuple[int, int]:
-    """The object entity's body and its one geom (a cylinder), as indices into the model's fields."""
-    import mujoco
-
-    obj = env.scene[entity]
-    bodies, geoms = obj.indexing.body_ids.tolist(), obj.indexing.geom_ids.tolist()
-    if len(bodies) != 1 or len(geoms) != 1:
-        raise ValueError(
-            f"expected the object to be one body with one geom, found bodies {bodies}, geoms {geoms}"
-        )
-    if env.sim.mj_model.geom_type[geoms[0]] != mujoco.mjtGeom.mjGEOM_CYLINDER:
-        raise ValueError("expected the object's geom to be a cylinder")
-    return int(bodies[0]), int(geoms[0])
 
 
 class PoolReset:
@@ -61,26 +46,10 @@ class PoolReset:
         self.path = str(params["path"])
         self.pool = StartPool.load(Path(self.path))
         self.sized = self.pool.sizes_vary
-        # Objects of several sizes: the model fields this term writes per world. MuJoCo Warp keeps one compiled model
-        # for every world; each model field is stored with a world dimension, one copy by default (every world reads
-        # it) or one a world once expanded. mjlab expands the fields an event term names in `model_fields` (gathered
-        # by its event manager right after building each term, here; `sim.expand_model_fields` then allocates them
-        # before the first step, and re-captures its CUDA graphs since the arrays move). Unexpanded, a write to
-        # `model.geom_size[world]` would land on the one shared copy. The fields: the cylinder's size (radius, half
-        # height), its bounding sphere and box (`geom_rbound`, `geom_aabb`: what the collision broadphase reads, not
-        # `geom_size`; stale, contacts are missed or phantom), its body's mass and inertia. `requires_model_fields`
-        # adds the fields derived from those (`body_subtreemass`, `body_invweight0`, `dof_invweight0`, ...: per world
-        # too). `recompute`: after the reset events fire, mjlab recomputes those derived constants
-        # (`sim.recompute_constants`, MuJoCo Warp's `set_const`, which saves and restores the simulation state): the
-        # object's mass and inertia change its subtree mass and the inverse weights the constraint solver scales its
-        # contacts by. One object's pool declares nothing: no field expanded, nothing recomputed.
-        if self.sized:
-            from mjlab.managers.event_manager import RecomputeLevel, requires_model_fields
-
-            self.model_fields = requires_model_fields(*SIZED_FIELDS, recompute=RecomputeLevel.set_const)(
-                _declared
-            ).model_fields
-            self.recompute = RecomputeLevel.set_const
+        if (
+            self.sized
+        ):  # (the object's fields per world, the constants recomputed: `mjlab_object.sized_declaration`)
+            self.model_fields, self.recompute = obj.sized_declaration()
         m, dev = env.sim.mj_model, env.device
         qpos, qvel, ctrl = self.pool.layout(m)
         self.qpos = torch.as_tensor(qpos, device=dev, dtype=env.sim.data.qpos.dtype)
@@ -100,7 +69,10 @@ class PoolReset:
         pairs = [(a, names.index(n)) for a, n in enumerate(_layout(m)["actuators"]) if n in names]
         self.target_columns = torch.as_tensor([a for a, _ in pairs], device=dev)
         self.target_joints = torch.as_tensor([j for _, j in pairs], device=dev)
-        self.object_body, self.object_geom = object_ids(env, params["object"].name)
+        self.object_entity = params["object"].name
+        obj.object_ids(
+            env, self.object_entity
+        )  # (refuses an object that is not one cylinder, now rather than later)
         self.rows = torch.zeros(env.num_envs, dtype=torch.long, device=dev)  # each world's start
         self.size_error = torch.zeros(
             env.num_envs, 2, device=dev
@@ -134,7 +106,7 @@ class PoolReset:
         if self.sized:
             lo, hi = np.log(mass_range[0]), np.log(mass_range[1])
             scale = torch.exp(lo + (hi - lo) * torch.rand(len(env_ids), device=rows.device))
-            self._resize(env, env_ids, self.objects[rows], scale)
+            obj.write_bodies(env, env_ids, self.objects[rows], scale, self.object_entity)
             self.size_error[env_ids] = size_error_m * torch.randn(len(env_ids), 2, device=rows.device)
 
     def _draw(self, n: int) -> "torch.Tensor":
@@ -149,37 +121,9 @@ class PoolReset:
                 rows[mask] = members[torch.randint(len(members), (int(mask.sum()),), device=rows.device)]
         return rows
 
-    def _resize(
-        self,
-        env: "ManagerBasedRlEnv",
-        env_ids: "torch.Tensor",
-        sizes: "torch.Tensor",
-        mass_scale: "torch.Tensor",
-    ) -> None:
-        """The object in each world of `env_ids` made `sizes` ((n, 3): radius, height (m), mass (kg))."""
-        import torch
-
-        m = env.sim.model
-        body, geom = self.object_body, self.object_geom
-        r, h, mass = sizes[:, 0], sizes[:, 1], sizes[:, 2] * mass_scale
-        half = h / 2
-        m.geom_size[env_ids, geom, 0] = r.to(m.geom_size.dtype)
-        m.geom_size[env_ids, geom, 1] = half.to(m.geom_size.dtype)
-        m.geom_rbound[env_ids, geom] = torch.sqrt(r * r + half * half).to(m.geom_rbound.dtype)
-        m.geom_aabb[env_ids, geom, 1] = torch.stack([r, r, half], dim=1).to(m.geom_aabb.dtype)
-        m.body_mass[env_ids, body] = mass.to(m.body_mass.dtype)
-        side = mass * (3 * r * r + h * h) / 12
-        m.body_inertia[env_ids, body] = torch.stack([side, side, mass * r * r / 2], dim=1).to(
-            m.body_inertia.dtype
-        )
-
     def pools_of_worlds(self) -> list[str]:
         """Each world's start pool (its last reset's)."""
         return [str(p) for p in self.pool.pool[self.rows.cpu().numpy()]]
-
-
-def _declared() -> None:
-    """Carry mjlab's `requires_model_fields` declaration (its derived fields included); never called."""
 
 
 def pool_reset(env: "ManagerBasedRlEnv") -> PoolReset | None:

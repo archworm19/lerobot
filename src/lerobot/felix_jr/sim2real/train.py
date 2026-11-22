@@ -38,6 +38,7 @@ from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 from lerobot.utils.import_utils import require_package
 
 from . import mjlab_env as me, mjlab_task as task
+from .mjlab_object import SIZE_ERROR_M
 from .start_pool import POOLS
 
 LOCAL_TRAIN = Path(__file__).parent / "scratch" / "train"
@@ -185,7 +186,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--size-error-mm",
         type=float,
-        default=1000 * me.SIZE_ERROR_M,
+        default=1000 * SIZE_ERROR_M,
         help="objects of several sizes: the error in the size the actor is told, an episode's (std)",
     )
     parser.add_argument("--seed", type=int, default=42)

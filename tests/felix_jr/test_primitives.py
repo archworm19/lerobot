@@ -156,3 +156,36 @@ def test_a_cylinders_grasp_space_and_its_grasp_anywhere_in_it():
         [0.0, 0.0, 1.0]
     )  # (the approach untilted)
     assert np.degrees(np.arctan2(side[1], side[0])) % 360 == pytest.approx(195.0, abs=1e-6)
+
+
+def test_a_rigid_body_is_written_down_one_way():
+    """`RigidBody`: its record (the bank's placements, read back alike, old ones as cylinders), its row (the pools'),
+    and what a simulator needs of it (the cylinder's bounds, a solid's inertia)."""
+    from lerobot.felix_jr.harness.primitives import Cylinder, RigidBody
+
+    body = RigidBody.upright(
+        "cylinder", {"radius": 0.0225, "height": 0.13}, 0.08, np.array([-0.3, 0.2, 0.78])
+    )
+    record = body.to_record()
+    assert record == {
+        "shape": "cylinder",
+        "radius": 0.0225,
+        "height": 0.13,
+        "mass_kg": 0.08,
+        "bottom_root": [-0.3, 0.2, 0.78],
+    }
+    back = RigidBody.from_record(record)
+    assert back.to_record() == record and np.allclose(back.shape.root_from_obj, body.shape.root_from_obj)
+    old = {"index": 3, "bottom_root": [-0.3, 0.2, 0.78], "radius": 0.0225, "height": 0.13, "mass_kg": 0.08}
+    assert RigidBody.from_record(old).to_record() == record  # (written before shapes were named)
+    tilted = RigidBody(Cylinder.between(np.zeros(3), np.array([0.1, 0.0, 0.0]), 0.01), 0.02)
+    assert np.allclose(RigidBody.from_record(tilted.to_record()).shape.axis_root, [1.0, 0.0, 0.0])
+    assert RigidBody.columns() == ("radius", "height", "mass_kg")
+    assert np.allclose(body.vector(), [0.0225, 0.13, 0.08])
+    assert RigidBody.from_vector(body.vector()).to_record()["radius"] == 0.0225
+    shape = body.shape
+    assert shape.bounding_radius == pytest.approx(np.hypot(0.0225, 0.065))
+    assert np.allclose(shape.half_extents, [0.0225, 0.0225, 0.065])
+    assert np.allclose(body.inertia, [0.08 * (3 * 0.0225**2 + 0.13**2) / 12] * 2 + [0.08 * 0.0225**2 / 2])
+    with pytest.raises(ValueError, match="unknown shape"):
+        RigidBody.from_record(record | {"shape": "torus"})

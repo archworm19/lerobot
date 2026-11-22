@@ -241,15 +241,21 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
   **Built (2026-11-21):** `StartPool.objects` (a size a start), the per-world resize at reset
   (`pool_reset.PoolReset`, a class event term bound to the robot and the object: size, bounding sphere and box, mass times a
   log-uniform draw, a solid cylinder's inertia; `set_const` after; one object's pool declares no field per world). The
-  model is where each world's size is kept (`mjlab_task.object_dims`, `rest_z` read it); the term keeps only each
+  model is where each world's size is kept (`mjlab_object.object_dims`, `rest_z` read it); the term keeps only each
   world's start (`rows`, `pools_of_worlds`) and the size error. Files: the bank's `.jsonl` is `bank.py`'s, the pool's
   `.npz` `StartPool`'s (`start_pool.FORMAT`, checked when read; no mjlab needed), the term reads a pool.
   The resting height and `between_jaws`' height per world, the radius and height observed. The size the actor is told is off by an error drawn at each reset and kept for
   the episode (`SIZE_ERROR_M` 2 mm: a camera's estimate is off by a bias, not noise that averages away; SimToolReal
   perturbs its bounding box alike); the critic is told the true size. The grasp point and the box between the jaws
-  refit against the radius over `multi1`'s starts (`mjlab_task.GRASP_POINT_FIT`, `BETWEEN_X_FIT`: in the jaws the axis
+  refit against the radius over `multi1`'s starts (`mjlab_object.GRASP_POINT_FIT`, `BETWEEN_X_FIT`: in the jaws the axis
   sits x = -0.79 r + 2.0 mm from the pinch point, residual 1.0 mm; the fixed -16 mm was 6 mm off at 30 mm).
   **`multi1`** (1,024 placements, 40-60 x 100-200 mm, 40-120 g, up to 4 grasps each): 931 anchored; the unanchored
   are short objects close in (under ~260 mm ahead, mostly 100-133 mm tall, worst wide and short). Pools (random split,
   15 %): `multi1_train` 16,384 starts from 2,382 grasps on 791 placements, `multi1_test` 4,096 from 459 on 140.
+  **The object's responsibilities gathered (2026-11-22):** what it *is* in `harness/primitives.py` (`Cylinder`'s
+  shape parameters, bounds and solid inertia; `RigidBody`, a primitive with a mass, and its record, which the bank's
+  placements and the pools' rows both go through: pool format 3 names the shape and its columns); how it lives in mjlab
+  in `sim2real/mjlab_object.py` (construction: `entity_cfg`; reset: `sized_declaration`, `write_bodies`;
+  observations; the task geometry the rewards are built from). `mjlab_task` keeps what knows the task and the robot;
+  `PoolReset` draws starts and writes state. A second shape: those two modules and the bank's grasp planning.
 - Then fewer privileged observations (the finger contacts dropped).

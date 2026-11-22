@@ -36,11 +36,12 @@ import cv2
 import numpy as np
 
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, arm_joint, pinch_frame
+from lerobot.felix_jr.harness.primitives import RigidBody
 from lerobot.felix_jr.harness.reach import close_gripper_pos
 from lerobot.utils.import_utils import _mujoco_available, require_package
 
 from . import bank, robot
-from .scene import Cylinder, Scene, build
+from .scene import Scene, build, from_body
 
 if _mujoco_available:
     import mujoco
@@ -151,11 +152,13 @@ class StartSampler:
     def scene(self, index: int) -> Scene:
         """Anchor `index`'s scene: its object where it stood, the arm at zero."""
         line = self.anchors[index]
-        p = line["placement"]
-        x, y, z = p["bottom_root"]
-        obj = Cylinder("object", x, y, p["radius"], p["height"], p["mass_kg"])
+        body = RigidBody.from_record(line["placement"])
         return build(
-            self.model, self.bank_config.arm, [obj], table_z=z, finger_model=self.bank_config.finger_model
+            self.model,
+            self.bank_config.arm,
+            [from_body(body)],
+            table_z=float(body.shape.bottom_root[2]),
+            finger_model=self.bank_config.finger_model,
         )
 
     def _draw(self, pool: str, index: int, rng: np.random.Generator) -> Start:
@@ -334,8 +337,9 @@ class _Run:
 
     def off_table_cm(self) -> float:
         """How far the object's center is above where it stands (cm)."""
-        p = self.placement
-        return 100 * (float(self.scene.d.xpos[self.body][2]) - (p["bottom_root"][2] + p["height"] / 2))
+        shape = RigidBody.from_record(self.placement).shape
+        resting = float(shape.bottom_root[2]) + float(shape.center_obj[2])
+        return 100 * (float(self.scene.d.xpos[self.body][2]) - resting)
 
     def frame(self, phase: str) -> np.ndarray:
         """The two views side by side, labeled."""
@@ -394,9 +398,10 @@ def _play(runs: Sequence[_Run], script: Sequence[str], writer: "cv2.VideoWriter"
 
 
 def _describe(line: Mapping[str, Any]) -> str:
-    p, a = line["placement"], line["anchor"]
+    body, a = RigidBody.from_record(line["placement"]), line["anchor"]
+    params = body.shape.shape_params()
     return (
-        f"{2000 * p['radius']:.0f} mm x {1000 * p['height']:.0f} mm, {1000 * p['mass_kg']:.0f} g, "
+        f"{2000 * params['radius']:.0f} mm x {1000 * params['height']:.0f} mm, {1000 * body.mass_kg:.0f} g, "
         f"depth {1000 * a['depth']:.0f} mm"
     )
 

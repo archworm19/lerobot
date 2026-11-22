@@ -283,12 +283,7 @@ def main() -> None:
     args = parser.parse_args()
     model = XleRobotModel.load(args.model)
     config, lines = bank.load(args.bank)
-    placements = {
-        line["placement"]["index"]: bank.Placement(
-            **{k: tuple(v) if isinstance(v, list) else v for k, v in line["placement"].items()}
-        )
-        for line in lines
-    }
+    placements = {line["placement"]["index"]: bank.Placement.from_record(line["placement"]) for line in lines}
     records = [json.loads(s) for s in args.bench.read_text().splitlines() if s.strip()]
     todo = tasks(records, args.draws)
     args.out_dir.mkdir(parents=True, exist_ok=True)

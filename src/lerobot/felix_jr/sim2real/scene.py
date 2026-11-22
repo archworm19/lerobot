@@ -21,7 +21,7 @@ if TYPE_CHECKING or _mujoco_available:
     import mujoco
 
 if TYPE_CHECKING:
-    from lerobot.felix_jr.harness.primitives import Primitive
+    from lerobot.felix_jr.harness.primitives import Primitive, RigidBody
 
 TABLE_Z = 0.747  # the table's top in the root frame (ruler2's head estimate)
 TABLE_NEAR_M = 0.06  # the table's near edge this far ahead of the arm's base
@@ -79,6 +79,14 @@ def from_primitive(
                 f"the object's top ({float(bottom[2]) + primitive.length:.3f} m) is under the table"
             )
     return Cylinder(name, float(bottom[0]), float(bottom[1]), primitive.radius, height, mass)
+
+
+def from_body(body: "RigidBody", name: str = "object") -> Cylinder:
+    """The simulator's object for a rigid body (`harness.primitives.RigidBody`), standing where it stands.
+
+    A bank's placement, a pool's start: its mass the body's.
+    """
+    return from_primitive(body.shape, name, body.mass_kg)
 
 
 @dataclass

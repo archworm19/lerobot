@@ -20,7 +20,7 @@ import argparse
 import json
 import multiprocessing
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,7 +32,7 @@ from lerobot.felix_jr.calibration.gripper_sweep import table_height
 from lerobot.felix_jr.calibration.joint_sim import REST
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 from lerobot.felix_jr.harness.grasping import GraspCandidate, GraspSettings, first_feasible
-from lerobot.felix_jr.harness.primitives import Cylinder as CylinderPrimitive
+from lerobot.felix_jr.harness.primitives import Cylinder as CylinderPrimitive, RigidBody
 from lerobot.felix_jr.harness.reach import FrameSolution, close_gripper_pos
 
 from . import robot
@@ -109,19 +109,55 @@ class BankConfig:
         return tuple(sorted({*self.depths_m, round(radius + DEEP_PAST_RADIUS_M, 4)}))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Placement:
-    """One object drawn: an upright cylinder, where its bottom stands (root frame, m), its mass."""
+    """One object drawn (`body`: an upright cylinder with a mass, where it stands, root frame), and its index.
+
+    In the bank's line its record is the body's (`RigidBody.to_record`) with the index: `to_record` / `from_record`.
+    """
 
     index: int
-    bottom_root: tuple[float, float, float]
-    radius: float
-    height: float
-    mass_kg: float
+    body: RigidBody
+
+    def __eq__(self, other: object) -> bool:
+        """The same index and the same body (by record: the shape's pose is an array)."""
+        return isinstance(other, Placement) and self.to_record() == other.to_record()
+
+    __hash__ = None  # type: ignore[assignment]
+
+    @property
+    def bottom_root(self) -> tuple[float, float, float]:
+        """Where its bottom end's center stands (root frame, m)."""
+        b = self.body.shape.bottom_root
+        return float(b[0]), float(b[1]), float(b[2])
+
+    @property
+    def radius(self) -> float:
+        """The cylinder's radius (m)."""
+        return float(self.body.shape.radius)
+
+    @property
+    def height(self) -> float:
+        """The cylinder's height (m)."""
+        return float(self.body.shape.length)
+
+    @property
+    def mass_kg(self) -> float:
+        """Its mass (kg)."""
+        return self.body.mass_kg
 
     def primitive(self) -> CylinderPrimitive:
-        """The harness's primitive for it."""
-        return CylinderPrimitive.upright(np.array(self.bottom_root), self.height, self.radius)
+        """The harness's primitive for it (its shape, posed)."""
+        return self.body.shape
+
+    def to_record(self) -> dict[str, Any]:
+        """Its line's record: the index and the body's record."""
+        return {"index": self.index, **self.body.to_record()}
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> "Placement":
+        """`to_record`'s record back (and older lines', whose records name no shape: cylinders)."""
+        return cls(int(record["index"]), RigidBody.from_record(record))
 
 
 def placements(model: XleRobotModel, config: BankConfig, n: int) -> list[Placement]:
@@ -136,15 +172,11 @@ def placements(model: XleRobotModel, config: BankConfig, n: int) -> list[Placeme
             float(base[1] + rng.uniform(*config.side_m)),
             float(table_z),
         )
-        out.append(
-            Placement(
-                i,
-                bottom,
-                float(rng.uniform(*config.diameter_m) / 2),
-                float(rng.uniform(*config.height_m)),
-                float(rng.uniform(*config.mass_kg)),
-            )
-        )
+        radius = float(rng.uniform(*config.diameter_m) / 2)
+        height = float(rng.uniform(*config.height_m))
+        mass = float(rng.uniform(*config.mass_kg))
+        params = {"radius": radius, "height": height}
+        out.append(Placement(i, RigidBody.upright(CylinderPrimitive.SHAPE, params, mass, np.array(bottom))))
     return out
 
 
@@ -236,7 +268,7 @@ def run_placement(model: XleRobotModel, config: BankConfig, placement: Placement
             )
     return {
         "kind": "placement",
-        "placement": asdict(placement),
+        "placement": placement.to_record(),
         "anchor": anchors[0] if anchors else None,  # (the first: a bank's readers before `anchors`)
         "anchors": anchors,
         "simulated": simulated,
