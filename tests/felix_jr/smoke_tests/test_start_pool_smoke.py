@@ -133,7 +133,7 @@ def test_a_sized_pool_resizes_each_worlds_object(tmp_path):
     (a wrong size or stale collision bounds would sink it or pop it up), its size observed."""
     import torch
 
-    from lerobot.felix_jr.harness.primitives import RigidBody
+    from lerobot.felix_jr.harness.primitives import ObjectRecord
     from lerobot.felix_jr.sim2real import mjlab_object as obj
     from lerobot.felix_jr.sim2real.mjlab_object import object_ids
 
@@ -164,10 +164,15 @@ def test_a_sized_pool_resizes_each_worlds_object(tmp_path):
         assert m.geom_size[w, geom, :2].cpu().numpy() == pytest.approx([r, h / 2], abs=1e-6)
         assert float(m.geom_rbound[w, geom]) == pytest.approx(np.hypot(r, h / 2), abs=1e-6)
         assert float(m.body_mass[w, body]) == pytest.approx(mass, abs=1e-6)
-        core = RigidBody.from_vector(np.array([r, h, mass]))  # (the core's formulas: the same numbers)
-        assert m.body_inertia[w, body].cpu().numpy() == pytest.approx(core.inertia, rel=1e-5)
-        assert float(m.geom_rbound[w, geom]) == pytest.approx(core.shape.bounding_radius, abs=1e-6)
-        assert m.geom_aabb[w, geom, 1].cpu().numpy() == pytest.approx(core.shape.half_extents, abs=1e-6)
+        core = ObjectRecord.from_vectors(np.array([[r, h, mass]]))  # (the core's geometry: the same numbers)
+        inertia = core.mass_kg[0] * core.primitive.inertia_per_kg()[0]
+        assert m.body_inertia[w, body].cpu().numpy() == pytest.approx(inertia, rel=1e-5)
+        assert float(m.geom_rbound[w, geom]) == pytest.approx(
+            float(core.primitive.bounding_radius()[0]), abs=1e-6
+        )
+        assert m.geom_aabb[w, geom, 1].cpu().numpy() == pytest.approx(
+            core.primitive.half_extents()[0], abs=1e-6
+        )
         assert float(obj.rest_z(env)[w]) == pytest.approx(TABLE_Z + h / 2, abs=1e-6)
         assert obs["actor"][w, -2:].cpu().numpy() == pytest.approx([r, h], abs=1e-6)
         assert obs["critic"][w, -2:].cpu().numpy() == pytest.approx([r, h], abs=1e-6)  # (the true size)

@@ -1,14 +1,16 @@
 """The object in the mjlab environment: everything about it that knows its shape (an upright cylinder), in one place.
 
-What the object *is* (its shape's parameters, bounds, inertia, its record in the bank and the pools) is
-`harness.primitives` (`Cylinder`, `RigidBody`); this module is how that object lives in mjlab, by stage:
+What the object *is* (its shape's geometry, batched; its record in the bank and the pools) is `harness.primitives`
+(`Cylinder`, `ObjectRecord`); this module is how that object lives in mjlab, by stage:
 
-- **Construction** (`entity_cfg`): the mjlab entity for a `RigidBody`: its spec (`object_spec`: a body at the origin,
-  one cylinder geom, a free joint; `scene._add_object`, the CPU simulator's own builder), its pose the initial state.
+- **Construction** (`entity_cfg`): the mjlab entity for an `ObjectRecord`: its spec (`object_spec`: a body at the
+  origin, one cylinder geom, a free joint; `scene._add_object`, the CPU simulator's own builder), its pose the initial
+  state.
 - **Reset** (`object_ids`, `sized_declaration`, `write_bodies`): for objects of several sizes, the model fields a
-  world's object needs rewritten (`SIZED_FIELDS`), declared per world, and written from `RigidBody.vector` rows: the
-  cylinder's size, its bounds (`Cylinder.bounding_radius`, `half_extents`), its mass and inertia
-  (`Cylinder.solid_inertia`). `pool_reset.PoolReset` calls these; it draws the starts, which know nothing of shape.
+  world's object needs rewritten (`SIZED_FIELDS`), declared per world, and written from `ObjectRecord.vectors` rows:
+  the primitive's own batched geometry (`bounding_radius`, `half_extents`, `inertia_per_kg`), computed on the GPU
+  tensors where they are; only MuJoCo's encoding of a cylinder's size (radius, half height) is this module's.
+  `pool_reset.PoolReset` calls these; it draws the starts, which know nothing of shape.
 - **Observations** (`object_pose`, `object_in_root`, `object_in_pinch`, `object_dims`, `object_size`): its center and
   axis (a cylinder's pose up to its own spin, which nothing sees), in the root and the pinch frames; its radius and
   height (read from the model: each world's own once resized), what the actor is told of them (off by an episode's
@@ -21,11 +23,11 @@ What the object *is* (its shape's parameters, bounds, inertia, its record in the
 A second shape would mean filling in this module and `harness.primitives` (and the bank's grasp planning).
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
-from lerobot.felix_jr.harness.primitives import RigidBody
+from lerobot.felix_jr.harness.primitives import Cylinder, ObjectRecord
 
 from . import scene as sc
 
@@ -61,31 +63,32 @@ ON_BODY_MARGIN_M = 0.005  # the grasp's height this far inside the object's ends
 # ---- construction ---------------------------------------------------------------------------------------------------
 
 
-def default_body(table_z: float) -> RigidBody:
+def default_object(table_z: float) -> ObjectRecord:
     """The object with no pool: feno (53 x 110 mm, 116 g), standing on the table at one of sim3's spots."""
-    return RigidBody.upright(
+    return ObjectRecord.upright(
         "cylinder", {"radius": 0.0265, "height": 0.11}, 0.116, np.array([-0.356, 0.132, table_z])
     )
 
 
-def object_spec(body: RigidBody) -> "mujoco.MjSpec":
-    """The object's spec: a body at the origin (its pose is the entity's initial state), as `scene` builds objects."""
+def object_spec(record: ObjectRecord) -> "mujoco.MjSpec":
+    """The (one) object's spec: a body at the origin (its pose is the entity's initial state), as `scene` builds them."""
     import mujoco
 
-    params = body.shape.shape_params()
+    radius, height = (float(v) for v in record.primitive.params[0])
     spec = mujoco.MjSpec()
-    obj = sc.Cylinder(ENTITY, 0.0, 0.0, params["radius"], params["height"], body.mass_kg)
-    sc._add_object(spec, obj, table_z=-params["height"] / 2)  # (the body's origin at the cylinder's center)
+    obj = sc.Cylinder(ENTITY, 0.0, 0.0, radius, height, float(record.mass_kg[0]))
+    sc._add_object(spec, obj, table_z=-height / 2)  # (the body's origin at the cylinder's center)
     return spec
 
 
-def entity_cfg(body: RigidBody) -> "EntityCfg":
-    """The mjlab entity for `body`, standing where it stands (its center its initial position)."""
+def entity_cfg(record: ObjectRecord) -> "EntityCfg":
+    """The mjlab entity for the (one) object of `record`, standing where it stands (its centroid its initial position)."""
     from mjlab.entity import EntityCfg
 
-    center = body.shape.bottom_root + body.shape.root_from_obj[:3, :3] @ body.shape.center_obj
+    p = record.primitive
+    center = p.root_from_obj[0, :3, 3] + p.root_from_obj[0, :3, :3] @ p.centroid_obj()[0]
     return EntityCfg(
-        spec_fn=lambda: object_spec(body),
+        spec_fn=lambda: object_spec(record),
         init_state=EntityCfg.InitialStateCfg(pos=tuple(float(v) for v in center)),
     )
 
@@ -138,30 +141,28 @@ def write_bodies(
     rows: "torch.Tensor",
     mass_scale: "torch.Tensor | None" = None,
     entity: str = ENTITY,
+    shape: str = "cylinder",
 ) -> None:
-    """The object in each world of `env_ids` made the body of its row (`RigidBody.vector`: radius, height, mass).
+    """The object in each world of `env_ids` made the object of its row (`ObjectRecord.vectors`: radius, height, mass).
 
-    Its geom's size (radius, half height), its bounds (`Cylinder.bounding_radius`, `half_extents`, batched), its body's
-    mass (times `mass_scale`, if given) and a solid cylinder's inertia (`Cylinder.solid_inertia`, batched). The fields
-    must be per world (`sized_declaration`); mjlab recomputes the constants after.
+    The geometry is the primitive's own, batched on the rows' device (`ObjectRecord.from_vectors`: `bounding_radius`,
+    `half_extents`, `inertia_per_kg`); written as MuJoCo keeps it: the geom's size (a cylinder's: radius, half height),
+    its bounding sphere and box (`geom_rbound`, `geom_aabb`'s half sizes), the body's mass (times `mass_scale`, if
+    given) and its inertia (the mass times the inertia per kilogram). The fields must be per world
+    (`sized_declaration`); mjlab recomputes the constants after.
     """
-    import torch
-
     m = env.sim.model
     body, geom = object_ids(env, entity)
-    r, h, mass = rows[:, 0], rows[:, 1], rows[:, 2]
+    record = ObjectRecord.from_vectors(rows, shape)
+    p, mass = cast("Cylinder", record.primitive), record.mass_kg  # (this module's object: a cylinder)
     if mass_scale is not None:
         mass = mass * mass_scale
-    half = h / 2
-    m.geom_size[env_ids, geom, 0] = r.to(m.geom_size.dtype)
-    m.geom_size[env_ids, geom, 1] = half.to(m.geom_size.dtype)
-    m.geom_rbound[env_ids, geom] = torch.sqrt(r * r + half * half).to(m.geom_rbound.dtype)
-    m.geom_aabb[env_ids, geom, 1] = torch.stack([r, r, half], dim=1).to(m.geom_aabb.dtype)
+    m.geom_size[env_ids, geom, 0] = p.radius.to(m.geom_size.dtype)  # (MuJoCo's cylinder: radius, half height)
+    m.geom_size[env_ids, geom, 1] = (p.height / 2).to(m.geom_size.dtype)
+    m.geom_rbound[env_ids, geom] = p.bounding_radius().to(m.geom_rbound.dtype)
+    m.geom_aabb[env_ids, geom, 1] = p.half_extents().to(m.geom_aabb.dtype)
     m.body_mass[env_ids, body] = mass.to(m.body_mass.dtype)
-    side = mass * (3 * r * r + h * h) / 12
-    m.body_inertia[env_ids, body] = torch.stack([side, side, mass * r * r / 2], dim=1).to(
-        m.body_inertia.dtype
-    )
+    m.body_inertia[env_ids, body] = (mass[:, None] * p.inertia_per_kg()).to(m.body_inertia.dtype)
 
 
 # ---- observations ---------------------------------------------------------------------------------------------------

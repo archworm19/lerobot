@@ -27,7 +27,7 @@ import numpy as np
 
 from lerobot.felix_jr.calibration.joint_sim import REST
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
-from lerobot.felix_jr.harness.primitives import RigidBody
+from lerobot.felix_jr.harness.primitives import ObjectRecord
 from lerobot.utils.import_utils import require_package
 
 from . import robot, scene as sc
@@ -137,7 +137,7 @@ def table_spec(model: XleRobotModel, arm: str, table_z: float) -> "mujoco.MjSpec
 def env_cfg(
     model: XleRobotModel,
     arm: str = "right",
-    body: RigidBody | None = None,
+    body: ObjectRecord | None = None,
     table_z: float = sc.TABLE_Z,
     start: Mapping[str, float] | None = None,
     num_envs: int = 1,
@@ -153,7 +153,8 @@ def env_cfg(
 
     `start_pool` (a `start_pool.StartPool` file): each reset draws a start from it instead (a pool by `pool_weights`,
     default `POOL_WEIGHTS`), the object and the table the pool's; `body`, `table_z`, `start`, `object_sigma_m` unused.
-    `body`: the object, standing where it stands (`harness.primitives.RigidBody`; default `mjlab_object.default_body`).
+    `body`: the object, standing where it stands (`harness.primitives.ObjectRecord`; default
+    `mjlab_object.default_object`).
 
     `give_scale`: mjlab's correction to the fingers' give (`MJLAB_GIVE_SCALE`); 1.0 for the CPU simulator's model as is
     (`model_differences` then finds none). The task's action, observations, rewards and terminations: `mjlab_task`;
@@ -183,10 +184,10 @@ def env_cfg(
         sized = pool.sizes_vary  # (the object resized per world at each reset: `pool_reset.PoolReset`)
         table_z = pool.table_z
         # the object the environment is built with: the first start's (where it stands: each start's own state)
-        body = RigidBody.from_vector(pool.objects[0], pool.shape, np.array([-0.35, 0.13, table_z]))
+        body = pool.record(0).placed_upright(np.array([-0.35, 0.13, table_z]))
     else:
         sized = False
-    body = body or obj.default_body(table_z)
+    body = body or obj.default_object(table_z)
     start = start or {**REST, "gripper.pos": 30.0}
     entities = {
         "robot": EntityCfg(
@@ -662,12 +663,12 @@ def set_world_physics(
 
 
 def cpu_model(
-    model: XleRobotModel, arm: str = "right", body: RigidBody | None = None, table_z: float = sc.TABLE_Z
+    model: XleRobotModel, arm: str = "right", body: ObjectRecord | None = None, table_z: float = sc.TABLE_Z
 ) -> "mujoco.MjModel":
-    """The CPU simulator's compiled model of the same scene (`scene.build`; default `mjlab_object.default_body`)."""
-    from .mjlab_object import default_body
+    """The CPU simulator's compiled model of the same scene (`scene.build`; default `mjlab_object.default_object`)."""
+    from .mjlab_object import default_object
 
-    return sc.build(model, arm, [sc.from_body(body or default_body(table_z))], table_z=table_z).m
+    return sc.build(model, arm, [sc.from_record(body or default_object(table_z))], table_z=table_z).m
 
 
 def make_env(cfg: "ManagerBasedRlEnvCfg", device: str = "cpu") -> "ManagerBasedRlEnv":

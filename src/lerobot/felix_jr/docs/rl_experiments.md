@@ -252,9 +252,11 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
   **`multi1`** (1,024 placements, 40-60 x 100-200 mm, 40-120 g, up to 4 grasps each): 931 anchored; the unanchored
   are short objects close in (under ~260 mm ahead, mostly 100-133 mm tall, worst wide and short). Pools (random split,
   15 %): `multi1_train` 16,384 starts from 2,382 grasps on 791 placements, `multi1_test` 4,096 from 459 on 140.
-  **The object's responsibilities gathered (2026-11-22):** what it *is* in `harness/primitives.py` (`Cylinder`'s
-  shape parameters, bounds and solid inertia; `RigidBody`, a primitive with a mass, and its record, which the bank's
-  placements and the pools' rows both go through: pool format 3 names the shape and its columns); how it lives in mjlab
+  **The object's responsibilities gathered (2026-11-22):** what it *is* in `harness/primitives.py`: a `Primitive` is
+  geometry, batched (N objects: parameters and poses; centroid, volume, bounds, inertia per kg, surface distance), the
+  same code on numpy (planning) and torch (mjlab, on the GPU; `array-api-compat`); a `GraspFamily` is planning's grasps
+  of one object; an `ObjectRecord` is primitives with masses, written down (the bank's placements and the pools' rows
+  both go through it: pool format 3 names the shape and its columns); how it lives in mjlab
   in `sim2real/mjlab_object.py` (construction: `entity_cfg`; reset: `sized_declaration`, `write_bodies`;
   observations; the task geometry the rewards are built from). `mjlab_task` keeps what knows the task and the robot;
   `PoolReset` draws starts and writes state. A second shape: those two modules and the bank's grasp planning.

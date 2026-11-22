@@ -1,6 +1,6 @@
 """A grasp refined in the simulator: robust samples around it, the first that holds taken (`docs/sim_harness.md`).
 
-The grasp is parameterized in the object's terms: its primitive's family (`Primitive.grasp_space`, `grasp_at`: a
+The grasp is parameterized in the object's terms: its primitive's grasp family (`GraspFamily.grasp_space`, `grasp_at`: a
 cylinder's `t`, `phi`, `psi`) and the gripper's own, `depth` (the object's center back from the fingertips:
 `GraspSettings.depth`) and `offset` (the grasp's center moved along its closing line, m). Each sample runs the
 harness's own chain (`grasping._evaluate_target`: the filters and the IK, the wrist camera's clearance at the attack
@@ -50,7 +50,7 @@ from lerobot.felix_jr.harness.grasping import (
     plan_pick,
 )
 from lerobot.felix_jr.harness.objects import Execution
-from lerobot.felix_jr.harness.primitives import GraspParameter, Primitive
+from lerobot.felix_jr.harness.primitives import GraspParameter, Primitive, grasp_family
 from lerobot.felix_jr.harness.reach import select_poses
 
 from .finger_models import settings as physics
@@ -120,6 +120,12 @@ class RefinedPlan:
         )
 
 
+
+def _radius(primitive: Primitive, default: float) -> float:
+    """The (one) object's radius if its shape has one (a cylinder's), else `default` (m)."""
+    radius = getattr(primitive, "radius", None)
+    return default if radius is None else float(radius[0])
+
 def _show(name: str, value: float) -> str:
     return f"{1000 * value:.1f} mm" if name in ("t", "depth", "offset") else f"{value:.1f} deg"
 
@@ -143,8 +149,8 @@ def space(
     primitive: Primitive, where: Mapping[str, tuple[float, float]] | None = None
 ) -> dict[str, GraspParameter]:
     """The parameters searched: the primitive's family's, then the gripper's `depth` and `offset`."""
-    out = dict(primitive.grasp_space(where))
-    radius = float(getattr(primitive, "radius", 0.02))
+    out = dict(grasp_family(primitive).grasp_space(where))
+    radius = _radius(primitive, 0.02)
     out["depth"] = GraspParameter("depth", 0.0, radius + DEPTH_PAST_RADIUS_M, unit="m")
     out["offset"] = GraspParameter("offset", -radius / 2, radius / 2, unit="m")
     return out
@@ -180,7 +186,7 @@ def plan_for(
     plane at the object's lower end).
     """
     family = {k: v for k, v in params.items() if k not in ("depth", "offset")}
-    grasp = primitive.grasp_at(family)
+    grasp = grasp_family(primitive).grasp_at(family)
     grasp = replace(grasp, center_root=grasp.center_root + params.get("offset", 0.0) * grasp.closing_root)
     settings = replace(grasp_settings, depth=float(params.get("depth", grasp_settings.depth)))
     if capture is None:
@@ -258,7 +264,7 @@ def outcome(
     start_xyz = shadow.object_position()
     pushed, past, touching = 0.0, float("nan"), 0
     contact = model.gripper_pos_for(
-        arm, model.opening_for_width(arm, 2 * float(getattr(primitive, "radius", 0.0)))
+        arm, model.opening_for_width(arm, 2 * _radius(primitive, 0.0))
     )
     for move in execution.moves:
         closing = "gripper close" in move.label

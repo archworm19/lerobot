@@ -62,7 +62,7 @@ import numpy as np
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 
 from .objects import Capture, Object, Poses, angles_of
-from .primitives import AntipodalGrasp, HorizontalPlane, Primitive, Ranges, Spacing, Surface
+from .primitives import AntipodalGrasp, HorizontalPlane, Primitive, Ranges, Spacing, Surface, grasp_family
 from .reach import OPEN_CLEARANCE_M, POSITION_TOL_M, ROLL_TOL_DEG, ArmIK, FrameSolution, close_gripper_pos
 
 SAG_LIFT_M = 0.01  # grasps aimed this much higher than the object (`GraspSettings.sag_lift`)
@@ -682,7 +682,11 @@ def _evaluate(
         + float(np.sum((np.asarray(s.rotation_error_deg) / np.asarray(ROTATION_SCALES_DEG)) ** 2))
         for s in (at_attack, at_grasp)
     )
-    preference = 0.0 if primitive is None else primitive.approach_preference(at_grasp.root_from_pinch[:3, 2])
+    preference = (
+        0.0
+        if primitive is None
+        else grasp_family(primitive).approach_preference(at_grasp.root_from_pinch[:3, 2])
+    )
     return GraspCandidate(
         "",
         claw,
@@ -764,8 +768,8 @@ def _ranked(passed: Sequence[GraspCandidate], n: int) -> tuple[GraspCandidate, .
 
 def _default_obstacles(primitive: Primitive) -> list[Surface]:
     """What a target standing on the table keeps clear of when none are given: a level plane at its lower end."""
-    if hasattr(primitive, "bottom_root") and hasattr(primitive, "top_root"):
-        return [HorizontalPlane(float(min(primitive.bottom_root[2], primitive.top_root[2])))]
+    if hasattr(primitive, "bottom_root") and hasattr(primitive, "top_root"):  # (a batch of one)
+        return [HorizontalPlane(float(min(primitive.bottom_root[0, 2], primitive.top_root[0, 2])))]
     return []
 
 
@@ -877,7 +881,7 @@ def first_feasible(
     """
     settings = GraspSettings() if settings is None else settings
     primitive = target.part(part) if isinstance(target, Object) else target
-    grasps = primitive.antipodal_grasps(where, spacing)
+    grasps = grasp_family(primitive).antipodal_grasps(where, spacing)
     obstacles = tuple(_default_obstacles(primitive) if obstacles is None else obstacles)
     at = [settings.depth] if depths is None else [float(d) for d in depths]
     targets = [(arm, k, side, d) for arm in arms for k in range(len(grasps)) for side in (0, 1) for d in at]
@@ -922,7 +926,7 @@ def grasp_candidates(
     """
     settings = GraspSettings() if settings is None else settings
     primitive = target.part(part) if isinstance(target, Object) else target
-    grasps = primitive.antipodal_grasps(where, spacing)
+    grasps = grasp_family(primitive).antipodal_grasps(where, spacing)
     obstacles = _default_obstacles(primitive) if obstacles is None else obstacles
     rejected: list[Rejected] = []
     passed: list[GraspCandidate] = []

@@ -45,7 +45,7 @@ def render(shapes: list[Cylinder], eye: np.ndarray, target: np.ndarray, seed: in
         points = eye + t[:, None] * rays
         distance = points[:, 2] - TABLE_Z
         for shape in shapes:
-            distance = np.minimum(distance, shape.surface_distance(points))
+            distance = np.minimum(distance, shape.surface_distance(points)[0])
         t += np.where(distance > 1e-5, distance, 0.0)  # a ray on a surface stays there
     points = eye + t[:, None] * rays
     z_cam = (points - eye) @ pose[:3, 2]
@@ -66,23 +66,23 @@ def pixels(capture: Capture, points_root: np.ndarray) -> np.ndarray:
 
 def marks_around(capture: Capture, cylinder: Cylinder, pad: float = 0.015) -> np.ndarray:
     """Marks a little outside an upright cylinder, around it: the region takes in some table, as a person's would."""
-    b, top = cylinder.bottom_root, cylinder.top_root
-    r = cylinder.radius + pad
+    b, top = cylinder.bottom_root[0], cylinder.top_root[0]
+    r = cylinder.radius[0] + pad
     ring = [np.array([np.cos(a), np.sin(a), 0.0]) * r for a in np.radians(np.arange(0, 360, 45))]
     return pixels(capture, np.array([b + d for d in ring] + [top + d for d in ring]))
 
 
 def test_an_upright_jar_among_the_table():
-    capture = render([JAR], EYE, JAR.bottom_root)
+    capture = render([JAR], EYE, JAR.bottom_root[0])
     jar = fit_cylinder(full_view(capture), marks_around(capture, JAR), "up", "jar").part()
-    np.testing.assert_allclose(jar.bottom_root[:2], JAR.bottom_root[:2], atol=0.003)
-    assert jar.radius == pytest.approx(JAR.radius, abs=0.002)
-    assert jar.top_root[2] == pytest.approx(JAR.top_root[2], abs=0.003)  # the lid counts
-    assert abs(jar.axis_root[2]) == pytest.approx(1.0)
+    np.testing.assert_allclose(jar.bottom_root[0, :2], JAR.bottom_root[0, :2], atol=0.003)
+    assert jar.radius[0] == pytest.approx(JAR.radius[0], abs=0.002)
+    assert jar.top_root[0, 2] == pytest.approx(JAR.top_root[0, 2], abs=0.003)  # the lid counts
+    assert abs(jar.axis_root[0, 2]) == pytest.approx(1.0)
 
 
 def test_the_note_says_what_it_fitted():
-    capture = render([JAR], EYE, JAR.bottom_root)
+    capture = render([JAR], EYE, JAR.bottom_root[0])
     obj = fit_cylinder(full_view(capture), marks_around(capture, JAR), "up", "jar")
     assert obj.label == "jar" and obj.capture is capture
     assert "fitted to" in obj.note and "residual" in obj.note and "deg of it" in obj.note
@@ -90,26 +90,26 @@ def test_the_note_says_what_it_fitted():
 
 
 def test_a_view_from_straight_above_is_refused():
-    above = render([JAR], JAR.top_root + np.array([0.001, 0.0, 0.40]), JAR.bottom_root)
+    above = render([JAR], JAR.top_root[0] + np.array([0.001, 0.0, 0.40]), JAR.bottom_root[0])
     with pytest.raises(ValueError, match="does not show the object's side"):
         fit_cylinder(full_view(above), marks_around(above, JAR), "up", "jar")
 
 
 def test_a_leaning_pen_with_its_radius_given():
-    capture = render([PEN], EYE, PEN.bottom_root)
-    along = PEN.bottom_root + np.linspace(0.02, 0.08, 6)[:, None] * PEN.axis_root
+    capture = render([PEN], EYE, PEN.bottom_root[0])
+    along = PEN.bottom_root[0] + np.linspace(0.02, 0.08, 6)[:, None] * PEN.axis_root[0]
     pen = fit_cylinder(full_view(capture), pixels(capture, along), "free", "pen", radius=0.0045).part()
-    assert pen.radius == 0.0045
-    angle = np.degrees(np.arccos(min(abs(float(pen.axis_root @ PEN.axis_root)), 1.0)))
+    assert pen.radius[0] == 0.0045
+    angle = np.degrees(np.arccos(min(abs(float(pen.axis_root[0] @ PEN.axis_root[0])), 1.0)))
     assert angle < 3.0
-    middle = PEN.bottom_root + 0.05 * PEN.axis_root
-    rel = middle - pen.bottom_root
-    assert np.linalg.norm(rel - (rel @ pen.axis_root) * pen.axis_root) < 0.003
-    assert pen.top_root[2] > pen.bottom_root[2]  # oriented up
+    middle = PEN.bottom_root[0] + 0.05 * PEN.axis_root[0]
+    rel = middle - pen.bottom_root[0]
+    assert np.linalg.norm(rel - (rel @ pen.axis_root[0]) * pen.axis_root[0]) < 0.003
+    assert pen.top_root[0, 2] > pen.bottom_root[0, 2]  # oriented up
 
 
 def test_too_few_marks_with_depth():
-    capture = render([JAR], EYE, JAR.bottom_root)
+    capture = render([JAR], EYE, JAR.bottom_root[0])
     far = np.array([[1.0, 1.0]])  # one mark: a few pixels
     with pytest.raises(ValueError, match="only"):
         fit_cylinder(full_view(capture), far, "up", "jar", pad_px=1)

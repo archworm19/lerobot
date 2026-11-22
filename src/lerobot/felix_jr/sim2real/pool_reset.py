@@ -106,7 +106,7 @@ class PoolReset:
         if self.sized:
             lo, hi = np.log(mass_range[0]), np.log(mass_range[1])
             scale = torch.exp(lo + (hi - lo) * torch.rand(len(env_ids), device=rows.device))
-            obj.write_bodies(env, env_ids, self.objects[rows], scale, self.object_entity)
+            obj.write_bodies(env, env_ids, self.objects[rows], scale, self.object_entity, self.pool.shape)
             self.size_error[env_ids] = size_error_m * torch.randn(len(env_ids), 2, device=rows.device)
 
     def _draw(self, n: int) -> "torch.Tensor":

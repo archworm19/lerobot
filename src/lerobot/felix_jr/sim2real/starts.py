@@ -36,12 +36,12 @@ import cv2
 import numpy as np
 
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, arm_joint, pinch_frame
-from lerobot.felix_jr.harness.primitives import RigidBody
+from lerobot.felix_jr.harness.primitives import ObjectRecord
 from lerobot.felix_jr.harness.reach import close_gripper_pos
 from lerobot.utils.import_utils import _mujoco_available, require_package
 
 from . import bank, robot
-from .scene import Scene, build, from_body
+from .scene import Scene, build, from_record
 
 if _mujoco_available:
     import mujoco
@@ -152,12 +152,12 @@ class StartSampler:
     def scene(self, index: int) -> Scene:
         """Anchor `index`'s scene: its object where it stood, the arm at zero."""
         line = self.anchors[index]
-        body = RigidBody.from_record(line["placement"])
+        body = ObjectRecord.from_record(line["placement"])
         return build(
             self.model,
             self.bank_config.arm,
-            [from_body(body)],
-            table_z=float(body.shape.bottom_root[2]),
+            [from_record(body)],
+            table_z=float(body.primitive.root_from_obj[0, 2, 3]),  # (where it stands: its frame's origin)
             finger_model=self.bank_config.finger_model,
         )
 
@@ -337,8 +337,8 @@ class _Run:
 
     def off_table_cm(self) -> float:
         """How far the object's center is above where it stands (cm)."""
-        shape = RigidBody.from_record(self.placement).shape
-        resting = float(shape.bottom_root[2]) + float(shape.center_obj[2])
+        shape = ObjectRecord.from_record(self.placement).primitive
+        resting = float(shape.root_from_obj[0, 2, 3]) + float(shape.centroid_obj()[0, 2])
         return 100 * (float(self.scene.d.xpos[self.body][2]) - resting)
 
     def frame(self, phase: str) -> np.ndarray:
@@ -398,10 +398,10 @@ def _play(runs: Sequence[_Run], script: Sequence[str], writer: "cv2.VideoWriter"
 
 
 def _describe(line: Mapping[str, Any]) -> str:
-    body, a = RigidBody.from_record(line["placement"]), line["anchor"]
-    params = body.shape.shape_params()
+    body, a = ObjectRecord.from_record(line["placement"]), line["anchor"]
+    params = dict(zip(body.primitive.PARAMS, (float(v) for v in body.primitive.params[0]), strict=True))
     return (
-        f"{2000 * params['radius']:.0f} mm x {1000 * params['height']:.0f} mm, {1000 * body.mass_kg:.0f} g, "
+        f"{2000 * params['radius']:.0f} mm x {1000 * params['height']:.0f} mm, {1000 * float(body.mass_kg[0]):.0f} g, "
         f"depth {1000 * a['depth']:.0f} mm"
     )
 

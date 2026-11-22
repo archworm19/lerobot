@@ -30,7 +30,7 @@ from lerobot.utils.import_utils import _mujoco_available, require_package
 
 from . import robot
 from .finger_models import settings
-from .scene import Cylinder, build
+from .scene import build, from_primitive
 
 if _mujoco_available:
     import mujoco
@@ -101,19 +101,11 @@ def simulate_grasp(
     `snapshots`: the state kept at each of `SNAPSHOTS` (`GraspTrial.states`).
     """
     require_package("mujoco", extra="felix_jr_sim")
-    if abs(float(target.axis_root[2])) < 0.99:
+    if abs(float(target.axis_root[0, 2])) < 0.99:  # (the target: a batch of one)
         raise NotImplementedError("only upright cylinders are simulated so far")
     claw, arm = candidate.claw, candidate.claw.arm
-    bottom = target.bottom_root if target.axis_root[2] > 0 else target.top_root
     width = claw.grasp.opening
-    obj = Cylinder(
-        "object",
-        float(bottom[0]),
-        float(bottom[1]),
-        target.radius,
-        target.length,
-        mass_kg * draw.get("mass_scale", 1.0),
-    )
+    obj = from_primitive(target, mass=mass_kg * draw.get("mass_scale", 1.0))
     with settings({k: v for k, v in draw.items() if k.isupper()}):
         scene = build(model, arm, [obj], table_z=table_z, finger_model=finger_model)
     m, d = scene.m, scene.d
@@ -181,8 +173,7 @@ def start_overlap(
     """
     require_package("mujoco", extra="felix_jr_sim")
     claw, arm = candidate.claw, candidate.claw.arm
-    bottom = target.bottom_root if target.axis_root[2] > 0 else target.top_root
-    obj = Cylinder("object", float(bottom[0]), float(bottom[1]), target.radius, target.length)
+    obj = from_primitive(target)
     scene = build(model, arm, [obj], table_z=table_z)
     apart = min(claw.open_apart, 2 * model.jaw_radius(arm))
     open_pos = model.gripper_pos_for(arm, model.opening_for_width(arm, apart))

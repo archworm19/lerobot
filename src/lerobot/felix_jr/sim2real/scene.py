@@ -21,7 +21,7 @@ if TYPE_CHECKING or _mujoco_available:
     import mujoco
 
 if TYPE_CHECKING:
-    from lerobot.felix_jr.harness.primitives import Primitive, RigidBody
+    from lerobot.felix_jr.harness.primitives import ObjectRecord, Primitive
 
 TABLE_Z = 0.747  # the table's top in the root frame (ruler2's head estimate)
 TABLE_NEAR_M = 0.06  # the table's near edge this far ahead of the arm's base
@@ -68,25 +68,27 @@ def from_primitive(
 
     if not isinstance(primitive, CylinderPrimitive):
         raise NotImplementedError(f"no simulator object for a {type(primitive).__name__} yet")
-    if abs(float(primitive.axis_root[2])) < 0.99:
+    if len(primitive) != 1:
+        raise ValueError(f"one object at a time: got {len(primitive)}")
+    axis = primitive.axis_root[0]
+    if abs(float(axis[2])) < 0.99:
         raise NotImplementedError("only upright cylinders stand in the simulator so far")
-    bottom = primitive.bottom_root if primitive.axis_root[2] > 0 else primitive.top_root
-    height = primitive.length
+    bottom = primitive.bottom_root[0] if axis[2] > 0 else primitive.top_root[0]
+    length = float(primitive.length[0])
+    height = length
     if table_z is not None:
-        height = float(bottom[2]) + primitive.length - table_z
+        height = float(bottom[2]) + length - table_z
         if height <= 0:
-            raise ValueError(
-                f"the object's top ({float(bottom[2]) + primitive.length:.3f} m) is under the table"
-            )
-    return Cylinder(name, float(bottom[0]), float(bottom[1]), primitive.radius, height, mass)
+            raise ValueError(f"the object's top ({float(bottom[2]) + length:.3f} m) is under the table")
+    return Cylinder(name, float(bottom[0]), float(bottom[1]), float(primitive.radius[0]), height, mass)
 
 
-def from_body(body: "RigidBody", name: str = "object") -> Cylinder:
-    """The simulator's object for a rigid body (`harness.primitives.RigidBody`), standing where it stands.
+def from_record(record: "ObjectRecord", name: str = "object") -> Cylinder:
+    """The simulator's object for an object record (`harness.primitives.ObjectRecord`, one object).
 
-    A bank's placement, a pool's start: its mass the body's.
+    Standing where it stands (a bank's placement, a pool's start); its mass the record's.
     """
-    return from_primitive(body.shape, name, body.mass_kg)
+    return from_primitive(record.primitive, name, float(record.mass_kg[0]))
 
 
 @dataclass

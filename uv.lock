@@ -325,6 +325,15 @@ wheels = [
 ]
 
 [[package]]
+name = "array-api-compat"
+version = "1.16.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/da/88/d7b0f89b1ad0f42ef94b8440fff87b7c0b69701b3c30a5b160fdbc850f25/array_api_compat-1.16.0.tar.gz", hash = "sha256:c8117cb4d6c7aacaec38c2705f72509e342c20b1a716a04cb5397a611f122d51", size = 134991, upload-time = "2026-10-25T18:37:17.582Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d0/09/cab56a48b7e83609831c96f36658f9e30421877875071f2413eb591cf756/array_api_compat-1.16.0-py3-none-any.whl", hash = "sha256:0464934d7d5f1e9b728b2e248da52400630b1fcb46b70073eab3c7ae084290aa", size = 81744, upload-time = "2026-10-25T18:37:15.934Z" },
+]
+
+[[package]]
 name = "arrow"
 version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3611,6 +3620,7 @@ feetech = [
 ]
 felix-jr = [
     { name = "addict" },
+    { name = "array-api-compat" },
     { name = "cmeel-tinyxml2" },
     { name = "cmeel-urdfdom" },
     { name = "contourpy" },
@@ -3627,6 +3637,7 @@ felix-jr-gpu = [
 ]
 felix-jr-sim = [
     { name = "addict" },
+    { name = "array-api-compat" },
     { name = "cmeel-tinyxml2" },
     { name = "cmeel-urdfdom" },
     { name = "contourpy" },
@@ -3931,6 +3942,7 @@ xvla = [
 requires-dist = [
     { name = "accelerate", marker = "extra == 'accelerate-dep'", specifier = ">=1.14.0,<2.0.0" },
     { name = "addict", marker = "extra == 'depth-anything-dep'", specifier = ">=2.4.0,<3.0.0" },
+    { name = "array-api-compat", marker = "extra == 'felix-jr'", specifier = ">=1.14,<2" },
     { name = "av", marker = "extra == 'av-dep'", specifier = ">=15.0.0,<16.0.0" },
     { name = "cmake", specifier = ">=3.29.0.1,<4.2.0" },
     { name = "cmeel-tinyxml2", marker = "extra == 'placo-dep'", specifier = "<11" },

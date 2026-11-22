@@ -146,5 +146,5 @@ def test_the_best_is_planned_and_runs_through_the_execution(model, found):
     aim = pick.points[2] - high
     np.testing.assert_allclose(aim[:2], [-0.348, -0.107], atol=0.01)
     assert (
-        JAR.bottom_root[2] + 0.059 - 1e-6 <= aim[2] <= JAR.bottom_root[2] + 0.079 + 1e-6
+        JAR.bottom_root[0, 2] + 0.059 - 1e-6 <= aim[2] <= JAR.bottom_root[0, 2] + 0.079 + 1e-6
     )  # on the lid, as asked

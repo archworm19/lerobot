@@ -31,7 +31,7 @@ from lerobot.felix_jr.harness.grasping import (  # noqa: E402
     to_claw,
 )
 from lerobot.felix_jr.harness.objects import Object, angles_of  # noqa: E402
-from lerobot.felix_jr.harness.primitives import Cylinder  # noqa: E402
+from lerobot.felix_jr.harness.primitives import Cylinder, grasp_family  # noqa: E402
 from lerobot.felix_jr.harness.reach import select_poses  # noqa: E402
 
 URDF = Path(__file__).parent / "reference" / "pen1_calibration_10312026.urdf"
@@ -44,7 +44,7 @@ def model():
 
 
 def jar_grasp(phi: float, psi: float):
-    (g,) = JAR.antipodal_grasps(where={"t": (0.07, 0.07), "phi": (phi, phi), "psi": (psi, psi)})
+    (g,) = grasp_family(JAR).antipodal_grasps(where={"t": (0.07, 0.07), "phi": (phi, phi), "psi": (psi, psi)})
     return g
 
 
@@ -127,7 +127,7 @@ def test_attack_point_is_back_along_the_approach(model):
 
 def test_refuses_a_grasp_wider_than_the_jaws(model):
     wide = Cylinder.upright(np.array([-0.3, 0.0, 0.714]), 0.05, 0.09)
-    (g,) = wide.antipodal_grasps(where={"t": (0.03, 0.03), "phi": (0.0, 0.0), "psi": (0.0, 0.0)})
+    (g,) = grasp_family(wide).antipodal_grasps(where={"t": (0.03, 0.03), "phi": (0.0, 0.0), "psi": (0.0, 0.0)})
     with pytest.raises(ValueError, match="cannot be"):
         to_claw(g, model, "right", 0)
     with pytest.raises(ValueError, match="fixed_side"):
@@ -285,7 +285,7 @@ def test_plan_pick_runs_through_the_existing_execution(gripped):
     best = found["A"]
     pick = plan_pick(gripped, best, BOWL1_CAPTURE)
     assert pick.labels == ("stage", "pick.back", "pick", "lift") and pick.ok.all()
-    assert pick.width == pytest.approx(JAR.radius * 2) and pick.margin == best.claw.margin
+    assert pick.width == pytest.approx(JAR.radius[0] * 2) and pick.margin == best.claw.margin
     stage, back, at, lift = pick.points
     lifted = best.claw.grasp.center_root + [0.0, 0.0, SAG_LIFT_M]  # aimed high against the arm's sag
     np.testing.assert_allclose(at, lifted, atol=1e-9)  # the aim point on the grasp's center
@@ -329,7 +329,7 @@ def test_the_wrist_camera_is_kept_off_the_table():
     with_camera = XleRobotModel.load(api.MODEL)
     where = {"t": (0.04, 0.07), "psi": (0.0, 45.0)}
     found = grasp_candidates(JAR, with_camera, BOWL1_CAPTURE, arms=("right",), where=where)
-    table_z = JAR.bottom_root[2]
+    table_z = JAR.bottom_root[0, 2]
     assert found.candidates
     for c in found.candidates:
         assert c.camera_clearance_m >= GraspSettings().camera_clearance
@@ -405,7 +405,7 @@ def test_obstacles_are_surfaces_and_each_counts():
         BOWL1_CAPTURE,
         arms=("right",),
         where=where,
-        obstacles=[HorizontalPlane(JAR.bottom_root[2]), in_the_way],
+        obstacles=[HorizontalPlane(JAR.bottom_root[0, 2]), in_the_way],
     )
     assert blocked.passed < plain.passed
     assert all(c.camera_clearance_m >= GraspSettings().camera_clearance for c in blocked.candidates)
@@ -482,7 +482,7 @@ def test_a_grasp_deeper_in_the_jaws_moves_the_claw_on_and_opens_them_wider_where
     from lerobot.felix_jr.harness.grasping import OPEN_CLEARANCE_M, face_clearances
 
     model = XleRobotModel.load(api.MODEL)  # (its gripper map and fingers' frames)
-    grasp = JAR.antipodal_grasps({"psi": (0.0, 1.0), "t": (0.06, 0.061)})[0]
+    grasp = grasp_family(JAR).antipodal_grasps({"psi": (0.0, 1.0), "t": (0.06, 0.061)})[0]
     tips = to_claw(grasp, model, "right", 0, 0.008)
     deep = to_claw(grasp, model, "right", 0, 0.008, depth=0.025)
     assert tips.depth == 0.0 and tips.jaws_fit

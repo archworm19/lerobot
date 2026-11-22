@@ -413,7 +413,7 @@ def fit_cylinder(
             direction = -direction
         t0, t1 = np.percentile((inliers - p0) @ direction, [2, 98])
         cylinder = Cylinder.between(p0 + t0 * direction, p0 + t1 * direction, fitted)
-        frame = cylinder.root_from_obj[:3, :3]
+        frame = cylinder.root_from_obj[0, :3, :3]
         around = (inliers - p0) @ frame[:, :2]
     angles = np.sort(np.degrees(np.arctan2(around[:, 1], around[:, 0])) % 360.0)
     gaps = np.diff(np.r_[angles, angles[0] + 360.0])

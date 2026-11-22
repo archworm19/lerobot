@@ -37,7 +37,7 @@ def model():
 @pytest.fixture
 def setup(model):
     h = api.Harness(policy=api.UNATTENDED, model=model)
-    rendered = render([JAR], EYE, JAR.bottom_root)
+    rendered = render([JAR], EYE, JAR.bottom_root[0])
     capture = Capture(rendered.scene, rendered.x_root_camera, REST, {}, 0.0)
     h.ws.add(capture, "capture")
     view = h.call("full_view", capture)
@@ -47,7 +47,7 @@ def setup(model):
 def test_fit_choose_draw_plan(setup):
     h, capture, view = setup
     jar = h.call("fit_cylinder", view, marks_around(capture, JAR), "up", "jar")
-    assert isinstance(jar, Object) and jar.part().radius == pytest.approx(JAR.radius, abs=0.002)
+    assert isinstance(jar, Object) and jar.part().radius == pytest.approx(JAR.radius[0], abs=0.002)
     found = h.call("grasp_candidates", jar, capture, arms=["right"], where=BOWL1_GRASP)
     assert isinstance(found, GraspCandidates) and found.passed > 0 and found.label == "jar"
     assert found.capture is capture and "settings:" in found.describe()

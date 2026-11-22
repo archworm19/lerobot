@@ -34,14 +34,14 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
-from lerobot.felix_jr.harness.primitives import Cylinder, RigidBody
+from lerobot.felix_jr.harness.primitives import Cylinder, ObjectRecord
 
 if TYPE_CHECKING:
     import mujoco
 
 POOLS = ("attack", "at_object", "in_jaws", "lifted")
 # the pool file's version: 1 one object's size (`object_size`), 2 a size a start (`objects`), 3 the shape named and its
-# columns (`shape`, `object_columns`: `RigidBody.columns`, checked when read); older versions are cylinders, read still
+# columns (`shape`, `object_columns`: `ObjectRecord.columns`, checked when read); older versions are cylinders, read still
 FORMAT = 3
 SPLIT_KEYS = ("random", "ahead", "side", "diameter", "height")
 FREE_JOINT = (
@@ -74,8 +74,8 @@ def _layout(m: "mujoco.MjModel") -> dict[str, Any]:
 class StartPool:
     """Starts, by name: per joint its position (`qpos[name]`, (N, width)) and velocity, per actuator its command.
 
-    And each start's pool and anchor (the bank's), its object (`objects`, a row a start: `RigidBody.vector`, the shape's
-    parameters and the mass, `RigidBody.columns(shape)`; one row given, every start's), the table's height.
+    And each start's pool and anchor (the bank's), its object (`objects`, a row a start: `ObjectRecord.vectors`, the shape's
+    parameters and the mass, `ObjectRecord.columns(shape)`; one row given, every start's), the table's height.
     """
 
     qpos: dict[str, np.ndarray]
@@ -83,7 +83,7 @@ class StartPool:
     ctrl: dict[str, np.ndarray]
     pool: np.ndarray
     anchor: np.ndarray
-    objects: np.ndarray  # (N, k): `RigidBody.vector` rows (a cylinder's: radius, height (m), mass (kg))
+    objects: np.ndarray  # (N, k): `ObjectRecord.vectors` rows (a cylinder's: radius, height (m), mass (kg))
     table_z: float
     placements: np.ndarray | None = (
         None  # the bank's placements drawn from (a split's: `--holdout`), None: all
@@ -103,9 +103,9 @@ class StartPool:
         r, h, m = self.objects[0]
         return float(r), float(h), float(m)
 
-    def body(self, index: int) -> RigidBody:
-        """Start `index`'s object as a rigid body (standing at the origin: where it is, is the start's state)."""
-        return RigidBody.from_vector(self.objects[index], self.shape)
+    def record(self, index: int) -> ObjectRecord:
+        """Start `index`'s object (standing at the origin: where it is, is the start's state)."""
+        return ObjectRecord.from_vectors(self.objects[index : index + 1], self.shape)
 
     def __len__(self) -> int:
         """How many starts."""
@@ -120,7 +120,7 @@ class StartPool:
             path,
             format=np.array(FORMAT),
             shape=np.array(self.shape),
-            object_columns=np.array(RigidBody.columns(self.shape)),
+            object_columns=np.array(ObjectRecord.columns(self.shape)),
             pool=self.pool,
             anchor=self.anchor,
             objects=self.objects,
@@ -144,9 +144,9 @@ class StartPool:
         shape = str(z["shape"]) if "shape" in z.files else Cylinder.SHAPE  # (formats 1, 2: cylinders)
         if "object_columns" in z.files:
             columns = tuple(str(c) for c in z["object_columns"])
-            if columns != RigidBody.columns(shape):
+            if columns != ObjectRecord.columns(shape):
                 raise ValueError(
-                    f"{path}: object columns {columns}, a {shape}'s are {RigidBody.columns(shape)}"
+                    f"{path}: object columns {columns}, a {shape}'s are {ObjectRecord.columns(shape)}"
                 )
         return cls(
             part["qpos"],
@@ -163,7 +163,7 @@ class StartPool:
     def __post_init__(self) -> None:
         """`objects` one row a start (one size given: broadcast to every start); every array one row a start."""
         n = len(self.pool)
-        width = len(RigidBody.columns(self.shape))
+        width = len(ObjectRecord.columns(self.shape))
         self.objects = np.broadcast_to(np.asarray(self.objects, dtype=np.float64), (n, width)).copy()
         lengths = {
             f"{kind}/{name}": len(v)
@@ -218,7 +218,7 @@ def _draw(task: tuple[str, int]) -> dict[str, Any]:
         "qpos": {name: d.qpos[q : q + qw].copy() for name, q, qw, _, _ in lay["joints"]},
         "qvel": {name: d.qvel[v : v + vw].copy() for name, _, _, v, vw in lay["joints"]},
         "ctrl": {name: d.ctrl[a : a + 1].copy() for a, name in enumerate(lay["actuators"])},
-        "object": RigidBody.from_record(line).vector(),
+        "object": ObjectRecord.from_record(line).vectors()[0],
         "table_z": line["bottom_root"][2],
     }
 
@@ -263,9 +263,9 @@ def placement_coordinate(placement: Mapping[str, Any], base_xy: Sequence[float],
 
     Ahead of the arm's base (along the robot's facing, -x), to its side (+y), the object's diameter or height.
     """
-    body = RigidBody.from_record(placement)
-    x, y = body.shape.bottom_root[:2]
-    params = body.shape.shape_params()
+    shape = ObjectRecord.from_record(placement).primitive
+    x, y = (float(v) for v in shape.root_from_obj[0, :2, 3])  # (where it stands: its frame's origin)
+    params = dict(zip(shape.PARAMS, (float(v) for v in shape.params[0]), strict=True))
     if key == "ahead":
         return float(base_xy[0] - x)
     if key == "side":

@@ -216,8 +216,9 @@ reachy2 = [
 # leader (motorbridge-smart-servo / FashionStar UART servos).
 rebot = ["lerobot[motorbridge-dep]", "lerobot[motorbridge-smart-servo-dep]"]
 kinematics = ["lerobot[placo-dep]"]
-# felix_jr camera calibration: pinocchio (via placo) for the kinematics, scipy for the fits, matplotlib for their plots.
-felix_jr = ["lerobot[placo-dep]", "lerobot[scipy-dep]", "lerobot[matplotlib-dep]", "lerobot[kornia-dep]", "lerobot[depth-anything-dep]"]
+# felix_jr camera calibration: pinocchio (via placo) for the kinematics, scipy for the fits, matplotlib for their plots;
+# array-api-compat for the primitives' geometry, one code for numpy and torch arrays (`harness/primitives.py`).
+felix_jr = ["lerobot[placo-dep]", "lerobot[scipy-dep]", "lerobot[matplotlib-dep]", "lerobot[kornia-dep]", "lerobot[depth-anything-dep]", "array-api-compat>=1.14,<2"]
 # felix_jr's simulation (sim-to-real grasping, `felix_jr/sim`): MuJoCo on top of the rest.
 # MuJoCo 3.11: the version mjlab 1.6 (GPU simulation, `docs/sim_deploy.md`) pins; gym-aloha pins <3.9, so the two
 # extras resolve apart (`[tool.uv] conflicts`)

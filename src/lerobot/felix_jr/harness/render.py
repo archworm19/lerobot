@@ -374,18 +374,19 @@ def _draw_object(img: np.ndarray, view: View, obj: Object, layout: "_Layout") ->
     for name, part in obj.parts.items():
         if not isinstance(part, Cylinder):
             continue
-        frame = part.root_from_obj[:3, :3]
+        frame, radius = part.root_from_obj[0, :3, :3], float(part.radius[0])  # (a batch of one)
+        part_top = part.top_root[0]
         angles = np.radians(np.arange(0, 361, 15))
-        ring = part.radius * (np.outer(np.cos(angles), frame[:, 0]) + np.outer(np.sin(angles), frame[:, 1]))
-        bottom, top = part.bottom_root + ring, part.top_root + ring
+        ring = radius * (np.outer(np.cos(angles), frame[:, 0]) + np.outer(np.sin(angles), frame[:, 1]))
+        bottom, top = part.bottom_root[0] + ring, part_top + ring
         _polyline(img, view.project(bottom), OBJECT_COLOR, 2)
         _polyline(img, view.project(top), OBJECT_COLOR, 2)
         for k in range(0, len(angles) - 1, 6):  # four lines along the side
             _polyline(img, view.project(np.array([bottom[k], top[k]])), OBJECT_COLOR, 1)
-        c = view.project(part.top_root)
+        c = view.project(part_top)
         if _inside(img, c):
             text = obj.label if len(obj.parts) == 1 else f"{obj.label} {name}"
-            layout.label(f"{text} ({part.radius * 200:.1f} cm wide)", _pixel(c), gap=13)
+            layout.label(f"{text} ({radius * 200:.1f} cm wide)", _pixel(c), gap=13)
 
 
 def _draw_arm(img: np.ndarray, view: View, path: ArmPath) -> None:

@@ -1,34 +1,62 @@
-"""Shapes an object is made of, and the antipodal grasps each one allows (`docs/object_grasping.md`, section 2).
+"""Shapes an object is made of, the grasps each allows, and how an object is written down.
 
-A primitive is pure geometry with a pose in the root frame (`root_from_obj`, 4x4: the shape's own axes and origin); it
-knows nothing about the robot. Its grasps form a **family** with a few named parameters (a cylinder's `t`, `phi`,
-`psi`), generated on a grid so the same shape always gives the same grasps. A grasp is antipodal: two contacts with
-opposed normals on one closing line. Which contact takes the fixed jaw, how deep the jaws go and whether the arm
-reaches are decided later (`grasping.py`).
+`Primitive`, `GraspFamily` and `ObjectRecord` (`docs/object_grasping.md`, section 2).
 
-`where` narrows a family to ranges of its parameters, `spacing` sets the grid's step per parameter; both are keyed by
-the parameter names the primitive documents (angles in degrees, lengths in meters). A range's ends are always on the
-grid. The family is also continuous: `grasp_space` names its parameters with their ranges, `grasp_at` makes the grasp
-at any values in it (what an optimizer samples: `sim2real.refine`); the grid is `grasp_at` on `_grid`s.
+**A primitive is geometry, batched.** A `Primitive` is N objects of one shape: their parameters (`params`, (N, k):
+a cylinder's radius and height, `PARAMS`) and their poses in the root frame (`root_from_obj`, (N, 4, 4): each shape's
+own axes and origin). One object is a batch of one. Everything it says is a geometric fact, for all N at once: its
+centroid, volume, bounds (`bounding_radius`, `half_extents`), inertia per kilogram (a solid of uniform density), the
+signed distance of points to its surface. It knows nothing about the robot, a simulator, or a mass. The arrays are
+numpy (planning) or torch (the mjlab simulator, on the GPU): the geometry is written once against the Python array
+API standard (`namespace`: numpy itself, or torch through `array_api_compat`), so a batch of thousands of worlds on the
+GPU is computed there, never copied to the host.
+
+**A grasp family is planning's, one object at a time.** A `GraspFamily` (`grasp_family(primitive)`; a cylinder's
+`CylinderGrasps`) is the antipodal grasps one object (a batch of one) allows: a few named parameters (a cylinder's `t`,
+`phi`, `psi`), generated on a grid so the same shape always gives the same grasps, and its preferred way in
+(`approach_preference`). A grasp is antipodal: two contacts with opposed normals on one closing line. Which contact
+takes the fixed jaw, how deep the jaws go and whether the arm reaches are decided later (`grasping.py`). `where`
+narrows a family to ranges of its parameters, `spacing` sets the grid's step per parameter; both are keyed by the
+parameter names the family documents (angles in degrees, lengths in meters). A range's ends are always on the grid. The
+family is also continuous: `grasp_space` names its parameters with their ranges, `grasp_at` makes the grasp at any
+values in it (what an optimizer samples: `sim2real.refine`); the grid is `grasp_at` on `_grid`s.
+
+**An object record is a primitive with a mass, written down.** An `ObjectRecord` is a batch of primitives and each
+one's mass (a primitive has none: a fitted one's is unknown, a simulator's is drawn). Its record (`to_record`,
+`from_record`: the shape's name, its parameters by name, the mass, where it stands) and its rows (`vectors`,
+`from_vectors`: the parameters then the mass) are the one way an object is written down: the grasp bank's placements
+(`sim2real/bank.py`) and the start pools (`sim2real/start_pool.py`) both go through it, so the simulators read the
+object the bank planned on.
 
 Names say their frame (`docs/object_grasping.md`, "Frames and names"): `root_from_obj` maps the object frame to the root
 frame, `center_root` is a point in the root frame.
-
-A primitive also says what it is, in numbers anything else can use: its shape's name (`SHAPE`) and parameters
-(`shape_params`, e.g. a cylinder's radius and height), its bounds (`bounding_radius`, `half_extents`) and a solid's
-inertia for a mass (`solid_inertia`). A `RigidBody` is a primitive with a mass, and its record (`to_record`,
-`from_record`) is the one way it is written down: the grasp bank's placements (`sim2real/bank.py`) and the start pools
-(`sim2real/start_pool.py`) both go through it, so the simulators read the object the bank planned on.
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, ClassVar, Protocol
 
 import numpy as np
 
 Ranges = Mapping[str, tuple[float, float]]
 Spacing = Mapping[str, float]
+Array = Any  # a numpy array or a torch tensor (the array API standard's)
+
+
+def namespace(*arrays: Array) -> Any:
+    """The array API namespace of `arrays`.
+
+    numpy for numpy arrays (numpy 2 is the standard's), else `array_api_compat`'s (torch's, under the standard's names:
+    `stack(..., axis=)`, ...).
+    """
+    if all(isinstance(a, np.ndarray | np.generic | float | int) for a in arrays):
+        return np
+    from lerobot.utils.import_utils import require_package
+
+    require_package("array-api-compat", extra="felix_jr", import_name="array_api_compat")
+    from array_api_compat import array_namespace
+
+    return array_namespace(*arrays)
 
 
 @dataclass(frozen=True)
@@ -111,7 +139,10 @@ class Surface(Protocol):
     """Something in the scene to keep clear of: its signed distance from points (`grasp_candidates`' obstacles)."""
 
     def surface_distance(self, points_root: np.ndarray) -> np.ndarray:
-        """Signed distance (m) of each point (N, 3) to the surface: negative inside (or below)."""
+        """Signed distance (m) of each point (M, 3) to the surface: negative inside (or below).
+
+        (M,), or (N, M) for a batch of N (`Primitive`: each object's).
+        """
         ...
 
     def describe(self) -> str:
@@ -120,11 +151,264 @@ class Surface(Protocol):
 
 
 class Primitive(Surface, Protocol):
-    """A shape with a pose in the root frame that generates its own antipodal grasps: a `Surface` to grasp."""
+    """N objects of one shape: parameters (N, k) and poses (N, 4, 4), numpy or torch; geometry only.
+
+    Every method answers for all N at once, in the arrays' own library and device (the module docstring).
+    """
+
+    SHAPE: ClassVar[str]  # the shape's name (a record's `"shape"`)
+    PARAMS: ClassVar[tuple[str, ...]]  # its parameters' names, `params`' columns
 
     @property
-    def root_from_obj(self) -> np.ndarray:
-        """(4, 4): the shape's own axes and origin in the root frame."""
+    def params(self) -> Array:
+        """(N, k): each object's parameters (`PARAMS`, m)."""
+        ...
+
+    @property
+    def root_from_obj(self) -> Array:
+        """(N, 4, 4): each object's own axes and origin in the root frame."""
+        ...
+
+    @classmethod
+    def from_params(cls, params: Array, root_from_obj: Array | None = None) -> "Primitive":
+        """`params` (N, k), at `root_from_obj` (N, 4, 4; default each at the origin)."""
+        ...
+
+    def __len__(self) -> int:
+        """How many objects (N)."""
+        ...
+
+    def __getitem__(self, index: Any) -> "Primitive":
+        """The objects at `index` as a batch (an integer: a batch of one)."""
+        ...
+
+    def centroid_obj(self) -> Array:
+        """(N, 3): each object's centroid (a solid's center of mass), object frame."""
+        ...
+
+    def volume(self) -> Array:
+        """(N,): each object's volume (m^3)."""
+        ...
+
+    def bounding_radius(self) -> Array:
+        """(N,): the smallest sphere about the centroid that holds each object (m)."""
+        ...
+
+    def half_extents(self) -> Array:
+        """(N, 3): the half sizes of the box about the centroid that holds each object, object frame (m)."""
+        ...
+
+    def inertia_per_kg(self) -> Array:
+        """(N, 3): a uniform solid's principal moments of inertia per kilogram (m^2): times a mass, its inertia.
+
+        About its centroid, along the object frame's axes.
+        """
+        ...
+
+
+@dataclass(frozen=True)
+class HorizontalPlane:
+    """A level plane at height `z` (root frame), e.g. a table measured another way than its `TableEstimate`."""
+
+    z: float
+    label: str = "the table"
+
+    def surface_distance(self, points_root: np.ndarray) -> np.ndarray:
+        """Each point's height above the plane (m): negative below it."""
+        return np.atleast_2d(np.asarray(points_root, dtype=np.float64))[:, 2] - self.z
+
+    def describe(self) -> str:
+        """The plane's height."""
+        return f"{self.label}: level, at z = {100 * self.z:.1f} cm"
+
+
+# ---- the cylinder ---------------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, eq=False)
+class Cylinder:
+    """N solid cylinders, each along its object frame's z.
+
+    Each axis runs from the origin (the "bottom" end: on the table for an upright object) to `height` along it (end to
+    end; a lying cylinder's length, `length`). `params` (N, 2): radius, height (m); `root_from_obj` (N, 4, 4). One cylinder is a batch of one: `upright` and
+    `between` make one from a point and sizes (or N from arrays of them). Its grasps: `CylinderGrasps`.
+    """
+
+    params: Array  # (N, 2): radius, height
+    root_from_obj: Array  # (N, 4, 4)
+
+    SHAPE: ClassVar[str] = "cylinder"
+    PARAMS: ClassVar[tuple[str, ...]] = ("radius", "height")
+
+    def __post_init__(self) -> None:
+        """Refuse shapes that are not batches, frames that are not rigid transforms, sizes that are not positive."""
+        xp = namespace(self.params, self.root_from_obj)
+        if self.params.ndim != 2 or self.params.shape[1] != 2:
+            raise ValueError(f"params must be (N, 2): radius, height; got {tuple(self.params.shape)}")
+        if self.root_from_obj.shape != (self.params.shape[0], 4, 4):
+            raise ValueError(
+                f"root_from_obj must be ({self.params.shape[0]}, 4, 4), got {tuple(self.root_from_obj.shape)}"
+            )
+        if bool(xp.any(self.params <= 0)):
+            raise ValueError(f"radius and height must be positive: {self.params}")
+        rotation = self.root_from_obj[:, :3, :3]
+        gap = xp.matmul(xp.matrix_transpose(rotation), rotation) - xp.eye(3, dtype=rotation.dtype)
+        if len(self) and float(xp.max(xp.abs(gap))) > 1e-6:
+            raise ValueError("a cylinder's frame is not a rotation")
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Unpickle; a session saved before cylinders were batches, as a batch of one.
+
+        (Its one cylinder's state: `root_from_obj`, `radius`, `length`.)
+        """
+        if "params" not in state:
+            state = {
+                "params": np.array([[float(state["radius"]), float(state["length"])]]),
+                "root_from_obj": np.asarray(state["root_from_obj"], dtype=float)[None],
+            }
+        for key, value in state.items():
+            object.__setattr__(self, key, value)
+
+    # -- making them --
+
+    @classmethod
+    def from_params(cls, params: Array, root_from_obj: Array | None = None) -> "Cylinder":
+        """`params` (N, 2), at `root_from_obj` (N, 4, 4; default each at the origin, its axis along the root z)."""
+        if root_from_obj is None:
+            xp = namespace(params)
+            eye = xp.eye(4, dtype=params.dtype, device=getattr(params, "device", None))
+            root_from_obj = xp.broadcast_to(eye, (params.shape[0], 4, 4))
+        return cls(params, root_from_obj)
+
+    @classmethod
+    def upright(cls, bottom_root: np.ndarray, height: Any, radius: Any) -> "Cylinder":
+        """Cylinders standing on their ends: each axis vertical up from `bottom_root`.
+
+        `bottom_root` (3,) or (N, 3), the bottom end's center; `height` and `radius` a number or (N,) each. A point and
+        numbers: a batch of one.
+        """
+        bottoms = np.atleast_2d(np.asarray(bottom_root, dtype=float))
+        n = len(bottoms)
+        heights = np.broadcast_to(np.asarray(height, dtype=float), (n,))
+        radii = np.broadcast_to(np.asarray(radius, dtype=float), (n,))
+        frames = np.stack([frame_along(np.array([0.0, 0.0, 1.0]), b) for b in bottoms])
+        return cls(np.stack([radii, heights], axis=1), frames)
+
+    @classmethod
+    def between(cls, bottom_root: np.ndarray, top_root: np.ndarray, radius: float) -> "Cylinder":
+        """One cylinder whose axis runs from `bottom_root` to `top_root`, its ends' centers."""
+        bottom_root, top_root = np.asarray(bottom_root, dtype=float), np.asarray(top_root, dtype=float)
+        length = float(np.linalg.norm(top_root - bottom_root))
+        return cls(
+            np.array([[float(radius), length]]), frame_along(top_root - bottom_root, bottom_root)[None]
+        )
+
+    def __len__(self) -> int:
+        """How many cylinders."""
+        return int(self.params.shape[0])
+
+    def __getitem__(self, index: Any) -> "Cylinder":
+        """The cylinders at `index` as a batch (an integer: a batch of one)."""
+        if isinstance(index, int):
+            index = slice(index, index + 1 if index != -1 else None)
+        return Cylinder(self.params[index], self.root_from_obj[index])
+
+    # -- what they are (each (N, ...)) --
+
+    @property
+    def radius(self) -> Array:
+        """(N,): each radius (m)."""
+        return self.params[:, 0]
+
+    @property
+    def height(self) -> Array:
+        """(N,): each height, end to end along the axis (m)."""
+        return self.params[:, 1]
+
+    @property
+    def length(self) -> Array:
+        """(N,): `height`, the word for a cylinder lying down (a pen's length)."""
+        return self.height
+
+    @property
+    def axis_root(self) -> Array:
+        """(N, 3): each unit axis, bottom to top."""
+        return self.root_from_obj[:, :3, 2]
+
+    @property
+    def bottom_root(self) -> Array:
+        """(N, 3): each bottom end's center."""
+        return self.root_from_obj[:, :3, 3]
+
+    @property
+    def top_root(self) -> Array:
+        """(N, 3): each top end's center."""
+        return self.bottom_root + self.height[:, None] * self.axis_root
+
+    def centroid_obj(self) -> Array:
+        """(N, 3): half way up each axis, object frame."""
+        xp = namespace(self.params)
+        zero = xp.zeros_like(self.radius)
+        return xp.stack([zero, zero, self.height / 2], axis=1)
+
+    def volume(self) -> Array:
+        """(N,): pi r^2 h."""
+        return np.pi * self.radius**2 * self.height
+
+    def bounding_radius(self) -> Array:
+        """(N,): the sphere about the centroid through the ends' rims."""
+        xp = namespace(self.params)
+        return xp.sqrt(self.radius**2 + (self.height / 2) ** 2)
+
+    def half_extents(self) -> Array:
+        """(N, 3): (r, r, h/2), object frame."""
+        xp = namespace(self.params)
+        return xp.stack([self.radius, self.radius, self.height / 2], axis=1)
+
+    def inertia_per_kg(self) -> Array:
+        """(N, 3): a solid cylinder's, about its centroid: (3 r^2 + h^2) / 12 across the axis, r^2 / 2 along it."""
+        xp = namespace(self.params)
+        side = (3 * self.radius**2 + self.height**2) / 12
+        return xp.stack([side, side, self.radius**2 / 2], axis=1)
+
+    def surface_distance(self, points_root: Array) -> Array:
+        """(N, M): each point's (M, 3) signed distance (m) to each cylinder's surface, ends included: negative inside."""
+        xp = namespace(self.params, points_root)
+        points = points_root[None] if points_root.ndim == 2 else points_root  # (1 or N, M, 3)
+        rel = points - self.bottom_root[:, None, :]
+        points_obj = xp.matmul(rel, self.root_from_obj[:, :3, :3])  # (N, M, 3)
+        radial = xp.sqrt(points_obj[..., 0] ** 2 + points_obj[..., 1] ** 2) - self.radius[:, None]
+        axial = xp.maximum(-points_obj[..., 2], points_obj[..., 2] - self.height[:, None])
+        outside = xp.sqrt(xp.maximum(radial, 0.0) ** 2 + xp.maximum(axial, 0.0) ** 2)
+        return outside + xp.minimum(xp.maximum(radial, axial), 0.0)
+
+    def describe(self) -> str:
+        """Each cylinder's radius, bottom end, length and the axis's tilt from vertical (root frame)."""
+        return "; ".join(self._describe_one(i) for i in range(len(self)))
+
+    def _describe_one(self, i: int) -> str:
+        b = np.asarray(self.bottom_root[i], dtype=float)
+        a = np.asarray(self.axis_root[i], dtype=float)
+        radius, length = float(self.radius[i]), float(self.height[i])
+        tilt = float(np.degrees(np.arccos(np.clip(abs(a[2]), 0.0, 1.0))))
+        where = f"from ({', '.join(_cm(float(v)) for v in b)}) cm (root frame), {_cm(length)} cm along "
+        where += (
+            "the vertical"
+            if tilt < 1.0
+            else f"({', '.join(f'{v:.2f}' for v in a)}), {tilt:.0f} deg from vertical"
+        )
+        return f"cylinder, radius {_cm(radius)} cm, {where}"
+
+
+# ---- grasp families (planning) --------------------------------------------------------------------------------------
+
+
+class GraspFamily(Protocol):
+    """The antipodal grasps one object allows, for planning (the module docstring): built from a batch of one."""
+
+    @property
+    def primitive(self) -> Primitive:
+        """The object (a batch of one)."""
         ...
 
     def antipodal_grasps(
@@ -149,29 +433,9 @@ class Primitive(Surface, Protocol):
         ...
 
 
-@dataclass(frozen=True)
-class HorizontalPlane:
-    """A level plane at height `z` (root frame), e.g. a table measured another way than its `TableEstimate`."""
-
-    z: float
-    label: str = "the table"
-
-    def surface_distance(self, points_root: np.ndarray) -> np.ndarray:
-        """Each point's height above the plane (m): negative below it."""
-        return np.atleast_2d(np.asarray(points_root, dtype=np.float64))[:, 2] - self.z
-
-    def describe(self) -> str:
-        """The plane's height."""
-        return f"{self.label}: level, at z = {100 * self.z:.1f} cm"
-
-
 @dataclass(frozen=True, eq=False)
-class Cylinder:
-    """A solid cylinder along the object frame's z.
-
-    The axis runs from the origin (the "bottom" end: on the table for an upright object) to `length` along it.
-
-    Grasp family, closing straight through the axis so the opening is the diameter:
+class CylinderGrasps:
+    """A cylinder's grasps, closing straight through the axis so the opening is the diameter.
 
     - `t` (m): where along the axis, from the bottom end; default the whole length, every 1 cm.
     - `phi` (deg): which side the jaws come from, around the axis from the object frame's x (for an upright cylinder
@@ -182,82 +446,26 @@ class Cylinder:
     The closing direction is square to both the axis and the side the jaws come from.
     """
 
-    root_from_obj: np.ndarray  # (4, 4)
-    radius: float
-    length: float
+    primitive: Cylinder  # a batch of one
 
-    SPACING = {"t": 0.01, "phi": 30.0, "psi": 15.0}
-    SHAPE = "cylinder"
-    PARAMS = ("radius", "height")  # (`shape_params`' names: the height is the length, end to end)
+    SPACING: ClassVar[dict[str, float]] = {"t": 0.01, "phi": 30.0, "psi": 15.0}
 
     def __post_init__(self) -> None:
-        """Refuse a frame that is not a rigid transform, or a size that is not positive."""
-        rotation = self.root_from_obj[:3, :3]
-        if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-6):
-            raise ValueError("the cylinder's frame is not a rotation")
-        if self.radius <= 0 or self.length <= 0:
-            raise ValueError(f"radius {self.radius} and length {self.length} must be positive")
-
-    @classmethod
-    def upright(cls, bottom_root: np.ndarray, height: float, radius: float) -> "Cylinder":
-        """A cylinder standing on its end: its axis vertical up from `bottom_root`, the bottom end's center."""
-        return cls(
-            frame_along(np.array([0.0, 0.0, 1.0]), np.asarray(bottom_root, dtype=float)), radius, height
-        )
-
-    @classmethod
-    def between(cls, bottom_root: np.ndarray, top_root: np.ndarray, radius: float) -> "Cylinder":
-        """A cylinder whose axis runs from `bottom_root` to `top_root`, its ends' centers."""
-        bottom_root, top_root = np.asarray(bottom_root, dtype=float), np.asarray(top_root, dtype=float)
-        return cls(
-            frame_along(top_root - bottom_root, bottom_root),
-            radius,
-            float(np.linalg.norm(top_root - bottom_root)),
-        )
+        """Refuse a batch that is not one cylinder."""
+        if len(self.primitive) != 1:
+            raise ValueError(f"a grasp family is one object's: got {len(self.primitive)} cylinders")
 
     @property
-    def axis_root(self) -> np.ndarray:
-        """The unit axis, bottom to top."""
-        return self.root_from_obj[:3, 2]
+    def _frame(self) -> np.ndarray:
+        return np.asarray(self.primitive.root_from_obj[0], dtype=float)
 
     @property
-    def bottom_root(self) -> np.ndarray:
-        """The bottom end's center."""
-        return self.root_from_obj[:3, 3]
+    def _radius(self) -> float:
+        return float(self.primitive.radius[0])
 
     @property
-    def top_root(self) -> np.ndarray:
-        """The top end's center."""
-        return self.bottom_root + self.length * self.axis_root
-
-    def shape_params(self) -> dict[str, float]:
-        """The shape's parameters by name (`PARAMS`, m): radius and height (its length, end to end)."""
-        return {"radius": float(self.radius), "height": float(self.length)}
-
-    @classmethod
-    def from_shape_params(cls, params: Mapping[str, float], root_from_obj: np.ndarray) -> "Cylinder":
-        """`shape_params`' values at the pose `root_from_obj` (its bottom end's center, its axis along z)."""
-        return cls(np.asarray(root_from_obj, dtype=float), float(params["radius"]), float(params["height"]))
-
-    @property
-    def center_obj(self) -> np.ndarray:
-        """The center (of mass, for a solid), object frame: half way up the axis."""
-        return np.array([0.0, 0.0, self.length / 2])
-
-    @property
-    def bounding_radius(self) -> float:
-        """The smallest sphere about the center that holds it (m)."""
-        return float(np.hypot(self.radius, self.length / 2))
-
-    @property
-    def half_extents(self) -> np.ndarray:
-        """The half sizes of the box about the center that holds it, object frame (m)."""
-        return np.array([self.radius, self.radius, self.length / 2])
-
-    def solid_inertia(self, mass: float) -> np.ndarray:
-        """A solid cylinder's principal moments of inertia about its center, along the object frame's axes (kg m^2)."""
-        side = mass * (3 * self.radius**2 + self.length**2) / 12
-        return np.array([side, side, mass * self.radius**2 / 2])
+    def _length(self) -> float:
+        return float(self.primitive.height[0])
 
     def approach_preference(self, approach_root: np.ndarray) -> float:
         """How far (deg) an approach is off square to the axis: 0 from the side, 90 along it (from above or below).
@@ -266,16 +474,8 @@ class Cylinder:
         an upright bottle's top from the wrist camera (ruler2).
         """
         a = np.asarray(approach_root, dtype=np.float64)
-        along = abs(float(a @ self.axis_root)) / float(np.linalg.norm(a))
+        along = abs(float(a @ self._frame[:3, 2])) / float(np.linalg.norm(a))
         return float(np.degrees(np.arcsin(min(1.0, along))))
-
-    def surface_distance(self, points_root: np.ndarray) -> np.ndarray:
-        """Signed distance (m) of each point (N, 3) to the surface, ends included: negative inside."""
-        points_obj = (np.atleast_2d(points_root) - self.bottom_root) @ self.root_from_obj[:3, :3]
-        radial = np.hypot(points_obj[:, 0], points_obj[:, 1]) - self.radius
-        axial = np.maximum(-points_obj[:, 2], points_obj[:, 2] - self.length)
-        outside = np.hypot(np.maximum(radial, 0.0), np.maximum(axial, 0.0))
-        return outside + np.minimum(np.maximum(radial, axial), 0.0)
 
     def grasp_space(self, where: Ranges | None = None) -> dict[str, GraspParameter]:
         """`t` (m), `phi` (deg, all the way round), `psi` (deg), within `where` (the class docstring)."""
@@ -283,9 +483,9 @@ class Cylinder:
         unknown = set(where) - set(self.SPACING)
         if unknown:
             raise ValueError(f"a cylinder's grasps have no parameter {sorted(unknown)}: use t, phi, psi")
-        t_span = where.get("t", (0.0, self.length))
-        if t_span[0] < 0 or t_span[1] > self.length + 1e-9:
-            raise ValueError(f"t {t_span} is outside the cylinder (0..{self.length:.3f} m)")
+        t_span = where.get("t", (0.0, self._length))
+        if t_span[0] < 0 or t_span[1] > self._length + 1e-9:
+            raise ValueError(f"t {t_span} is outside the cylinder (0..{self._length:.3f} m)")
         psi_span = where.get("psi", (-90.0, 90.0))
         if psi_span[0] < -90 or psi_span[1] > 90:
             raise ValueError(f"psi {psi_span} is outside -90..90 deg")
@@ -299,22 +499,21 @@ class Cylinder:
     def grasp_at(self, params: Mapping[str, float]) -> AntipodalGrasp:
         """The grasp at `t` along the axis, from side `phi`, its approach tilted `psi` (the class docstring)."""
         t, phi, psi = float(params["t"]), float(params["phi"]), float(params["psi"])
-        axis_root = self.axis_root
-        center_root = self.bottom_root + t * axis_root
-        side_root = self.root_from_obj[:3, :3] @ np.array(
-            [np.cos(np.radians(phi)), np.sin(np.radians(phi)), 0.0]
-        )
+        frame = self._frame
+        axis_root = frame[:3, 2]
+        center_root = frame[:3, 3] + t * axis_root
+        side_root = frame[:3, :3] @ np.array([np.cos(np.radians(phi)), np.sin(np.radians(phi)), 0.0])
         closing_root = np.cross(axis_root, side_root)
         p = np.radians(psi)
         approach_root = -np.cos(p) * side_root - np.sin(p) * axis_root
         named = {"t": round(t, 4), "phi": round(phi, 2), "psi": round(psi, 2)}
-        return AntipodalGrasp(center_root, closing_root, approach_root, 2.0 * self.radius, named)
+        return AntipodalGrasp(center_root, closing_root, approach_root, 2.0 * self._radius, named)
 
     def antipodal_grasps(
         self, where: Ranges | None = None, spacing: Spacing | None = None, max_opening: float | None = None
     ) -> list[AntipodalGrasp]:
         """The grasps on the grid of `t` x `phi` x `psi`, within `where`; none if the diameter is over `max_opening`."""
-        if max_opening is not None and 2.0 * self.radius > max_opening:
+        if max_opening is not None and 2.0 * self._radius > max_opening:
             return []
         space, step = self.grasp_space(where), {**self.SPACING, **(spacing or {})}
         span = {name: (q.low, q.high) for name, q in space.items()}
@@ -325,76 +524,96 @@ class Cylinder:
             for psi in _grid(span["psi"], step["psi"])
         ]
 
-    def describe(self) -> str:
-        """The radius, the bottom end, the length and the axis's tilt from vertical (root frame)."""
-        b, a = self.bottom_root, self.axis_root
-        tilt = float(np.degrees(np.arccos(np.clip(abs(a[2]), 0.0, 1.0))))
-        where = f"from ({', '.join(_cm(float(v)) for v in b)}) cm (root frame), {_cm(self.length)} cm along "
-        where += (
-            "the vertical"
-            if tilt < 1.0
-            else f"({', '.join(f'{v:.2f}' for v in a)}), {tilt:.0f} deg from vertical"
-        )
-        return f"cylinder, radius {_cm(self.radius)} cm, {where}"
+
+SHAPES: dict[str, type[Primitive]] = {Cylinder.SHAPE: Cylinder}  # the shapes a record can name
+GRASP_FAMILIES: dict[str, type] = {Cylinder.SHAPE: CylinderGrasps}  # each shape's grasps
 
 
-SHAPES = {Cylinder.SHAPE: Cylinder}  # the shapes a record can name
+def grasp_family(primitive: Primitive) -> GraspFamily:
+    """`primitive`'s grasps (a batch of one)."""
+    return GRASP_FAMILIES[primitive.SHAPE](primitive)  # type: ignore[no-any-return]
 
 
-@dataclass(frozen=True)
-class RigidBody:
-    """A primitive with a mass: an object as a simulator needs it, and as the grasp bank and the start pools record it.
+# ---- object records -------------------------------------------------------------------------------------------------
 
-    The record (`to_record`) is the shape's name (`"shape"`), its parameters by name (`Cylinder.PARAMS`), the mass, and
-    where it stands: `bottom_root`, standing upright on it (a cylinder's bottom end's center), or the full pose
-    (`root_from_obj`) when it is not upright. `vector` / `from_vector` are the same numbers as a row (the start pools'
-    arrays: `columns` names them).
+
+@dataclass(frozen=True, eq=False)
+class ObjectRecord:
+    """Objects as the grasp bank and the start pools write them down: a batch of primitives and each one's mass.
+
+    A record (`to_record`, one object): the shape's name (`"shape"`), its parameters by name (`PARAMS`), the mass
+    (`"mass_kg"`), and where it stands: `bottom_root`, upright on it (a cylinder's bottom end's center), or the full pose
+    (`root_from_obj`) when it is not upright. Rows (`vectors`, all of them; `columns`): the parameters, then the mass.
     """
 
-    shape: Cylinder
-    mass_kg: float
+    primitive: Primitive
+    mass_kg: Array  # (N,)
 
-    @property
-    def inertia(self) -> np.ndarray:
-        """Its principal moments of inertia about its center (a solid of uniform density, kg m^2)."""
-        return self.shape.solid_inertia(self.mass_kg)
+    def __post_init__(self) -> None:
+        """One mass an object."""
+        if tuple(self.mass_kg.shape) != (len(self.primitive),):
+            raise ValueError(f"{len(self.primitive)} objects with masses {tuple(self.mass_kg.shape)}")
+
+    def __len__(self) -> int:
+        """How many objects."""
+        return len(self.primitive)
+
+    def __getitem__(self, index: Any) -> "ObjectRecord":
+        """The objects at `index` (an integer: a batch of one)."""
+        mass = (
+            self.mass_kg[index : index + 1 if index != -1 else None]
+            if isinstance(index, int)
+            else self.mass_kg[index]
+        )
+        return ObjectRecord(self.primitive[index], mass)
 
     @classmethod
     def upright(
         cls, shape: str, params: Mapping[str, float], mass_kg: float, bottom_root: np.ndarray
-    ) -> "RigidBody":
-        """`shape` of `params`, standing upright on `bottom_root`."""
-        frame = frame_along(np.array([0.0, 0.0, 1.0]), np.asarray(bottom_root, dtype=float))
-        return cls(SHAPES[shape].from_shape_params(params, frame), float(mass_kg))
+    ) -> "ObjectRecord":
+        """One object of `shape` and `params` (by name), standing upright on `bottom_root`."""
+        row = np.array([[float(params[name]) for name in SHAPES[shape].PARAMS]])
+        frame = frame_along(np.array([0.0, 0.0, 1.0]), np.asarray(bottom_root, dtype=float))[None]
+        return cls(SHAPES[shape].from_params(row, frame), np.array([float(mass_kg)]))
+
+    def placed_upright(self, bottom_root: np.ndarray) -> "ObjectRecord":
+        """The one object, the same shape, size and mass, standing upright on `bottom_root` instead."""
+        if len(self) != 1:
+            raise ValueError(f"one object at a time: got {len(self)}")
+        p = self.primitive
+        params = dict(zip(p.PARAMS, (float(v) for v in np.asarray(p.params[0])), strict=True))
+        return ObjectRecord.upright(p.SHAPE, params, float(self.mass_kg[0]), bottom_root)
 
     @staticmethod
     def columns(shape: str = Cylinder.SHAPE) -> tuple[str, ...]:
-        """`vector`'s names: the shape's parameters, then the mass."""
+        """`vectors`' names: the shape's parameters, then the mass."""
         return (*SHAPES[shape].PARAMS, "mass_kg")
 
-    def vector(self) -> np.ndarray:
-        """Its shape's parameters and its mass as a row (`columns`)."""
-        return np.array([*self.shape.shape_params().values(), self.mass_kg], dtype=np.float64)
+    def vectors(self) -> Array:
+        """(N, k + 1): each object's parameters and mass (`columns`)."""
+        xp = namespace(self.primitive.params, self.mass_kg)
+        return xp.concat([self.primitive.params, self.mass_kg[:, None]], axis=1)
 
     @classmethod
-    def from_vector(
-        cls, row: np.ndarray, shape: str = Cylinder.SHAPE, bottom_root: np.ndarray | None = None
-    ) -> "RigidBody":
-        """`vector`'s row back (standing upright on `bottom_root`, default the origin)."""
-        names = SHAPES[shape].PARAMS
-        params = dict(zip(names, (float(v) for v in row[: len(names)]), strict=True))
-        return cls.upright(
-            shape, params, float(row[len(names)]), np.zeros(3) if bottom_root is None else bottom_root
-        )
+    def from_vectors(
+        cls, rows: Array, shape: str = Cylinder.SHAPE, root_from_obj: Array | None = None
+    ) -> "ObjectRecord":
+        """`vectors`' rows back, at `root_from_obj`.
+
+        Default: each at the origin, upright (where an object is, is a simulator's state).
+        """
+        k = len(SHAPES[shape].PARAMS)
+        return cls(SHAPES[shape].from_params(rows[:, :k], root_from_obj), rows[:, k])
 
     def to_record(self) -> dict[str, object]:
-        """Its record (the class docstring): plain JSON values."""
-        frame = self.shape.root_from_obj
-        record: dict[str, object] = {
-            "shape": self.shape.SHAPE,
-            **self.shape.shape_params(),
-            "mass_kg": self.mass_kg,
-        }
+        """The one object's record (the class docstring): plain JSON values."""
+        if len(self) != 1:
+            raise ValueError(f"a record is one object's: got {len(self)}")
+        p = self.primitive
+        frame = np.asarray(p.root_from_obj[0], dtype=float)
+        values = [float(v) for v in np.asarray(p.params[0])]
+        record: dict[str, object] = {"shape": p.SHAPE, **dict(zip(p.PARAMS, values, strict=True))}
+        record["mass_kg"] = float(self.mass_kg[0])
         if np.allclose(frame[:3, 2], [0.0, 0.0, 1.0], atol=1e-9):
             record["bottom_root"] = [float(v) for v in frame[:3, 3]]
         else:
@@ -402,13 +621,14 @@ class RigidBody:
         return record
 
     @classmethod
-    def from_record(cls, record: Mapping[str, object]) -> "RigidBody":
+    def from_record(cls, record: Mapping[str, Any]) -> "ObjectRecord":
         """`to_record`'s record back; one without a shape (written before shapes were named) is a cylinder."""
         shape = str(record.get("shape", Cylinder.SHAPE))
         if shape not in SHAPES:
             raise ValueError(f"unknown shape {shape!r} (known: {sorted(SHAPES)})")
-        params = {name: float(record[name]) for name in SHAPES[shape].PARAMS}  # type: ignore[arg-type]
-        mass = float(record["mass_kg"])  # type: ignore[arg-type]
+        params = {name: float(record[name]) for name in SHAPES[shape].PARAMS}
         if "root_from_obj" in record:
-            return cls(SHAPES[shape].from_shape_params(params, np.array(record["root_from_obj"])), mass)
-        return cls.upright(shape, params, mass, np.array(record["bottom_root"]))
+            row = np.array([[params[name] for name in SHAPES[shape].PARAMS]])
+            frame = np.array(record["root_from_obj"], dtype=float)[None]
+            return cls(SHAPES[shape].from_params(row, frame), np.array([float(record["mass_kg"])]))
+        return cls.upright(shape, params, float(record["mass_kg"]), np.array(record["bottom_root"]))

@@ -239,11 +239,12 @@ def _draw_cylinder(
     the refined pinch frame puts it in the scan's frame.
     """
     to_scan = scan.camera(scan.current) @ scan.camera_from_pinch @ root_to_pinch
-    pose = to_scan @ cylinder.root_from_obj  # the cylinder's frame in the scan's
-    axis, bottom, r = pose[:3, 2], pose[:3, 3], cylinder.radius
+    pose = to_scan @ cylinder.root_from_obj[0]  # the cylinder's frame in the scan's (a batch of one)
+    axis, bottom, r = pose[:3, 2], pose[:3, 3], float(cylinder.radius[0])
+    length = float(cylinder.length[0])
     ring = np.linspace(0.0, 2 * np.pi, 48)
     orange = (255, 150, 0)
-    for height in (0.0, cylinder.length):
+    for height in (0.0, length):
         local = np.column_stack([r * np.cos(ring), r * np.sin(ring), np.full(48, height)])
         uv = scan.project(frame, local @ pose[:3, :3].T + pose[:3, 3])
         good = np.isfinite(uv).all(axis=1)
@@ -259,7 +260,7 @@ def _draw_cylinder(
     w = np.cross(axis, e)
     for sign in (1.0, -1.0):
         foot = bottom + (r * r / d) * e + sign * r * np.sqrt(1 - r * r / (d * d)) * w
-        uv = scan.project(frame, np.array([foot, foot + cylinder.length * axis]))
+        uv = scan.project(frame, np.array([foot, foot + length * axis]))
         if np.isfinite(uv).all():
             a, b = (tuple(int(round(c)) for c in p) for p in uv)
             cv2.line(image, a, b, orange, 2, cv2.LINE_AA)
