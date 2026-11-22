@@ -13,7 +13,8 @@ object writes itself (`write`: its shape's fields, its mass's randomization) and
 in the size the actor is told (`draw_size_error`). Everything that knows the object's shape is the object's; this term
 draws starts and writes state. The model is where each world's object size is kept (the object's `dims` read it); the
 term keeps only what is not in the model: each world's start (`rows`: its pool, `pools_of_worlds`) and the episode's
-size error (`size_error`). A pool of one object declares nothing: no field per world, nothing recomputed.
+size error (`size_error`), and, if the actor is told an estimated pose (`pose_estimate`), the episode's estimate
+(`estimate`: the object's `draw_estimate`, from the start's own perception offset). A pool of one object declares nothing: no field per world, nothing recomputed.
 
 `pool_reset(env)`: the environment's term (mjlab's event manager keeps a built term in its config's `func`).
 """
@@ -52,6 +53,7 @@ class PoolReset:
         self.qvel = torch.as_tensor(qvel, device=dev, dtype=env.sim.data.qvel.dtype)
         self.ctrl = torch.as_tensor(ctrl, device=dev, dtype=env.sim.data.ctrl.dtype)
         self.objects = torch.as_tensor(self.pool.objects, device=dev, dtype=torch.float32)
+        self.perception = torch.as_tensor(self.pool.perception, device=dev, dtype=torch.float32)
         weights = dict(params["pool_weights"])
         self.members = [torch.as_tensor(np.flatnonzero(self.pool.pool == p), device=dev) for p in POOLS]
         w = np.array([weights.get(p, 0.0) if len(self.members[i]) else 0.0 for i, p in enumerate(POOLS)])
@@ -66,6 +68,13 @@ class PoolReset:
         self.target_columns = torch.as_tensor([a for a, _ in pairs], device=dev)
         self.target_joints = torch.as_tensor([j for _, j in pairs], device=dev)
         params["object"].ids(env)  # (refuses an object that is not what it says, now rather than later)
+        self.object_q = env.scene[params["object"].entity].indexing.free_joint_q_adr[
+            :3
+        ]  # (its center's qpos)
+        self.estimate = torch.zeros(
+            env.num_envs, 6, device=dev
+        )  # each episode's pose estimate (the object's)
+        self.estimate[:, 5] = 1.0
         self.rows = torch.zeros(env.num_envs, dtype=torch.long, device=dev)  # each world's start
         self.size_error = torch.zeros(
             env.num_envs, 2, device=dev
@@ -92,6 +101,9 @@ class PoolReset:
         env.scene[robot.name].set_joint_position_target(
             self.ctrl[rows][:, self.target_columns], joint_ids=self.target_joints, env_ids=env_ids
         )
+        if object.pose_estimate:
+            center = self.qpos[rows][:, self.object_q].float()
+            self.estimate[env_ids] = object.draw_estimate(center, self.perception[rows])
         if self.sized:
             object.write(env, env_ids, self.objects[rows])
             self.size_error[env_ids] = object.draw_size_error(len(env_ids), rows.device)

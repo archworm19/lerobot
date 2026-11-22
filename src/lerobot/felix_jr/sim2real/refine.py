@@ -120,11 +120,11 @@ class RefinedPlan:
         )
 
 
-
 def _radius(primitive: Primitive, default: float) -> float:
     """The (one) object's radius if its shape has one (a cylinder's), else `default` (m)."""
     radius = getattr(primitive, "radius", None)
     return default if radius is None else float(radius[0])
+
 
 def _show(name: str, value: float) -> str:
     return f"{1000 * value:.1f} mm" if name in ("t", "depth", "offset") else f"{value:.1f} deg"
@@ -263,9 +263,7 @@ def outcome(
         shadow.on_tick = lambda label: on_tick(shadow, label)
     start_xyz = shadow.object_position()
     pushed, past, touching = 0.0, float("nan"), 0
-    contact = model.gripper_pos_for(
-        arm, model.opening_for_width(arm, 2 * _radius(primitive, 0.0))
-    )
+    contact = model.gripper_pos_for(arm, model.opening_for_width(arm, 2 * _radius(primitive, 0.0)))
     for move in execution.moves:
         closing = "gripper close" in move.label
         if closing:

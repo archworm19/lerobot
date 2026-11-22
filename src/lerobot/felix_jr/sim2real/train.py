@@ -185,6 +185,18 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--pool-weights", nargs="+", default=None, metavar="POOL=W")
     parser.add_argument("--object-noise-mm", type=float, default=1000 * me.OBJECT_NOISE_M)
     parser.add_argument(
+        "--object-pose",
+        choices=("live", "estimated"),
+        default="live",
+        help="the object's pose the actor is told: live, or estimated at the reset and frozen (the critic: live)",
+    )
+    parser.add_argument(
+        "--estimate-noise-mm",
+        type=float,
+        default=3.0,
+        help="the estimate's noise beyond the start's perception offset",
+    )
+    parser.add_argument(
         "--actor-exclude",
         nargs="+",
         default=[],
@@ -243,6 +255,8 @@ def main(argv: list[str] | None = None) -> None:
         object_noise_m=args.object_noise_mm / 1000,
         size_error_m=args.size_error_mm / 1000,
         actor_exclude=tuple(args.actor_exclude),
+        object_pose=args.object_pose,
+        estimate_noise_m=args.estimate_noise_mm / 1000,
         randomize=True,
     )
     cfg.seed = args.seed
@@ -258,6 +272,8 @@ def main(argv: list[str] | None = None) -> None:
         "object_noise_m": args.object_noise_mm / 1000,
         "size_error_m": args.size_error_mm / 1000,
         "actor_exclude": list(args.actor_exclude),
+        "object_pose": args.object_pose,
+        "estimate_noise_m": args.estimate_noise_mm / 1000,
         "reward_weights": me.REWARD_WEIGHTS,
         "action": {
             "arm_step_deg": task.ARM_STEP_DEG,

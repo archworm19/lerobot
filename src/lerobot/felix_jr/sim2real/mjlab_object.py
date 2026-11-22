@@ -107,6 +107,9 @@ class MjlabCylinder:
     sized: bool = False
     mass_range: tuple[float, float] = (1.0, 1.0)
     size_error_m: float = 0.0
+    pose_estimate: bool = False  # the actor told a pose estimated at the episode's reset, not the live pose
+    estimate_noise_m: float = 0.003  # the estimate's error beyond the start's own perception offset (std, m)
+    estimate_axis_deg: float = 2.0  # its axis's tilt from vertical (std, deg)
 
     # ---- construction ----
 
@@ -218,6 +221,23 @@ class MjlabCylinder:
         weights = torch.stack([translation] * 3 + [rotation] * 3, dim=1).to(m.dof_invweight0.dtype)
         m.dof_invweight0[env_ids[:, None], dofs[None, :]] = weights
 
+    def draw_estimate(self, center: "torch.Tensor", perception: "torch.Tensor") -> "torch.Tensor":
+        """Episodes' pose estimates ((n, 6): center, axis; root frame): the perception's, frozen for the episode.
+
+        `center` the object's true center at its start, `perception` where perception put it against that (the start's
+        own: an attack start's arm aimed there, `starts.Start.perception_root`); plus `estimate_noise_m` of noise (the
+        head camera's calibration to the arm, its variation between captures). The axis: vertical (the head assumes
+        upright objects), tilted by `estimate_axis_deg` of noise.
+        """
+        import torch
+
+        n = len(center)
+        noisy = center + perception + self.estimate_noise_m * torch.randn(n, 3, device=center.device)
+        axis = torch.zeros(n, 3, device=center.device)
+        axis[:, :2] = np.radians(self.estimate_axis_deg) * torch.randn(n, 2, device=center.device)
+        axis[:, 2] = 1.0
+        return torch.cat([noisy, axis / torch.linalg.norm(axis, dim=1, keepdim=True)], dim=1)
+
     def draw_size_error(self, n: int, device: Any) -> "torch.Tensor":
         """`n` episodes' errors in the radius and height the actor is told ((n, 2), m: normal, `size_error_m`)."""
         import torch
@@ -271,6 +291,16 @@ class MjlabCylinder:
         center, axis = self.pose(env)
         return torch.cat([center, axis], dim=1)
 
+    def in_root_estimated(self, env: "ManagerBasedRlEnv") -> "torch.Tensor":
+        """The episode's pose estimate (center 3, axis 3), root frame: an observation.
+
+        Drawn at the reset (`draw_estimate`), kept by `pool_reset.PoolReset`.
+        """
+        from .pool_reset import pool_reset
+
+        term = pool_reset(env)
+        return term.estimate if term is not None else self.in_root(env)
+
     def size(self, env: "ManagerBasedRlEnv", estimated: bool = False) -> "torch.Tensor":
         """Each world's radius and height (m, `dims`): an observation, for objects of several sizes.
 
@@ -290,11 +320,22 @@ class MjlabCylinder:
         """
         from mjlab.managers.observation_manager import ObservationTermCfg
 
-        actor = {
+        critic = {
             "object_in_root": ObservationTermCfg(func=self.in_root, noise=noise),
             "object_in_pinch": ObservationTermCfg(func=self.in_pinch, noise=noise),
         }
-        critic = dict(actor)
+        actor = dict(critic)
+        if (
+            self.pose_estimate
+        ):  # (the actor told the episode's estimate; the critic the live truth, without noise)
+            actor = {
+                "object_in_root": ObservationTermCfg(func=self.in_root_estimated),
+                "object_in_pinch": ObservationTermCfg(func=self.in_pinch_estimated),
+            }
+            critic = {
+                "object_in_root": ObservationTermCfg(func=self.in_root),
+                "object_in_pinch": ObservationTermCfg(func=self.in_pinch),
+            }
         if self.sized:  # (one object's runs keep their observations: their checkpoints still load)
             actor["object_size"] = ObservationTermCfg(func=self.size, params={"estimated": True})
             critic["object_size"] = ObservationTermCfg(func=self.size)
@@ -310,6 +351,20 @@ class MjlabCylinder:
 
         center, axis = self.pose(env)
         pos, quat = pinch_pose(env)
+        return torch.cat([rotate_inverse(quat, center - pos), rotate_inverse(quat, axis)], dim=1)
+
+    def in_pinch_estimated(self, env: "ManagerBasedRlEnv") -> "torch.Tensor":
+        """The episode's pose estimate in the gripper's live pinch frame: an observation.
+
+        The robot knows its gripper's pose; the object's it knows only as estimated at the reset.
+        """
+        import torch
+
+        from .mjlab_task import pinch_pose
+
+        estimate = self.in_root_estimated(env)
+        pos, quat = pinch_pose(env)
+        center, axis = estimate[:, :3], estimate[:, 3:]
         return torch.cat([rotate_inverse(quat, center - pos), rotate_inverse(quat, axis)], dim=1)
 
     def axis_from_pinch(self, env: "ManagerBasedRlEnv") -> tuple["torch.Tensor", "torch.Tensor"]:

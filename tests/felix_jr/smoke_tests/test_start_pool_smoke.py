@@ -239,3 +239,45 @@ def test_a_worlds_object_changes_size_only_at_its_reset(tmp_path):
         assert torch.allclose(now, term.objects[term.rows][:, :2], atol=1e-6), "an object is not its start's"
         before, resets = now, resets + int(done.sum())
     assert resets > 8  # (enough resets for the check to mean something)
+
+
+def test_the_actor_told_a_frozen_pose_estimate(tmp_path):
+    """`object_pose="estimated"`: the actor told, for the whole episode, the pose estimated at its reset (the true
+    center plus the start's own perception offset; no extra noise here), in the root frame unchanged and in the live
+    pinch frame as the arm moves; the critic told the truth."""
+    import torch
+
+    from lerobot.felix_jr.sim2real import mjlab_object as obj
+
+    model = XleRobotModel.load(api.MODEL)
+    path = tmp_path / "sized.npz"
+    pool = _sized_pool(model)
+    pool.perception = np.array([[0.02, 0.0, 0.0], [0.0, -0.01, 0.0], [0.0, 0.0, 0.005], [0.01, 0.01, 0.0]])
+    pool.save(path)
+    assert np.allclose(StartPool.load(path).perception, pool.perception)
+    cfg = me.env_cfg(
+        model,
+        num_envs=8,
+        randomize=False,
+        start_pool=path,
+        pool_weights=dict.fromkeys(POOLS, 1.0),
+        object_pose="estimated",
+        estimate_noise_m=0.0,
+    )
+    env = me.make_env(cfg)
+    obs, _ = env.reset()
+    cyl, term = obj.of(env), pool_reset(env)
+    center, _ = cyl.pose(env)
+    want = center + term.perception[term.rows]
+    assert torch.allclose(
+        obs["actor"][:, 16:19], want, atol=1e-5
+    )  # (after the joints' 8 + 8: the root-frame center)
+    assert torch.allclose(obs["critic"][:, 16:19], center, atol=1e-5)  # (the critic: the truth)
+    pinch_before = obs["actor"][:, 22:25].clone()
+    action = torch.zeros(8, 6)
+    action[:, 0] = 1.0  # (the pan turning: the gripper moves, the estimate does not)
+    for _ in range(5):
+        obs, *_ = env.step(action)
+    assert torch.allclose(obs["actor"][:, 16:19], want, atol=1e-5)  # (frozen in the root frame)
+    assert (obs["actor"][:, 22:25] - pinch_before).abs().max() > 1e-3  # (seen from the moving gripper)
+    assert torch.allclose(obs["actor"][:, 22:28], cyl.in_pinch_estimated(env), atol=1e-6)

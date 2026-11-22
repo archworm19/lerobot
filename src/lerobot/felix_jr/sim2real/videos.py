@@ -186,6 +186,8 @@ def make_video_env(
         object_noise_m=float(settings.get("object_noise_m", me.OBJECT_NOISE_M)),
         size_error_m=float(settings.get("size_error_m", SIZE_ERROR_M)),
         actor_exclude=tuple(settings.get("actor_exclude", ())),
+        object_pose=str(settings.get("object_pose", "live")),
+        estimate_noise_m=float(settings.get("estimate_noise_m", 0.003)),
         randomize=True,
     )
     env = me.make_env(cfg, device=device)

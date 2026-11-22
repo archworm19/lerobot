@@ -149,6 +149,8 @@ def env_cfg(
     object_noise_m: float = OBJECT_NOISE_M,
     size_error_m: float = SIZE_ERROR_M,
     actor_exclude: Sequence[str] = (),
+    object_pose: str = "live",
+    estimate_noise_m: float = 0.003,
 ) -> "ManagerBasedRlEnvCfg":
     """The grasp-and-lift environment: `body` on the table at `table_z`, the arm from `start` (the module docstring).
 
@@ -160,6 +162,8 @@ def env_cfg(
     `give_scale`: mjlab's correction to the fingers' give (`MJLAB_GIVE_SCALE`); 1.0 for the CPU simulator's model as is
     (`model_differences` then finds none). The task's action, observations, rewards and terminations: `mjlab_task`;
     `object_noise_m` the object pose's noise in the actor's observations (std, m; the axis's a tenth, unitless).
+    `object_pose`: the object's pose the actor is told: "live", or "estimated" (at the episode's reset, as perception
+    would: the start's perception offset and `estimate_noise_m` of noise; then frozen: `MjlabCylinder.draw_estimate`).
     `actor_exclude`: observation terms the actor goes without (privileged ones dropped: the critic keeps them).
     `size_error_m`: for a pool whose objects vary in size, the error in the radius and height the actor is told, drawn
     at each reset and kept for the episode (std, m; with `randomize` only).
@@ -196,7 +200,11 @@ def env_cfg(
         sized=sized,
         mass_range=MASS_RANGE if randomize and sized else (1.0, 1.0),
         size_error_m=size_error_m if randomize and sized else 0.0,
+        pose_estimate=object_pose == "estimated",
+        estimate_noise_m=estimate_noise_m,
     )
+    if object_pose not in ("live", "estimated"):
+        raise ValueError(f"object_pose: live or estimated, not {object_pose!r}")
     start = start or {**REST, "gripper.pos": 30.0}
     entities = {
         "robot": EntityCfg(

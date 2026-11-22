@@ -91,7 +91,9 @@ class StartConfig:
 class Start:
     """One start: its pool, the anchor's index in the bank (`StartSampler.anchors`), the scene in its state.
 
-    And what was drawn: `offset_m` the perception's offset, `joints_deg` the joints commanded, `draws` how many tries.
+    And what was drawn: `offset_m` the perception's offset (the gripper's frame), `joints_deg` the joints commanded,
+    `draws` how many tries; `perception_root` where perception put the object against where it is (root frame, m: the
+    arm aims at what perception says, so an attack start's gripper is off by it; zero for the other pools).
     """
 
     pool: str
@@ -100,6 +102,7 @@ class Start:
     offset_m: dict[str, float] = field(default_factory=dict)
     joints_deg: dict[str, float] = field(default_factory=dict)
     draws: int = 1
+    perception_root: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 class StartSampler:
@@ -166,7 +169,7 @@ class StartSampler:
         scene = self.scene(index)
         m, d = scene.m, scene.d
         if pool == "attack":
-            offset, joints = self.attack_joints(anchor, rng)
+            offset, joints, move = self.attack_joints(anchor, rng)
             jaws = open_gripper_pos(self.model, self.bank_config.arm, anchor)
             up = np.array([rng.random() < ARRIVAL_UP[j] for j in JOINTS])
             before = {
@@ -175,7 +178,14 @@ class StartSampler:
             scene.set_pose({**{f"{j}.pos": v for j, v in before.items()}, "gripper.pos": jaws})
             if _penetration(m, d, ("table",)) <= PENETRATION_M:  # (else `check` refuses it as it stands)
                 arrive(scene, before, joints)
-            start = Start(pool, index, scene, offset, joints)
+            start = Start(
+                pool,
+                index,
+                scene,
+                offset,
+                joints,
+                perception_root=(float(move[0]), float(move[1]), float(move[2])),
+            )
         else:
             state = anchor["states"][pool]
             d.qpos[:], d.qvel[:], d.ctrl[:] = state["qpos"], state["qvel"], state["ctrl"]
@@ -188,10 +198,12 @@ class StartSampler:
 
     def attack_joints(
         self, anchor: Mapping[str, Any], rng: np.random.Generator
-    ) -> tuple[dict[str, float], dict[str, float]]:
-        """The perception's offset drawn (m, the gripper's frame), and the attack's joints that make it (deg).
+    ) -> tuple[dict[str, float], dict[str, float], np.ndarray]:
+        """The perception's offset drawn (m, the gripper's frame), the attack's joints that make it (deg), its move.
 
-        The execution's spread is added to the joints.
+        The move: the gripper's, root frame (m): where perception put the object, against where it is.
+
+        The execution's spread is added to the joints (not to the move: that is the arm missing, not perception).
         """
         c, arm = self.config, self.bank_config.arm
         attack = anchor["attack"]["joints"]
@@ -208,7 +220,7 @@ class StartSampler:
         dq = np.linalg.pinv(jac[:3]) @ move
         spread = c.execution_width * np.array(c.joint_std_deg) * rng.normal(size=len(JOINTS))
         joints = {j: float(attack[f"{j}.pos"] + np.degrees(dq[i]) + spread[i]) for i, j in enumerate(JOINTS)}
-        return offset, joints
+        return offset, joints, move
 
 
 def arrive(scene: Scene, start: Mapping[str, float], goal: Mapping[str, float]) -> None:

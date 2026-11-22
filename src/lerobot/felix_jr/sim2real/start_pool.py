@@ -41,8 +41,9 @@ if TYPE_CHECKING:
 
 POOLS = ("attack", "at_object", "in_jaws", "lifted")
 # the pool file's version: 1 one object's size (`object_size`), 2 a size a start (`objects`), 3 the shape named and its
-# columns (`shape`, `object_columns`: `ObjectRecord.columns`, checked when read); older versions are cylinders, read still
-FORMAT = 3
+# columns (`shape`, `object_columns`: `ObjectRecord.columns`, checked when read; older versions are cylinders), 4 where
+# perception put each start's object (`perception_root`; older pools: none, zeros); all read still
+FORMAT = 4
 SPLIT_KEYS = ("random", "ahead", "side", "diameter", "height")
 FREE_JOINT = (
     "floating_base_joint"  # (the object's: unnamed in `scene`, named by mjlab; `mjlab_env._joint_slices`)
@@ -89,6 +90,9 @@ class StartPool:
         None  # the bank's placements drawn from (a split's: `--holdout`), None: all
     )
     shape: str = Cylinder.SHAPE  # the objects' shape (`harness.primitives.SHAPES`)
+    perception: np.ndarray | None = (
+        None  # (N, 3): where perception put each start's object, against where it is
+    )
 
     @property
     def sizes_vary(self) -> bool:
@@ -121,6 +125,7 @@ class StartPool:
             format=np.array(FORMAT),
             shape=np.array(self.shape),
             object_columns=np.array(ObjectRecord.columns(self.shape)),
+            perception_root=self.perception,
             pool=self.pool,
             anchor=self.anchor,
             objects=self.objects,
@@ -158,11 +163,17 @@ class StartPool:
             float(z["table_z"]),
             z["placements"] if "placements" in z.files and len(z["placements"]) else None,
             shape,
+            z["perception_root"] if "perception_root" in z.files else None,  # (formats 1-3: none, zeros)
         )
 
     def __post_init__(self) -> None:
         """`objects` one row a start (one size given: broadcast to every start); every array one row a start."""
         n = len(self.pool)
+        self.perception = (
+            np.zeros((n, 3))
+            if self.perception is None
+            else np.asarray(self.perception, dtype=np.float64).reshape(n, 3)
+        )
         width = len(ObjectRecord.columns(self.shape))
         self.objects = np.broadcast_to(np.asarray(self.objects, dtype=np.float64), (n, width)).copy()
         lengths = {
@@ -219,6 +230,7 @@ def _draw(task: tuple[str, int]) -> dict[str, Any]:
         "qvel": {name: d.qvel[v : v + vw].copy() for name, _, _, v, vw in lay["joints"]},
         "ctrl": {name: d.ctrl[a : a + 1].copy() for a, name in enumerate(lay["actuators"])},
         "object": ObjectRecord.from_record(line).vectors()[0],
+        "perception": np.array(start.perception_root),
         "table_z": line["bottom_root"][2],
     }
 
@@ -255,6 +267,8 @@ def draw_pool(
         np.array([r["object"] for r in rows]),
         float(np.median([r["table_z"] for r in rows])),
         None if placements is None else np.array(sorted(placements)),
+        Cylinder.SHAPE,
+        np.array([r["perception"] for r in rows]),
     )
 
 
