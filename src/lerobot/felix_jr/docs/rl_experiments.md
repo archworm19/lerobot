@@ -25,7 +25,14 @@ uv run --extra felix_jr_sim --extra felix_jr_gpu python -m lerobot.felix_jr.sim2
 
 A run's folder (`cloud/scratch/runs/<id>/`): `commit`, `diff.patch`, `command`, `output.log`, `exit_code`, and
 `train/` (`settings.json`, tensorboard's events, `model_*.pt`, `eval.json`: the final policy played one episode in every
-world, held at the end and at any time, by start pool).
+world, held at the end and at any time, by start pool; `evals/model_<iteration>.json`, `watch.log`: the watcher's).
+**The watcher** (`sim2real/watch.py`; `sim2real/train.py` starts it beside itself on a GPU, `--no-watcher` to not): a
+process of its own that evaluates each checkpoint as it is saved on the held-out pool (2,048 worlds, the same starts
+every time; tensorboard's `held_out/<pool>/held_at_end` and `.../held_ever` curves) and films it. Training never waits
+on it; sharing the GPU slows it by about the watcher's share of the work (a held-out pass is ~7-10 training
+iterations' simulation: ~5-10 % at a checkpoint every 100 iterations) and takes ~2 GB more of its memory. A finished
+run after the fact: `python -m lerobot.felix_jr.sim2real.watch <run>/train --once`. Without the watcher, the trainer
+films in its own process (it waits) and evaluates the held-out pool at the end only.
 At every checkpoint (`--video-every`, default each) the policy is filmed on a few random starts (`sim2real/videos.py`:
 6 worlds, every pool equally likely, a side view of each world's object, each tile labelled with its pool and state)
 into `train/videos/model_<iteration>.mp4` (~1 MB a world-episode), on the pod's GPU; a checkpoint after the fact:
@@ -173,8 +180,8 @@ steps: its rollouts, its updates and its observation normalizer (which rsl_rl up
 training mode) only ever see the training pool's worlds; the held-out evaluation runs the frozen policy (eval mode).
 Masking the held-out worlds' updates inside the training batch would still leak through the normalizer. The final
 checkpoint is evaluated, none chosen by its held-out score (choosing would need a third split). `eval.json`:
-`train_pool` and `held_out`, each by start pool. Next: a watcher process beside the trainer, evaluating and filming
-each checkpoint as it is saved (no pause in the training, no evaluation code in its process).
+`train_pool` and `held_out`, each by start pool. Since, the watcher (see "Running") evaluates every checkpoint on the
+held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` is its result for the last.
 
 ### 2026-11-21: the bigger bank, held out, upright
 
@@ -188,7 +195,24 @@ each checkpoint as it is saved (no pause in the training, no evaluation code in 
   tilted swinging grips gone; the grips still high on the bottle. The checkpoints' films in its tensorboard after the
   fact (`videos --tensorboard`, on the pod). The pod stopped itself after (`runpodctl pod stop` with its pod-scoped key:
   `POD_TTL`'s mechanism works).
-- **Read:** the positive control is solved, with privileged observations and 1 mm of noise on one object. Next,
-  away from it: the object pose's noise towards the head's real error, a spatial holdout (a region of the table: an
-  extrapolation test), the watcher process (each checkpoint evaluated on the held-out pool as it is saved), then more
-  objects (a 40-60 mm range) and fewer privileged observations (the finger contacts dropped).
+- **Read:** the positive control is solved, with privileged observations and 1 mm of noise on one object.
+
+### Next (decided 2026-11-21)
+
+- **The object pose's noise stays at 1 mm.** The head camera's error and the kinematics' are already in the starts: each
+  attack start is the gripper moved off the object by a perception offset (`perception_mean_m`, `perception_std_m`) and
+  the joints by an execution spread (`starts.py`, `attack_joints`). The observation noise is another thing: what the
+  actor is told about the object every step, which nothing tells the wrist policy on the robot (it sees the object). It
+  matters only for distillation (a teacher leaning on precision the wrist-camera student cannot have); revisit it if
+  the student shows that gap.
+- **The watcher** (done: "Running").
+- **A spatial holdout:** placements split by a region of the table (a band of reach, a wedge of angle), not at random,
+  beside the random split: an extrapolation number with the interpolation one.
+- **Objects of several sizes.** A bank holds one object (`--object D H G`); its grasps are in absolute units (depth mm,
+  height along the object cm), and its in_jaws and lifted starts valid for that size only, so a bank per size on a
+  grid (diameters 40 / 50 / 60 mm x heights 90 / 120 / 150 mm, the corners and the centre first), sizes between held
+  out (e.g. 45 x 105). One pool across the grid, each start with its object's size (`StartPool.object_size`); one
+  cylinder in the environment, resized per world at reset (`mdp.dr.geom_size`, which recomputes `geom_rbound` and
+  `geom_aabb`), its mass and inertia to match (`dr.pseudo_inertia`, not `dr.body_mass`, which leaves the inertia); the
+  size in the privileged observations.
+- Then fewer privileged observations (the finger contacts dropped).

@@ -12,8 +12,11 @@ on a pod (the run script's), else `sim2real/scratch/train/<time>/`. At the end t
 every world, deterministically: `eval.json`, the share of worlds holding the object at the end and at any time, by
 start pool (the positive control's measure: from the easy starts it should be high); on the held-out pool too
 (`--eval-pool`, default `<pool>_test.npz` beside a `<pool>_train.npz`: placements never trained on, in an environment
-PPO never stepped). At every checkpoint
-(`--video-every`) the policy filmed on a few random starts (`videos.record`): `videos/model_<iteration>.mp4`.
+PPO never stepped). Each checkpoint, as it is saved, is evaluated on the held-out pool and filmed by a process of its
+own beside the trainer (`--watcher`, on by default on a GPU: `sim2real/watch.py`, its output in `watch.log`):
+`evals/model_<iteration>.json`, tensorboard's `held_out/...` curves, `videos/model_<iteration>.mp4` (every
+`--video-every`-th); the final held-out result is its. Without it (`--no-watcher`), checkpoints are filmed in the trainer
+(it waits) and the held-out pool evaluated at the end only.
 
 On a pod, through `cloud/train.py` (the pool sent along, the run in the background). On the Mac's CPU (`--device cpu`,
 a few worlds and iterations): to catch what is miswired before paying for a GPU.
@@ -22,6 +25,8 @@ a few worlds and iterations): to catch what is miswired before paying for a GPU.
 import argparse
 import json
 import os
+import subprocess
+import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -76,7 +81,7 @@ def runner_cfg(iterations: int, seed: int, logger: str, save_interval: int, step
 def filming_runner(base: Any) -> Any:
     """`base` (mjlab's runner class) filming the policy at its checkpoints (`videos.record`), if given a video env."""
 
-    class FilmingRunner(base):  # type: ignore[misc,valid-type]
+    class FilmingRunner(base):
         video: tuple[Any, Any, Path, int] | None = None  # (env, wrapper, folder, every n-th checkpoint)
         _saved = 0
 
@@ -190,6 +195,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--video-worlds", type=int, default=6, help="the worlds filmed (every pool equally likely)"
     )
+    parser.add_argument(
+        "--watcher",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="checkpoints evaluated and filmed by a process beside the trainer (`watch.py`; default: on a GPU)",
+    )
     args = parser.parse_args(argv)
 
     device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -243,7 +254,15 @@ def main(argv: list[str] | None = None) -> None:
     print(f"training on {device}, {num_envs} worlds, {args.iterations} iterations: {log_dir}", flush=True)
 
     runner = filming_runner(MjlabOnPolicyRunner)(wrapped, asdict(agent), str(log_dir), device)
-    if args.video_every > 0:
+    watcher = None
+    if args.watcher if args.watcher is not None else device.startswith("cuda"):
+        command = [sys.executable, "-m", "lerobot.felix_jr.sim2real.watch", str(log_dir), "--worlds",
+                   str(args.eval_worlds), "--video-every", str(args.video_every), "--video-worlds",
+                   str(args.video_worlds), "--device", device, "--parent", str(os.getpid())]  # fmt: skip
+        with open(log_dir / "watch.log", "w") as log:
+            watcher = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+        print(f"watching the checkpoints: pid {watcher.pid}, {log_dir / 'watch.log'}", flush=True)
+    elif args.video_every > 0:
         from .videos import make_video_env
 
         video_env, video_wrapped = make_video_env(settings, args.video_worlds, device)
@@ -256,8 +275,16 @@ def main(argv: list[str] | None = None) -> None:
     policy = runner.get_inference_policy(device=device)
     # the training pool's starts (the training worlds themselves), and the held-out ones in an environment of their
     # own: PPO never collected a step there, its observation normalizer never saw them (the policy frozen, eval mode)
-    result = {"train_pool": evaluate(env, wrapped, policy)}
-    if eval_pool is not None:
+    result: dict[str, Any] = {"train_pool": evaluate(env, wrapped, policy)}
+    last = log_dir / "evals" / f"model_{runner.current_learning_iteration}.json"
+    if watcher is not None:
+        print("waiting for the watcher (the last checkpoints)", flush=True)
+        if watcher.wait() != 0:
+            print(f"the watcher failed ({watcher.returncode}): {log_dir / 'watch.log'}", flush=True)
+    if eval_pool is not None and watcher is not None and last.is_file():
+        # (the watcher's, of the last checkpoint: the final policy)
+        result["held_out"] = json.loads(last.read_text())
+    elif eval_pool is not None:
         from .videos import make_video_env
 
         held_env, held_wrapped = make_video_env(settings, args.eval_worlds, device, eval_pool)

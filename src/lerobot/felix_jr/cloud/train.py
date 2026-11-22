@@ -9,7 +9,8 @@ sync leaves out), the commit and diff recorded with the run, then `python -m ler
 <pool> ...` started on the pod: in the background by default (a training run outlives an ssh session; its output in
 the run's `output.log`, the logs and checkpoints in its `train/`), or streamed here (`--attach`, fetched at the end).
 Then, whenever: `python -m lerobot.felix_jr.cloud.run fetch --host ... --port ... <run id>` brings the run's folder
-home (`cloud/scratch/runs/<run id>/`: `output.log`, `train/` with tensorboard's logs, the checkpoints, `eval.json`).
+home (`cloud/scratch/runs/<run id>/`: `output.log`, `train/` with tensorboard's logs, the checkpoints, `eval.json`;
+`evals/` and `watch.log`, the watcher's: each checkpoint evaluated on the held-out pool beside the trainer).
 Stop the pod after (`POD_TTL` stops it in any case).
 """
 

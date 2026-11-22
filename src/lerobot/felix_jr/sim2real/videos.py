@@ -39,7 +39,7 @@ COLORS = {"held": (0, 200, 0), "fingers": (255, 200, 0), "tipped": (230, 0, 0), 
 
 def _pools_of_worlds(env: "ManagerBasedRlEnv") -> list[str]:
     """Each world's start pool (the start it holds, found in the pool by its state)."""
-    cache = env._felix_pool  # type: ignore[attr-defined]
+    cache = env._felix_pool
     pool = StartPool.load(Path(cache["path"]))
     layout = pool.layout(env.sim.mj_model)[0]
     now = env.sim.data.qpos.cpu().numpy()
@@ -214,7 +214,7 @@ def main(argv: list[str] | None = None) -> None:
     env, wrapped = make_video_env(settings, args.worlds, device)
     agent = runner_cfg(1, 0, "tensorboard", 1, 24)
     runner = MjlabOnPolicyRunner(wrapped, asdict(agent), str(args.train_dir / "videos"), device)
-    runner.load(str(checkpoint))
+    runner.load(str(checkpoint), map_location=device)
     frames: list[np.ndarray] = []
     out = record(
         env,
