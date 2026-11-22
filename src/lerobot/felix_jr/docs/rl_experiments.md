@@ -151,6 +151,7 @@ The easiest version that should work: if it does not learn, the environment is w
 | `20261121_144032` | RTX 4090 | 4,096 x 1,000 | 27 min (1.6 s an iteration) | train 99.7 / 99.4 / 99.5 / 99.8 / 99.9 %; **held out 99.9 / 99.4 / 100 / 100 / 100 %** | train 97.5 / 98.4 / 99.5 / 96.0 / 95.9 %; **held out 98.3 / 98.7 / 100 / 97.5 / 97.1 %** |
 | `20261121_205721` | RTX 4090 | 4,096 x 1,000 | 29 min (1.7 s an iteration, the watcher beside it) | train 99.9 / 100 / 99.9 / 99.8 / 99.9 %; **side held out 98.7 / 95.8 / 99 / 100 / 100 %** | train 97.3 / 98.1 / 99 / 96.5 / 95.8 %; **side held out 95.6 / 90.5 / 99 / 96.5 / 96.4 %** |
 | `20261122_171622` | RTX 4090 | 4,096 x 700 (stopped) | 27 min (2.25 s an iteration, the watcher beside it) | **multi-size held out 99.3 / 99.6 / 100 / 98.4 / 99.2 %** | **multi-size held out 96.9 / 98.5 / 99.6 / 94.1 / 95.4 %** |
+| `20261122_174436` | RTX 4090 | 4,096 x 700 | 25 min (the watcher beside it) | train 96.2 % at the end; **no finger contacts, held out 99.4 / 99.8 / 100 / 99.2 / 98.6 %** | **no finger contacts, held out 97.1 / 98.3 / 99.8 / 95.7 / 94.6 %** |
 
 ### 2026-11-21: the first runs (the positive control)
 
@@ -242,6 +243,19 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
   sees no time; a time-out is no failure). On the robot, where a hold lasts longer than 12 s, it would drop bottles.
   Fixes to weigh: a squeeze term while held (the gripper servo's load) or a penalty on opening while lifted; an
   absolute or latched gripper command (no random walk).
+
+### 2026-11-22: experiment A, the actor without finger contacts
+
+- **`20261122_174436`** (RTX 4090, 4,096 worlds x 700 iterations, 25 min; commit `b3421f72f`): as `20261122_171622`
+  (multi-size, `multi1`) but the actor without `finger_contacts` (`--actor-exclude finger_contacts`; the critic keeps
+  them): the claw has no touch sensors. **Held at the end on the held-out placements: 97.1 %** (attack 98.3, at the
+  object 99.8, in the jaws 95.7, lifted 94.6; the training pool 96.2 %), against 96.9 % with them. The curve (all, %;
+  with contacts in brackets): 100 it. 87.8 (88.9), 200 94.4 (95.3), 300 96.6 (96.8), 400 96.6 (96.3), 500 97.4 (96.4),
+  600 95.6 (96.4), 699 97.1 (96.9 at 700).
+- **Read:** the contact flags carried nothing the policy could not get otherwise: what the robot does measure (the
+  gripper's position against its target, the servos' loads, the joints) tells it as much, with the object's live pose
+  still told. Whether that holds without the live pose is experiment B2. The drops (in the jaws, lifted: ~95 %) are
+  unchanged: the gripper's random walk is not about contact sensing.
 
 ### Next (decided 2026-11-21)
 
