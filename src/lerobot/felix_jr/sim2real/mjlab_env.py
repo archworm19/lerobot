@@ -148,6 +148,7 @@ def env_cfg(
     pool_weights: Mapping[str, float] | None = None,
     object_noise_m: float = OBJECT_NOISE_M,
     size_error_m: float = SIZE_ERROR_M,
+    actor_exclude: Sequence[str] = (),
 ) -> "ManagerBasedRlEnvCfg":
     """The grasp-and-lift environment: `body` on the table at `table_z`, the arm from `start` (the module docstring).
 
@@ -159,6 +160,7 @@ def env_cfg(
     `give_scale`: mjlab's correction to the fingers' give (`MJLAB_GIVE_SCALE`); 1.0 for the CPU simulator's model as is
     (`model_differences` then finds none). The task's action, observations, rewards and terminations: `mjlab_task`;
     `object_noise_m` the object pose's noise in the actor's observations (std, m; the axis's a tenth, unitless).
+    `actor_exclude`: observation terms the actor goes without (privileged ones dropped: the critic keeps them).
     `size_error_m`: for a pool whose objects vary in size, the error in the radius and height the actor is told, drawn
     at each reset and kept for the episode (std, m; with `randomize` only).
     """
@@ -237,6 +239,10 @@ def env_cfg(
         pose_noise
     )  # (the actor's size off by the episode's error)
     terms, critic_terms = group(actor_object), group(critic_object)
+    unknown = set(actor_exclude) - set(terms)
+    if unknown:
+        raise ValueError(f"no actor observation {sorted(unknown)} to leave out (there are: {sorted(terms)})")
+    terms = {k: v for k, v in terms.items() if k not in actor_exclude}  # (the critic keeps them: privileged)
     events: dict[str, EventTermCfg] = {
         "reset_scene": EventTermCfg(func=base_mdp.reset_scene_to_default, mode="reset"),
         "reset_object": EventTermCfg(

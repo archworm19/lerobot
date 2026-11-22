@@ -185,6 +185,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--pool-weights", nargs="+", default=None, metavar="POOL=W")
     parser.add_argument("--object-noise-mm", type=float, default=1000 * me.OBJECT_NOISE_M)
     parser.add_argument(
+        "--actor-exclude",
+        nargs="+",
+        default=[],
+        metavar="TERM",
+        help="observation terms the actor goes without (e.g. finger_contacts); the critic keeps them",
+    )
+    parser.add_argument(
         "--size-error-mm",
         type=float,
         default=1000 * SIZE_ERROR_M,
@@ -235,6 +242,7 @@ def main(argv: list[str] | None = None) -> None:
         pool_weights=weights,
         object_noise_m=args.object_noise_mm / 1000,
         size_error_m=args.size_error_mm / 1000,
+        actor_exclude=tuple(args.actor_exclude),
         randomize=True,
     )
     cfg.seed = args.seed
@@ -249,6 +257,7 @@ def main(argv: list[str] | None = None) -> None:
         "pool_weights": weights or me.POOL_WEIGHTS,
         "object_noise_m": args.object_noise_mm / 1000,
         "size_error_m": args.size_error_mm / 1000,
+        "actor_exclude": list(args.actor_exclude),
         "reward_weights": me.REWARD_WEIGHTS,
         "action": {
             "arm_step_deg": task.ARM_STEP_DEG,
