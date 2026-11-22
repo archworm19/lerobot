@@ -206,8 +206,10 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
   matters only for distillation (a teacher leaning on precision the wrist-camera student cannot have); revisit it if
   the student shows that gap.
 - **The watcher** (done: "Running").
-- **A spatial holdout:** placements split by a region of the table (a band of reach, a wedge of angle), not at random,
-  beside the random split: an extrapolation number with the interpolation one.
+- **A spatial holdout:** placements split by a region, not at random (`start_pool --split ahead|side|diameter|height
+  --holdout-at high|low|middle`): an extrapolation number beside the random split's interpolation one. In `pyri2`'s
+  476 anchored placements reach spans only 0.22-0.35 m ahead (its farthest 15 % a 2 cm band), the side -0.15 to
+  +0.15 m: the first, `pyri2side`, holds out the side's high quarter (the arm turned past where it trained).
 - **Objects of several sizes.** A bank holds one object (`--object D H G`); its grasps are in absolute units (depth mm,
   height along the object cm), and its in_jaws and lifted starts valid for that size only, so a bank per size on a
   grid (diameters 40 / 50 / 60 mm x heights 90 / 120 / 150 mm, the corners and the centre first), sizes between held

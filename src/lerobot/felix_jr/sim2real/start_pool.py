@@ -3,6 +3,13 @@
   uv run --extra felix_jr_sim python -m lerobot.felix_jr.sim2real.start_pool <bank.jsonl> <out.npz>
       [--per-pool attack=1024 at_object=1024 in_jaws=1024 lifted=1024] [--seed 0] [--workers 6]
       [--holdout 0.15 [--test-per-pool 1024]]   # a held-out split by placement: <out>_train.npz, <out>_test.npz
+      [--split random|ahead|side|diameter|height] [--holdout-at high|low|middle]
+
+The held-out split is by placement (a placement's starts are near copies of each other: a split by start would leak):
+at random (`--split random`: placements among the trained ones, an interpolation test), or a region of the placements
+by one of their coordinates (`SPLIT_KEYS`: how far ahead of the arm's base, how far to its side, the object's diameter,
+its height), its `--holdout` share at the high end, the low end or the middle of it (`split_placements`): the ends an
+extrapolation test, the middle a band never trained on with trained ones either side.
 
 A start (`starts.StartSampler`: an anchor of the bank, one of its pools, the arm arrived as the real one does, settled,
 checked) is a whole simulator state; drawing one is a short simulation in itself (the attack pool's arrival), too slow
@@ -33,6 +40,7 @@ if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
 POOLS = ("attack", "at_object", "in_jaws", "lifted")
+SPLIT_KEYS = ("random", "ahead", "side", "diameter", "height")
 FREE_JOINT = (
     "floating_base_joint"  # (the object's: unnamed in `scene`, named by mjlab; `mjlab_env._joint_slices`)
 )
@@ -285,6 +293,56 @@ def _object_z_index(m: "mujoco.MjModel") -> int:
     return found[0] + 2
 
 
+def placement_coordinate(placement: Mapping[str, Any], base_xy: Sequence[float], key: str) -> float:
+    """A bank placement's `key` (`SPLIT_KEYS`, not random; m).
+
+    Ahead of the arm's base (along the robot's facing, -x), to its side (+y), the object's diameter or height.
+    """
+    x, y = placement["bottom_root"][:2]
+    if key == "ahead":
+        return float(base_xy[0] - x)
+    if key == "side":
+        return float(y - base_xy[1])
+    if key == "diameter":
+        return 2.0 * float(placement["radius"])
+    if key == "height":
+        return float(placement["height"])
+    raise ValueError(f"unknown split {key!r} (known: {SPLIT_KEYS})")
+
+
+def split_placements(
+    placements: Sequence[Mapping[str, Any]],
+    share: float,
+    key: str = "random",
+    at: str = "high",
+    base_xy: Sequence[float] = (0.0, 0.0),
+    seed: int = 0,
+) -> tuple[set[int], set[int]]:
+    """The bank placements (`placement` records) split by index: (train, held out).
+
+    `share` of them held out, at random or at the `at` end (high, low, or the middle) of `key`
+    (`placement_coordinate`; `base_xy` the arm's base, root frame).
+    """
+    index = np.array([int(p["index"]) for p in placements])
+    n_test = max(1, int(round(share * len(index))))
+    if key == "random":
+        test = set(np.random.default_rng(seed).permutation(index)[:n_test].tolist())
+    else:
+        value = np.array([placement_coordinate(p, base_xy, key) for p in placements])
+        order = np.argsort(value, kind="stable")
+        if at == "high":
+            picked = order[::-1][:n_test]
+        elif at == "low":
+            picked = order[:n_test]
+        elif at == "middle":
+            start = (len(order) - n_test) // 2
+            picked = order[start : start + n_test]
+        else:
+            raise ValueError(f"unknown end {at!r} (high, low, middle)")
+        test = set(index[picked].tolist())
+    return set(index.tolist()) - test, test
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """Command line entry point; see the module docstring."""
     from lerobot.felix_jr.harness import api
@@ -303,6 +361,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="this share of the bank's anchored placements held out: <out>_train.npz and <out>_test.npz",
     )
     parser.add_argument("--test-per-pool", type=int, default=1024, help="the held-out pool's starts a pool")
+    parser.add_argument(
+        "--split", choices=SPLIT_KEYS, default="random", help="held out at random or by a region"
+    )
+    parser.add_argument("--holdout-at", choices=("high", "low", "middle"), default="high")
     args = parser.parse_args(argv)
     per_pool = {k: int(v) for k, v in (item.split("=") for item in args.per_pool)}
     unknown = set(per_pool) - set(POOLS)
@@ -315,12 +377,22 @@ def main(argv: Sequence[str] | None = None) -> None:
     else:  # (split by placement: a placement's starts are near copies of each other, a split by start would leak)
         from . import bank
 
+        config, lines = bank.load(args.bank)
         anchored = sorted(
-            line["placement"]["index"] for line in bank.load(args.bank)[1] if line["anchor"] is not None
+            (line["placement"] for line in lines if line["anchor"] is not None), key=lambda p: p["index"]
         )
-        order = np.random.default_rng(args.seed).permutation(anchored)
-        n_test = max(1, int(round(args.holdout * len(order))))
-        test, train = set(order[:n_test].tolist()), set(order[n_test:].tolist())
+        base = XleRobotModel.load(args.model)
+        base_xy = base.frame_pose(f"{config.arm}_base_link", base.joint_vector())[:2, 3]
+        train, test = split_placements(
+            anchored, args.holdout, args.split, args.holdout_at, base_xy, args.seed
+        )
+        if args.split != "random":
+            values = [placement_coordinate(p, base_xy, args.split) for p in anchored if p["index"] in test]
+            print(
+                f"held out: {len(test)} of {len(anchored)} placements, {args.split} "
+                f"{1000 * min(values):.0f}-{1000 * max(values):.0f} mm ({args.holdout_at})",
+                flush=True,
+            )
         stem = args.out.with_suffix("")
         jobs = [
             (stem.with_name(stem.name + "_train.npz"), per_pool, train),
