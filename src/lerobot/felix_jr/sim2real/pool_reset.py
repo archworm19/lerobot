@@ -1,20 +1,19 @@
 """The start pool in the mjlab environment: a reset event term that writes one of the pool's starts into each world.
 
-`PoolReset` is an mjlab class-based event term (`EventTermCfg(func=PoolReset, mode="reset", params=...)`), bound to
-its entities the mjlab way: `params["robot"]` and `params["object"]` are `SceneEntityCfg`s, which mjlab resolves
-against the scene before building the term. Built once (`__init__`): the pool (`start_pool.StartPool`, its `.npz`)
+`PoolReset` is an mjlab class-based event term (`EventTermCfg(func=PoolReset, mode="reset", params=...)`). Its robot
+is bound the mjlab way, `params["robot"]` a `SceneEntityCfg` that mjlab resolves against the scene before building the
+term; its object is `params["object"]`, the object itself (an `mjlab_object.MjlabCylinder`: mjlab passes it through). Built once (`__init__`): the pool (`start_pool.StartPool`, its `.npz`)
 read, laid out as the environment's model lays out its state, put on the device. At each reset (`__call__`), for each
 world being reset: a pool drawn by `pool_weights`, then a start of it at random; its joints' positions and velocities,
 its actuators' commands (and the robot's joint position targets, which mjlab derives the controls from) written.
 
-A pool whose objects vary in size (`StartPool.sizes_vary`) also has each reset world's object made its start's
-(`mjlab_object.write_bodies`: the shape's fields, its mass times a log-uniform draw in `mass_range`), the fields it
-writes declared per world and the constants recomputed after (`mjlab_object.sized_declaration`: this term's
-`model_fields` and `recompute`, read by mjlab once the term is built). Everything that knows the object's shape is
-`mjlab_object`'s; this term draws starts and writes state. The model is where each world's object size is kept
-(`mjlab_object.object_dims` reads it); the term keeps only what is not in the model: each world's start (`rows`: its
-pool, `pools_of_worlds`) and the error in the size the actor is told (`size_error`, drawn at each reset,
-`size_error_m`). A pool of one object declares nothing: no field per world, nothing recomputed.
+A pool whose objects vary in size (`StartPool.sizes_vary`) also has each reset world's object made its start's: the
+object writes itself (`write`: its shape's fields, its mass's randomization) and says what that needs declared
+(`declaration`: this term's `model_fields` and `recompute`, read by mjlab once the term is built), and draws the error
+in the size the actor is told (`draw_size_error`). Everything that knows the object's shape is the object's; this term
+draws starts and writes state. The model is where each world's object size is kept (the object's `dims` read it); the
+term keeps only what is not in the model: each world's start (`rows`: its pool, `pools_of_worlds`) and the episode's
+size error (`size_error`). A pool of one object declares nothing: no field per world, nothing recomputed.
 
 `pool_reset(env)`: the environment's term (mjlab's event manager keeps a built term in its config's `func`).
 """
@@ -25,7 +24,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from . import mjlab_object as obj
 from .start_pool import POOLS, StartPool, _layout
 
 if TYPE_CHECKING:
@@ -46,10 +44,8 @@ class PoolReset:
         self.path = str(params["path"])
         self.pool = StartPool.load(Path(self.path))
         self.sized = self.pool.sizes_vary
-        if (
-            self.sized
-        ):  # (the object's fields per world, the constants recomputed: `mjlab_object.sized_declaration`)
-            self.model_fields, self.recompute = obj.sized_declaration()
+        if self.sized:  # (the object's fields per world, the constants recomputed: its `declaration`)
+            self.model_fields, self.recompute = params["object"].declaration()
         m, dev = env.sim.mj_model, env.device
         qpos, qvel, ctrl = self.pool.layout(m)
         self.qpos = torch.as_tensor(qpos, device=dev, dtype=env.sim.data.qpos.dtype)
@@ -69,10 +65,7 @@ class PoolReset:
         pairs = [(a, names.index(n)) for a, n in enumerate(_layout(m)["actuators"]) if n in names]
         self.target_columns = torch.as_tensor([a for a, _ in pairs], device=dev)
         self.target_joints = torch.as_tensor([j for _, j in pairs], device=dev)
-        self.object_entity = params["object"].name
-        obj.object_ids(
-            env, self.object_entity
-        )  # (refuses an object that is not one cylinder, now rather than later)
+        params["object"].ids(env)  # (refuses an object that is not what it says, now rather than later)
         self.rows = torch.zeros(env.num_envs, dtype=torch.long, device=dev)  # each world's start
         self.size_error = torch.zeros(
             env.num_envs, 2, device=dev
@@ -86,12 +79,8 @@ class PoolReset:
         pool_weights: Mapping[str, float],
         robot: Any,
         object: Any,  # noqa: A002  (the entity's role, as mjlab's own terms name theirs)
-        mass_range: tuple[float, float] = (1.0, 1.0),
-        size_error_m: float = 0.0,
     ) -> None:
         """A start for each world in `env_ids` (the params are `__init__`'s, as mjlab passes them each call)."""
-        import torch
-
         if len(env_ids) == 0:
             return
         rows = self._draw(len(env_ids))
@@ -104,10 +93,8 @@ class PoolReset:
             self.ctrl[rows][:, self.target_columns], joint_ids=self.target_joints, env_ids=env_ids
         )
         if self.sized:
-            lo, hi = np.log(mass_range[0]), np.log(mass_range[1])
-            scale = torch.exp(lo + (hi - lo) * torch.rand(len(env_ids), device=rows.device))
-            obj.write_bodies(env, env_ids, self.objects[rows], scale, self.object_entity, self.pool.shape)
-            self.size_error[env_ids] = size_error_m * torch.randn(len(env_ids), 2, device=rows.device)
+            object.write(env, env_ids, self.objects[rows])
+            self.size_error[env_ids] = object.draw_size_error(len(env_ids), rows.device)
 
     def _draw(self, n: int) -> "torch.Tensor":
         """`n` starts: a pool each by the weights, then a start of it at random."""

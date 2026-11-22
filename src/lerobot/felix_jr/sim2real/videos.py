@@ -75,7 +75,8 @@ def record(
     term = pool_reset(env)
     n = env.num_envs
     pools = term.pools_of_worlds() if term is not None else [""] * n
-    _, object_geom = obj.object_ids(env)
+    cyl = obj.of(env)
+    _, object_geom = cyl.ids(env)
     # each world's object size (its own once resized: the copy of the model rendering each world is given it)
     sizes = env.sim.model.geom_size[..., object_geom, :].cpu().numpy().reshape(-1, 3)
     ended: list[str | None] = [None] * n
@@ -87,8 +88,8 @@ def record(
             for step in range(int(env.max_episode_length)):
                 qpos = env.sim.data.qpos.cpu().numpy()
                 qvel = env.sim.data.qvel.cpu().numpy()
-                centers = obj.object_pose(env)[0].cpu().numpy()
-                held = (task.held(env) > 0).cpu().numpy()
+                centers = cyl.pose(env)[0].cpu().numpy()
+                held = (task.held(env, cyl) > 0).cpu().numpy()
                 fingers = task.finger_contacts(env).cpu().numpy()
                 tiles = []
                 for w in range(n):

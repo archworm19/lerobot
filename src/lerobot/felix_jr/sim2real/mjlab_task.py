@@ -33,12 +33,14 @@ import numpy as np
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 from lerobot.felix_jr.harness.grasping import LIFT_M
 
-from . import mjlab_object as obj, robot
+from . import robot
 from .refine import HELD_FRACTION, KNOCKED_DEG
 
 if TYPE_CHECKING:
     import torch
     from mjlab.envs import ManagerBasedRlEnv
+
+    from .mjlab_object import MjlabCylinder
 
 try:  # (mjlab only with `--extra felix_jr_gpu`: the action term subclasses its base)
     from mjlab.managers.action_manager import ActionTerm, ActionTermCfg
@@ -191,47 +193,55 @@ def finger_contacts(env: "ManagerBasedRlEnv") -> "torch.Tensor":
 
 
 # ---- rewards and terminations ---------------------------------------------------------------------------------------
+# Generic over the object: each takes it (`obj`, an `mjlab_object.MjlabCylinder`, through the term's `params`) and
+# asks it for what the stage needs: where a grasp puts it (`grasp_point`), the jaws' region (`between_jaws`), its
+# height standing (`rest_z`), what upright means (`upright`).
 
 
-def reach(env: "ManagerBasedRlEnv", std: float = REACH_STD_M) -> "torch.Tensor":
-    """exp(-|the object's axis from the grasp point (`mjlab_object.grasp_point`)| / std)."""
+def reach(env: "ManagerBasedRlEnv", obj: "MjlabCylinder", std: float = REACH_STD_M) -> "torch.Tensor":
+    """exp(-|the object's axis from the grasp point (`grasp_point`)| / std)."""
     import torch
 
     perp, _ = obj.axis_from_pinch(env)
     return torch.exp(-torch.linalg.norm(perp - obj.grasp_point(env), dim=1) / std)
 
 
+def enclosed(env: "ManagerBasedRlEnv", obj: "MjlabCylinder") -> "torch.Tensor":
+    """1 where the object is between the jaws (`between_jaws`)."""
+    return obj.between_jaws(env)
+
+
 def both_fingers(env: "ManagerBasedRlEnv") -> "torch.Tensor":
-    """1 where both fingers' pads touch the object."""
+    """1 where both fingers' pads touch the object (the pads' sensors look for it: `sensors`)."""
     return finger_contacts(env).prod(dim=1)
 
 
-def rise(env: "ManagerBasedRlEnv") -> "torch.Tensor":
-    """The object's height above standing on the table (`mjlab_object.rest_z`), over the lift, in [0, 1]."""
-    z = env.scene[obj.ENTITY].data.root_link_pos_w[:, 2]
-    return ((z - obj.rest_z(env)) / LIFT_M).clamp(0.0, 1.0)
+def rise(env: "ManagerBasedRlEnv", obj: "MjlabCylinder") -> "torch.Tensor":
+    """The object's height above standing on the table (`rest_z`), over the lift, in [0, 1]."""
+    center, _ = obj.pose(env)
+    return ((center[:, 2] - obj.rest_z(env)) / LIFT_M).clamp(0.0, 1.0)
 
 
-def held(env: "ManagerBasedRlEnv") -> "torch.Tensor":
+def held(env: "ManagerBasedRlEnv", obj: "MjlabCylinder") -> "torch.Tensor":
     """1 where the object is up `HELD_FRACTION` of the lift, both fingers on it, and upright within `HELD_MAX_TILT_DEG`.
 
     (Upright since 2026-11-21: the first run's policy held bottles tilted 20-30 deg, gripped high and swinging, which
     the lift alone paid for in full.)
     """
     upright = obj.upright(env, HELD_MAX_TILT_DEG)
-    return (rise(env) >= HELD_FRACTION).float() * both_fingers(env) * upright.float()
+    return (rise(env, obj) >= HELD_FRACTION).float() * both_fingers(env) * upright.float()
 
 
-def swing(env: "ManagerBasedRlEnv") -> "torch.Tensor":
+def swing(env: "ManagerBasedRlEnv", obj: "MjlabCylinder") -> "torch.Tensor":
     """The object's angular speed (rad/s) while it is off the table (rise past a fifth of the lift): a penalty's term."""
     import torch
 
-    speed = torch.linalg.norm(env.scene[obj.ENTITY].data.root_link_ang_vel_w, dim=1)
-    return speed * (rise(env) > 0.2).float()
+    speed = torch.linalg.norm(env.scene[obj.entity].data.root_link_ang_vel_w, dim=1)
+    return speed * (rise(env, obj) > 0.2).float()
 
 
-def tipped(env: "ManagerBasedRlEnv") -> "torch.Tensor":
-    """Where the object's axis is past `refine.KNOCKED_DEG` from upright."""
+def tipped(env: "ManagerBasedRlEnv", obj: "MjlabCylinder") -> "torch.Tensor":
+    """Where the object is past `refine.KNOCKED_DEG` from upright."""
     return ~obj.upright(env, KNOCKED_DEG)
 
 
@@ -240,15 +250,18 @@ def arm_on_table(env: "ManagerBasedRlEnv") -> "torch.Tensor":
     return _touching(env, ARM_TABLE) > 0
 
 
-def sensors() -> tuple[Any, ...]:
-    """The contact sensors: each finger's pads on the object, the arm on the table."""
+def sensors(object_match: Any) -> tuple[Any, ...]:
+    """The contact sensors: each finger's pads on the object, the arm on the table.
+
+    `object_match`: which elements are the object (its `contact_match`).
+    """
     from mjlab.sensor import ContactMatch, ContactSensorCfg
 
     def pads(name: str, which: str) -> Any:
         return ContactSensorCfg(
             name=name,
             primary=ContactMatch(mode="geom", pattern=rf"finger_{which}_pad\d+", entity="robot"),
-            secondary=ContactMatch(mode="body", pattern="object", entity="object"),
+            secondary=object_match,
             fields=("found",),
             reduce="none",
         )

@@ -188,6 +188,13 @@ def env_cfg(
     else:
         sized = False
     body = body or obj.default_object(table_z)
+    # the object: everything about it that knows its shape (construction, contacts, reset, observations, geometry)
+    cyl = obj.MjlabCylinder(
+        body,
+        sized=sized,
+        mass_range=MASS_RANGE if randomize and sized else (1.0, 1.0),
+        size_error_m=size_error_m if randomize and sized else 0.0,
+    )
     start = start or {**REST, "gripper.pos": 30.0}
     entities = {
         "robot": EntityCfg(
@@ -197,7 +204,7 @@ def env_cfg(
             ),
             articulation=EntityArticulationInfoCfg(actuators=(XmlActuatorCfg(target_names_expr=(".*",)),)),
         ),
-        obj.ENTITY: obj.entity_cfg(body),
+        cyl.entity: cyl.entity_cfg(),
         "table": EntityCfg(spec_fn=lambda: table_spec(model, arm, table_z)),
     }
     pose_noise = (
@@ -209,20 +216,27 @@ def env_cfg(
         if object_noise_m > 0
         else None
     )
-    terms = {
-        "joint_pos": ObservationTermCfg(func=base_mdp.joint_pos_rel, noise=Unoise(n_min=-0.002, n_max=0.002)),
-        "joint_vel": ObservationTermCfg(func=base_mdp.joint_vel_rel),
-        "object_in_root": ObservationTermCfg(func=obj.object_in_root, noise=pose_noise),
-        "object_in_pinch": ObservationTermCfg(func=obj.object_in_pinch, noise=pose_noise),
-        "servo_loads": ObservationTermCfg(func=task.servo_loads),
-        "finger_contacts": ObservationTermCfg(func=task.finger_contacts),
-        "actions": ObservationTermCfg(func=base_mdp.last_action),
-    }
-    if sized:  # (one object's runs keep their observations: their checkpoints still load)
-        terms["object_size"] = ObservationTermCfg(func=obj.object_size, params={"estimated": True})
-    critic_terms = dict(terms)  # (the true size: the actor's is off by the episode's error)
-    if sized:
-        critic_terms["object_size"] = ObservationTermCfg(func=obj.object_size)
+
+    def group(object_terms: dict[str, Any]) -> dict[str, Any]:
+        # (in the order checkpoints were trained with: the object's pose after the joints, its size, if any, last)
+        size = {"object_size": object_terms["object_size"]} if "object_size" in object_terms else {}
+        return {
+            "joint_pos": ObservationTermCfg(
+                func=base_mdp.joint_pos_rel, noise=Unoise(n_min=-0.002, n_max=0.002)
+            ),
+            "joint_vel": ObservationTermCfg(func=base_mdp.joint_vel_rel),
+            "object_in_root": object_terms["object_in_root"],
+            "object_in_pinch": object_terms["object_in_pinch"],
+            "servo_loads": ObservationTermCfg(func=task.servo_loads),
+            "finger_contacts": ObservationTermCfg(func=task.finger_contacts),
+            "actions": ObservationTermCfg(func=base_mdp.last_action),
+            **size,
+        }
+
+    actor_object, critic_object = cyl.observation_terms(
+        pose_noise
+    )  # (the actor's size off by the episode's error)
+    terms, critic_terms = group(actor_object), group(critic_object)
     events: dict[str, EventTermCfg] = {
         "reset_scene": EventTermCfg(func=base_mdp.reset_scene_to_default, mode="reset"),
         "reset_object": EventTermCfg(
@@ -234,15 +248,15 @@ def env_cfg(
                     "y": (-object_sigma_m, object_sigma_m),
                 },
                 "velocity_range": {},
-                "asset_cfg": SceneEntityCfg("object"),
+                "asset_cfg": SceneEntityCfg(cyl.entity),
             },
         ),
     }
     if start_pool is not None:
         from .pool_reset import TERM, PoolReset
 
-        # the pool's starts written at each reset; for objects of several sizes each world's object resized too, the
-        # fields it writes made per world (`PoolReset`: how, and why `set_const` after)
+        # the pool's starts written at each reset; for objects of several sizes each world's object resized too (the
+        # object's `write`, its fields made per world: its `declaration`, and why `set_const` after)
         events = {
             "reset_scene": events["reset_scene"],
             TERM: EventTermCfg(
@@ -252,9 +266,7 @@ def env_cfg(
                     "path": str(start_pool),
                     "pool_weights": dict(pool_weights or POOL_WEIGHTS),
                     "robot": SceneEntityCfg("robot"),
-                    "object": SceneEntityCfg("object"),
-                    "mass_range": MASS_RANGE if randomize and sized else (1.0, 1.0),
-                    "size_error_m": size_error_m if randomize and sized else 0.0,
+                    "object": cyl,
                 },
             ),
         }
@@ -289,17 +301,19 @@ def env_cfg(
                         func=dr.body_mass,
                         mode="startup",
                         params={
-                            "asset_cfg": SceneEntityCfg("object"),
+                            "asset_cfg": SceneEntityCfg(cyl.entity),
                             "operation": "scale",
                             "distribution": "log_uniform",
                             "ranges": MASS_RANGE,
                         },
                     )
                 }
-            ),  # (a sized pool's mass drawn at each reset instead: `pool_reset.PoolReset`)
+            ),  # (a sized pool's mass drawn at each reset instead: the object's `write`)
         }
     return ManagerBasedRlEnvCfg(
-        scene=SceneCfg(num_envs=num_envs, env_spacing=0.0, entities=entities, sensors=task.sensors()),
+        scene=SceneCfg(
+            num_envs=num_envs, env_spacing=0.0, entities=entities, sensors=task.sensors(cyl.contact_match())
+        ),
         observations={
             "actor": ObservationGroupCfg(terms, enable_corruption=True),
             "critic": ObservationGroupCfg(critic_terms, enable_corruption=False),
@@ -307,18 +321,20 @@ def env_cfg(
         actions={"joint_targets": task.delta_action_cfg(model, arm)},
         events=events,
         rewards={  # (staged, each stage paying more than the one before: `mjlab_task`'s docstring)
-            "reach": RewardTermCfg(func=task.reach, weight=REWARD_WEIGHTS["reach"]),
-            "between_jaws": RewardTermCfg(func=obj.between_jaws, weight=REWARD_WEIGHTS["between_jaws"]),
+            "reach": RewardTermCfg(func=task.reach, weight=REWARD_WEIGHTS["reach"], params={"obj": cyl}),
+            "between_jaws": RewardTermCfg(
+                func=task.enclosed, weight=REWARD_WEIGHTS["between_jaws"], params={"obj": cyl}
+            ),
             "both_fingers": RewardTermCfg(func=task.both_fingers, weight=REWARD_WEIGHTS["both_fingers"]),
-            "rise": RewardTermCfg(func=task.rise, weight=REWARD_WEIGHTS["rise"]),
-            "held": RewardTermCfg(func=task.held, weight=REWARD_WEIGHTS["held"]),
+            "rise": RewardTermCfg(func=task.rise, weight=REWARD_WEIGHTS["rise"], params={"obj": cyl}),
+            "held": RewardTermCfg(func=task.held, weight=REWARD_WEIGHTS["held"], params={"obj": cyl}),
             "action_rate": RewardTermCfg(func=base_mdp.action_rate_l2, weight=REWARD_WEIGHTS["action_rate"]),
-            "swing": RewardTermCfg(func=task.swing, weight=REWARD_WEIGHTS["swing"]),
+            "swing": RewardTermCfg(func=task.swing, weight=REWARD_WEIGHTS["swing"], params={"obj": cyl}),
             "failed": RewardTermCfg(func=base_mdp.is_terminated, weight=REWARD_WEIGHTS["failed"]),
         },
         terminations={
             "time_out": TerminationTermCfg(func=base_mdp.time_out, time_out=True),
-            "tipped": TerminationTermCfg(func=task.tipped),
+            "tipped": TerminationTermCfg(func=task.tipped, params={"obj": cyl}),
             "arm_on_table": TerminationTermCfg(func=task.arm_on_table),
         },
         sim=sim_cfg(),

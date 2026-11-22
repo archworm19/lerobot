@@ -37,7 +37,7 @@ import numpy as np
 from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 from lerobot.utils.import_utils import require_package
 
-from . import mjlab_env as me, mjlab_task as task
+from . import mjlab_env as me, mjlab_object as obj, mjlab_task as task
 from .mjlab_object import SIZE_ERROR_M
 from .start_pool import POOLS
 
@@ -133,15 +133,16 @@ def evaluate(env: Any, wrapped: Any, policy: Any) -> dict[str, Any]:
     if term is None:
         raise ValueError("evaluating needs an environment whose starts are a pool's")
     which = np.array(term.pools_of_worlds())  # (each world's start pool, from the reset just done)
+    cyl = obj.of(env)  # (the environment's object)
     ever = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     done = torch.zeros_like(ever)
     held_at_end = torch.zeros_like(ever)
-    holding = task.held(env) > 0
+    holding = task.held(env, cyl) > 0
     with torch.inference_mode():
         for _ in range(int(env.max_episode_length)):
             before = holding  # (a world whose episode ends in this step is reset within it: its end is the step before)
             obs, _, dones, _ = wrapped.step(policy(obs))
-            holding = task.held(env) > 0
+            holding = task.held(env, cyl) > 0
             ended = dones.bool() & ~done
             held_at_end |= ended & before
             ever |= (holding & ~done & ~ended) | (ended & before)

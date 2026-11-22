@@ -256,8 +256,11 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
   geometry, batched (N objects: parameters and poses; centroid, volume, bounds, inertia per kg, surface distance), the
   same code on numpy (planning) and torch (mjlab, on the GPU; `array-api-compat`); a `GraspFamily` is planning's grasps
   of one object; an `ObjectRecord` is primitives with masses, written down (the bank's placements and the pools' rows
-  both go through it: pool format 3 names the shape and its columns); how it lives in mjlab
-  in `sim2real/mjlab_object.py` (construction: `entity_cfg`; reset: `sized_declaration`, `write_bodies`;
-  observations; the task geometry the rewards are built from). `mjlab_task` keeps what knows the task and the robot;
-  `PoolReset` draws starts and writes state. A second shape: those two modules and the bank's grasp planning.
+  both go through it: pool format 3 names the shape and its columns); how it lives in mjlab in
+  `sim2real/mjlab_object.py`: `MjlabCylinder`, a stateless configuration built from the object's record (construction:
+  `entity_cfg`; contacts: `contact_match`, for the finger pads' sensors; reset: `declaration`, `write`,
+  `draw_size_error`; observations; geometry: `pose`, `dims`, `rest_z`, `upright`; and the object in our claw:
+  `in_pinch`, `axis_from_pinch`, `grasp_point`, `between_jaws`). `mjlab_task`'s rewards and terminations are generic
+  over the object (each takes it in its params and asks it for what its stage needs); `PoolReset` draws starts, writes
+  state, and has the object write itself.
 - Then fewer privileged observations (the finger contacts dropped).

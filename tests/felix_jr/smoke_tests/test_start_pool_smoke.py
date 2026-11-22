@@ -135,7 +135,6 @@ def test_a_sized_pool_resizes_each_worlds_object(tmp_path):
 
     from lerobot.felix_jr.harness.primitives import ObjectRecord
     from lerobot.felix_jr.sim2real import mjlab_object as obj
-    from lerobot.felix_jr.sim2real.mjlab_object import object_ids
 
     model = XleRobotModel.load(api.MODEL)
     path = tmp_path / "sized.npz"
@@ -152,7 +151,8 @@ def test_a_sized_pool_resizes_each_worlds_object(tmp_path):
     )
     obs, _ = env.reset()
     assert obs["actor"].shape == (8, 44)  # (the one object's 42, and its radius and height)
-    body, geom = object_ids(env)
+    cyl = obj.of(env)
+    body, geom = cyl.ids(env)
     qpos, _, _ = back.layout(env.sim.mj_model)
     z = me._joint_slices(env.sim.mj_model)["floating_base_joint"].start + 2
     now = env.sim.data.qpos.cpu().numpy()
@@ -173,10 +173,10 @@ def test_a_sized_pool_resizes_each_worlds_object(tmp_path):
         assert m.geom_aabb[w, geom, 1].cpu().numpy() == pytest.approx(
             core.primitive.half_extents()[0], abs=1e-6
         )
-        assert float(obj.rest_z(env)[w]) == pytest.approx(TABLE_Z + h / 2, abs=1e-6)
+        assert float(cyl.rest_z(env)[w]) == pytest.approx(TABLE_Z + h / 2, abs=1e-6)
         assert obs["actor"][w, -2:].cpu().numpy() == pytest.approx([r, h], abs=1e-6)
         assert obs["critic"][w, -2:].cpu().numpy() == pytest.approx([r, h], abs=1e-6)  # (the true size)
-        assert float(obj.grasp_point(env)[w, 0]) == pytest.approx(
+        assert float(cyl.grasp_point(env)[w, 0]) == pytest.approx(
             -0.79 * r + 0.0020, abs=1e-6
         )  # (its radius')
     for _ in range(10):
