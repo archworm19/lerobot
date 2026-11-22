@@ -239,9 +239,12 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
   `geom_aabb`), its mass and inertia to match (`dr.pseudo_inertia`, not `dr.body_mass`, which leaves the inertia); the
   size in the privileged observations.
   **Built (2026-11-21):** `StartPool.objects` (a size a start), the per-world resize at reset
-  (`mjlab_env.reset_from_sized_pool`, `start_pool.resize_objects`: size, bounding sphere and box, mass times a
-  log-uniform draw, a solid cylinder's inertia; `set_const` after), the resting height and `between_jaws`' height per
-  world, the radius and height observed. The size the actor is told is off by an error drawn at each reset and kept for
+  (`pool_reset.PoolReset`, a class event term bound to the robot and the object: size, bounding sphere and box, mass times a
+  log-uniform draw, a solid cylinder's inertia; `set_const` after; one object's pool declares no field per world). The
+  model is where each world's size is kept (`mjlab_task.object_dims`, `rest_z` read it); the term keeps only each
+  world's start (`rows`, `pools_of_worlds`) and the size error. Files: the bank's `.jsonl` is `bank.py`'s, the pool's
+  `.npz` `StartPool`'s (`start_pool.FORMAT`, checked when read; no mjlab needed), the term reads a pool.
+  The resting height and `between_jaws`' height per world, the radius and height observed. The size the actor is told is off by an error drawn at each reset and kept for
   the episode (`SIZE_ERROR_M` 2 mm: a camera's estimate is off by a bias, not noise that averages away; SimToolReal
   perturbs its bounding box alike); the critic is told the true size. The grasp point and the box between the jaws
   refit against the radius over `multi1`'s starts (`mjlab_task.GRASP_POINT_FIT`, `BETWEEN_X_FIT`: in the jaws the axis

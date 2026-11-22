@@ -18,9 +18,9 @@ for a reset. So they are drawn here, ahead (OmniReset's precomputed resets, `doc
 joint's position and velocity and each actuator's command, by name: the environment's model lays them out its own way
 (mjlab's prefixes, its order), and `StartPool.layout` maps them by name.
 
-In the environment, `reset_from_pool` (an mjlab reset event) draws a start for each world being reset: a pool by
-`pool_weights`, then a start of it at random; its state written, the object's height there kept
-(`env.felix_object_z0`: what its rise is measured from).
+The pool's file is `StartPool`'s (`save`, `load`: an .npz, `FORMAT` its version, checked when read); the bank's is
+`bank.py`'s (.jsonl). This module needs no mjlab: drawing runs on CPU MuJoCo. In the environment, `pool_reset.PoolReset`
+(an mjlab reset event term) reads a pool and writes its starts into the worlds.
 """
 
 import argparse
@@ -37,10 +37,10 @@ from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel
 
 if TYPE_CHECKING:
     import mujoco
-    import torch
-    from mjlab.envs import ManagerBasedRlEnv
 
 POOLS = ("attack", "at_object", "in_jaws", "lifted")
+# the pool file's version: 1 one object's size (`object_size`, older pools, read still), 2 a size a start (`objects`)
+FORMAT = 2
 SPLIT_KEYS = ("random", "ahead", "side", "diameter", "height")
 FREE_JOINT = (
     "floating_base_joint"  # (the object's: unnamed in `scene`, named by mjlab; `mjlab_env._joint_slices`)
@@ -87,10 +87,6 @@ class StartPool:
         None  # the bank's placements drawn from (a split's: `--holdout`), None: all
     )
 
-    def __post_init__(self) -> None:
-        """`objects` one row a start (one size given: broadcast to every start)."""
-        self.objects = np.broadcast_to(np.asarray(self.objects, dtype=np.float64), (len(self.pool), 3)).copy()
-
     @property
     def sizes_vary(self) -> bool:
         """The starts' objects not all one size."""
@@ -115,6 +111,7 @@ class StartPool:
         arrays |= {f"ctrl/{k}": v for k, v in self.ctrl.items()}
         np.savez_compressed(
             path,
+            format=np.array(FORMAT),
             pool=self.pool,
             anchor=self.anchor,
             objects=self.objects,
@@ -125,8 +122,11 @@ class StartPool:
 
     @classmethod
     def load(cls, path: Path) -> "StartPool":
-        """`save`'s file read back."""
+        """`save`'s file read back (checked: its version, every start with each of its arrays)."""
         z = np.load(path)
+        version = int(z["format"]) if "format" in z.files else 1
+        if version > FORMAT:
+            raise ValueError(f"{path}: pool format {version}, newer than this code reads ({FORMAT})")
         part = {
             kind: {k.split("/", 1)[1]: z[k] for k in z.files if k.startswith(f"{kind}/")}
             for kind in ("qpos", "qvel", "ctrl")
@@ -142,6 +142,22 @@ class StartPool:
             float(z["table_z"]),
             z["placements"] if "placements" in z.files and len(z["placements"]) else None,
         )
+
+    def __post_init__(self) -> None:
+        """`objects` one row a start (one size given: broadcast to every start); every array one row a start."""
+        n = len(self.pool)
+        self.objects = np.broadcast_to(np.asarray(self.objects, dtype=np.float64), (n, 3)).copy()
+        lengths = {
+            f"{kind}/{name}": len(v)
+            for kind in ("qpos", "qvel", "ctrl")
+            for name, v in getattr(self, kind).items()
+        }
+        wrong = {k: v for k, v in (lengths | {"anchor": len(self.anchor)}).items() if v != n}
+        if wrong:
+            raise ValueError(f"a pool of {n} starts with arrays of other lengths: {wrong}")
+        unknown = set(np.unique(self.pool).tolist()) - set(POOLS)
+        if unknown:
+            raise ValueError(f"unknown start pools {sorted(unknown)} (known: {POOLS})")
 
     def layout(self, m: "mujoco.MjModel") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Every start as `m` lays out its state: (N, nq), (N, nv), (N, nu); what the pool lacks at `m`'s defaults."""
@@ -222,151 +238,6 @@ def draw_pool(
         float(np.median([r["table_z"] for r in rows])),
         None if placements is None else np.array(sorted(placements)),
     )
-
-
-# ---- in the environment ---------------------------------------------------------------------------------------------
-
-
-def reset_from_pool(
-    env: "ManagerBasedRlEnv",
-    env_ids: "torch.Tensor | None",
-    path: str,
-    pool_weights: Mapping[str, float],
-) -> "torch.Tensor | None":
-    """Mjlab reset event: each world in `env_ids` given a start (a pool by `pool_weights`, then a start of it).
-
-    Each world's object size kept (`env.felix_object_size`, (num_envs, 3): radius, height, mass), and its resting
-    height (`env.felix_object_rest_z`); the object itself resized by `resize_objects` (`mjlab_env`'s sized reset). The
-    rows drawn (None: no world reset).
-    """
-    import torch
-
-    sim = env.sim
-    cache = getattr(env, "_felix_pool", None)
-    if cache is None or cache["path"] != path:
-        pool = StartPool.load(Path(path))
-        qpos, qvel, ctrl = pool.layout(sim.mj_model)
-        dev = sim.data.qpos.device
-        by_pool = [np.flatnonzero(pool.pool == p) for p in POOLS]
-        weights = np.array(
-            [pool_weights.get(p, 0.0) if len(by_pool[i]) else 0.0 for i, p in enumerate(POOLS)]
-        )
-        if weights.sum() <= 0:
-            raise ValueError(f"no weighted pool has starts: {dict(pool_weights)}")
-        cache = {
-            "path": path,
-            "qpos": torch.as_tensor(qpos, device=dev, dtype=sim.data.qpos.dtype),
-            "qvel": torch.as_tensor(qvel, device=dev, dtype=sim.data.qvel.dtype),
-            "ctrl": torch.as_tensor(ctrl, device=dev, dtype=sim.data.ctrl.dtype),
-            "rows": [torch.as_tensor(r, device=dev) for r in by_pool],
-            "weights": torch.as_tensor(weights / weights.sum(), device=dev, dtype=torch.float32),
-            "object_z": _object_z_index(sim.mj_model),
-            # mjlab derives the controls from the robot's joint position targets (each step, and at a reset): the
-            # start's commands go in as targets, by name (each actuator drives the joint it is named after)
-            "targets": _targets(env, sim.mj_model),
-            "objects": torch.as_tensor(pool.objects, device=dev, dtype=torch.float32),
-            "table_z": float(pool.table_z),
-        }
-        env._felix_pool = cache
-        env.felix_object_z0 = torch.zeros(env.num_envs, device=dev)
-        # resting on the table: what the object's rise is measured from (`mjlab_task.rise`)
-        env.felix_object_rest_z = torch.full(
-            (env.num_envs,), pool.table_z + float(pool.objects[0, 1]) / 2, device=dev
-        )
-        env.felix_object_size = cache["objects"][0].repeat(env.num_envs, 1)
-    ids = torch.arange(env.num_envs, device=sim.data.qpos.device) if env_ids is None else env_ids
-    if len(ids) == 0:
-        return None
-    which = torch.multinomial(cache["weights"], len(ids), replacement=True)
-    rows = torch.empty(len(ids), dtype=torch.long, device=ids.device)
-    for i, members in enumerate(cache["rows"]):
-        mask = which == i
-        if mask.any():
-            rows[mask] = members[torch.randint(len(members), (int(mask.sum()),), device=ids.device)]
-    sim.data.qpos[ids] = cache["qpos"][rows]
-    sim.data.qvel[ids] = cache["qvel"][rows]
-    sim.data.ctrl[ids] = cache["ctrl"][rows]
-    columns, joint_ids, entity = cache["targets"]
-    env.scene[entity].set_joint_position_target(
-        cache["ctrl"][rows][:, columns], joint_ids=joint_ids, env_ids=ids
-    )
-    env.felix_object_z0[ids] = cache["qpos"][rows, cache["object_z"]].float()
-    size = cache["objects"][rows]
-    env.felix_object_size[ids] = size
-    env.felix_object_rest_z[ids] = cache["table_z"] + size[:, 1] / 2
-    return rows
-
-
-def resize_objects(
-    env: "ManagerBasedRlEnv",
-    env_ids: "torch.Tensor",
-    sizes: "torch.Tensor",
-    mass_scale: "torch.Tensor | None" = None,
-) -> None:
-    """The object (a cylinder) in each world of `env_ids` made `sizes` ((n, 3): radius, height (m), mass (kg)).
-
-    Its geom's size, bounding sphere and box (what the collision broadphase reads), its body's mass (times
-    `mass_scale`, if given) and inertia (a solid cylinder's). The model fields must be per world (`mjlab_env`'s sized
-    reset asks for them) and the constants recomputed after (mjlab does, for a reset event that declares it).
-    """
-    import torch
-
-    m = env.sim.model
-    cache = env._felix_pool
-    if "object_geom" not in cache:
-        cache["object_body"], cache["object_geom"] = _object_ids(env.sim.mj_model)
-    body, geom = cache["object_body"], cache["object_geom"]
-    r, h, mass = sizes[:, 0], sizes[:, 1], sizes[:, 2]
-    if mass_scale is not None:
-        mass = mass * mass_scale
-    half = h / 2
-    m.geom_size[env_ids, geom, 0] = r.to(m.geom_size.dtype)
-    m.geom_size[env_ids, geom, 1] = half.to(m.geom_size.dtype)
-    m.geom_rbound[env_ids, geom] = torch.sqrt(r * r + half * half).to(m.geom_rbound.dtype)
-    m.geom_aabb[env_ids, geom, 1] = torch.stack([r, r, half], dim=1).to(m.geom_aabb.dtype)
-    m.body_mass[env_ids, body] = mass.to(m.body_mass.dtype)
-    side = mass * (3 * r * r + h * h) / 12
-    m.body_inertia[env_ids, body] = torch.stack([side, side, mass * r * r / 2], dim=1).to(
-        m.body_inertia.dtype
-    )
-
-
-def _object_ids(m: "mujoco.MjModel") -> tuple[int, int]:
-    """The object's body (its free joint's) and its one geom, a cylinder."""
-    import mujoco
-
-    joints = [j for j in range(m.njnt) if m.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE]
-    if len(joints) != 1:
-        raise ValueError(f"expected one free joint (the object), found {len(joints)}")
-    body = int(m.jnt_bodyid[joints[0]])
-    geoms = [g for g in range(m.ngeom) if m.geom_bodyid[g] == body]
-    if len(geoms) != 1 or m.geom_type[geoms[0]] != mujoco.mjtGeom.mjGEOM_CYLINDER:
-        raise ValueError(f"expected the object's body to have one cylinder, found geoms {geoms}")
-    return body, geoms[0]
-
-
-def _targets(env: "ManagerBasedRlEnv", m: "mujoco.MjModel", entity: str = "robot") -> tuple[Any, Any, str]:
-    """The robot's actuated joints: the ctrl columns of their actuators and their indices in the entity's joints."""
-    import torch
-
-    names = [n.split("/", 1)[-1] for n in env.scene[entity].joint_names]
-    actuators = _layout(m)["actuators"]
-    pairs = [(a, names.index(n)) for a, n in enumerate(actuators) if n in names]
-    dev = env.sim.data.qpos.device
-    return (
-        torch.as_tensor([a for a, _ in pairs], device=dev),
-        torch.as_tensor([j for _, j in pairs], device=dev),
-        entity,
-    )
-
-
-def _object_z_index(m: "mujoco.MjModel") -> int:
-    """The qpos index of the object's height (its free joint's z)."""
-    lay = _layout(m)
-    found = [q for name, q, qw, _, _ in lay["joints"] if name == FREE_JOINT and qw == 7]
-    if len(found) != 1:
-        raise ValueError(f"expected one free joint (the object), found {len(found)}")
-    return found[0] + 2
 
 
 def placement_coordinate(placement: Mapping[str, Any], base_xy: Sequence[float], key: str) -> float:

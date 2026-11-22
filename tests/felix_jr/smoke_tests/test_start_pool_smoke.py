@@ -14,6 +14,7 @@ from lerobot.felix_jr.sim2real import (
     mjlab_env as me,  # noqa: E402
     scene as sc,  # noqa: E402
 )
+from lerobot.felix_jr.sim2real.pool_reset import pool_reset  # noqa: E402
 from lerobot.felix_jr.sim2real.start_pool import POOLS, StartPool, _layout  # noqa: E402
 
 TABLE_Z = 0.7779
@@ -59,6 +60,10 @@ def test_a_reset_writes_a_start_of_the_pool_into_each_world(tmp_path):
         )
     )
     env.reset()
+    term = pool_reset(env)
+    assert (
+        term is not None and not term.sized and not hasattr(term, "model_fields")
+    )  # (one object: no field per world)
     qpos, _, ctrl = back.layout(env.sim.mj_model)
     now = env.sim.data.qpos.cpu().numpy()
     for w in range(env.num_envs):
@@ -66,8 +71,8 @@ def test_a_reset_writes_a_start_of_the_pool_into_each_world(tmp_path):
         assert gaps.min() < 1e-5, f"world {w} holds no start of the pool"
         row = int(gaps.argmin())
         assert np.allclose(env.sim.data.ctrl[w].cpu().numpy(), ctrl[row], atol=1e-6)
-        z = me._joint_slices(env.sim.mj_model)["floating_base_joint"].start + 2
-        assert float(env.felix_object_z0[w]) == pytest.approx(qpos[row, z], abs=1e-6)
+        assert int(term.rows[w]) == row  # (the term keeps each world's start)
+        assert term.pools_of_worlds()[w] == back.pool[row]
 
 
 def test_the_task_steps_from_pool_starts(tmp_path):
@@ -129,7 +134,7 @@ def test_a_sized_pool_resizes_each_worlds_object(tmp_path):
     import torch
 
     from lerobot.felix_jr.sim2real import mjlab_task as task
-    from lerobot.felix_jr.sim2real.start_pool import _object_ids
+    from lerobot.felix_jr.sim2real.pool_reset import object_ids
 
     model = XleRobotModel.load(api.MODEL)
     path = tmp_path / "sized.npz"
@@ -146,7 +151,7 @@ def test_a_sized_pool_resizes_each_worlds_object(tmp_path):
     )
     obs, _ = env.reset()
     assert obs["actor"].shape == (8, 44)  # (the one object's 42, and its radius and height)
-    body, geom = _object_ids(env.sim.mj_model)
+    body, geom = object_ids(env)
     qpos, _, _ = back.layout(env.sim.mj_model)
     z = me._joint_slices(env.sim.mj_model)["floating_base_joint"].start + 2
     now = env.sim.data.qpos.cpu().numpy()
@@ -159,7 +164,7 @@ def test_a_sized_pool_resizes_each_worlds_object(tmp_path):
         assert float(m.geom_rbound[w, geom]) == pytest.approx(np.hypot(r, h / 2), abs=1e-6)
         assert float(m.body_mass[w, body]) == pytest.approx(mass, abs=1e-6)
         assert float(m.body_inertia[w, body, 2]) == pytest.approx(mass * r * r / 2, rel=1e-5)
-        assert float(env.felix_object_rest_z[w]) == pytest.approx(TABLE_Z + h / 2, abs=1e-6)
+        assert float(task.rest_z(env)[w]) == pytest.approx(TABLE_Z + h / 2, abs=1e-6)
         assert obs["actor"][w, -2:].cpu().numpy() == pytest.approx([r, h], abs=1e-6)
         assert obs["critic"][w, -2:].cpu().numpy() == pytest.approx([r, h], abs=1e-6)  # (the true size)
         assert float(task.grasp_point(env)[w, 0]) == pytest.approx(

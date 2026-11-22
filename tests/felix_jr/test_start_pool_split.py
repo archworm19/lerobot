@@ -62,3 +62,47 @@ def test_the_placements_drawn(tmp_path, vary):
     lines = [{"placement": p, "anchor": None if p["index"] == 3 else {}} for p in placements]
     out = plot_placements(lines, BASE, {8, 9}, tmp_path / "placements.png", "test")
     assert out.is_file() and out.stat().st_size > 10_000
+
+
+def _tiny_pool(objects):
+    import numpy as np
+
+    from lerobot.felix_jr.sim2real.start_pool import StartPool
+
+    n = 2
+    return StartPool(
+        {"j": np.zeros((n, 1))}, {"j": np.zeros((n, 1))}, {"a": np.zeros((n, 1))},
+        np.array(["attack", "lifted"]), np.arange(n), objects, 0.78,
+    )  # fmt: skip
+
+
+def test_the_pool_file_round_trips_and_is_checked(tmp_path):
+    """`StartPool`'s .npz: a size a start (format 2); an older one-size file read still; a newer format, or arrays of
+    another length, refused."""
+    import numpy as np
+
+    from lerobot.felix_jr.sim2real.start_pool import FORMAT, StartPool
+
+    pool = _tiny_pool(np.array([[0.02, 0.1, 0.05], [0.03, 0.2, 0.1]]))
+    pool.save(tmp_path / "p.npz")
+    back = StartPool.load(tmp_path / "p.npz")
+    assert back.sizes_vary and np.allclose(back.objects, pool.objects)
+    z = dict(np.load(tmp_path / "p.npz"))
+    old = {k: v for k, v in z.items() if k not in ("format", "objects")} | {
+        "object_size": np.array([0.02, 0.1, 0.05])
+    }
+    np.savez(tmp_path / "old.npz", **old)
+    assert StartPool.load(tmp_path / "old.npz").object_size == (0.02, 0.1, 0.05)  # (format 1: one size)
+    np.savez(tmp_path / "new.npz", **(z | {"format": np.array(FORMAT + 1)}))
+    with pytest.raises(ValueError, match="newer"):
+        StartPool.load(tmp_path / "new.npz")
+    with pytest.raises(ValueError, match="other lengths"):
+        StartPool(
+            {"j": np.zeros((3, 1))},
+            {},
+            {},
+            np.array(["attack", "lifted"]),
+            np.arange(2),
+            [0.02, 0.1, 0.05],
+            0.78,
+        )

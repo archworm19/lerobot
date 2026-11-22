@@ -125,15 +125,13 @@ def evaluate(env: Any, wrapped: Any, policy: Any) -> dict[str, Any]:
     """The policy played one episode in every world from a fresh reset: held at the end and ever, by start pool."""
     import torch
 
-    from .start_pool import StartPool
+    from .pool_reset import pool_reset
 
     obs, _ = wrapped.reset()
-    sim = env.sim
-    pool = env._felix_pool
-    layout = StartPool.load(Path(pool["path"])).layout(sim.mj_model)[0]
-    now = sim.data.qpos.cpu().numpy()
-    rows = [int(np.abs(layout - now[w]).max(axis=1).argmin()) for w in range(env.num_envs)]
-    which = StartPool.load(Path(pool["path"])).pool[rows]
+    term = pool_reset(env)
+    if term is None:
+        raise ValueError("evaluating needs an environment whose starts are a pool's")
+    which = np.array(term.pools_of_worlds())  # (each world's start pool, from the reset just done)
     ever = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     done = torch.zeros_like(ever)
     held_at_end = torch.zeros_like(ever)

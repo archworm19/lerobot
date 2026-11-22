@@ -265,22 +265,23 @@ def axis_from_pinch(env: "ManagerBasedRlEnv") -> tuple["torch.Tensor", "torch.Te
     return center - along[:, None] * axis, along
 
 
-def object_radius(env: "ManagerBasedRlEnv") -> "torch.Tensor":
-    """Each world's object's radius (N,), from the model (per world once resized, `start_pool.resize_objects`)."""
-    from .start_pool import _object_ids
+def object_dims(env: "ManagerBasedRlEnv", entity: str = "object") -> "torch.Tensor":
+    """Each world's object's radius and height ((N, 2), m), read from the model.
 
-    cache = env.__dict__.setdefault("_felix_object_ids", {})
-    if "geom" not in cache:
-        cache["body"], cache["geom"] = _object_ids(env.sim.mj_model)
-    radius = env.sim.model.geom_size[..., cache["geom"], 0].reshape(-1)
-    return radius.expand(env.num_envs) if radius.numel() == 1 else radius
+    The cylinder's size field: one for every world, or each world's own once a pool of objects of several sizes has
+    resized it (`pool_reset.PoolReset`).
+    """
+    geom = int(env.scene[entity].indexing.geom_ids[0])
+    size = env.sim.model.geom_size[..., geom, :2].reshape(-1, 2).float()
+    dims = size * size.new_tensor([1.0, 2.0])  # (radius, half height): radius, height
+    return dims.expand(env.num_envs, 2) if len(dims) == 1 else dims
 
 
 def grasp_point(env: "ManagerBasedRlEnv") -> "torch.Tensor":
     """Where the object's axis passes the pinch point in a grasp, for each world's radius (pinch frame, (N, 3))."""
     import torch
 
-    r = object_radius(env).float()
+    r = object_dims(env)[:, 0]
     return torch.stack([a * r + b for a, b in GRASP_POINT_FIT], dim=1)
 
 
@@ -292,19 +293,13 @@ def reach(env: "ManagerBasedRlEnv", std: float = REACH_STD_M) -> "torch.Tensor":
     return torch.exp(-torch.linalg.norm(perp - grasp_point(env), dim=1) / std)
 
 
-def between_jaws(env: "ManagerBasedRlEnv", height: float) -> "torch.Tensor":
-    """1 where the object's axis is in the box between the jaws and the grasp on its body.
-
-    `height`: the object's; each world's own when the start pool keeps them (`env.felix_object_size`).
-    """
+def between_jaws(env: "ManagerBasedRlEnv") -> "torch.Tensor":
+    """1 where the object's axis is in the box between the jaws (for its radius) and the grasp on its body."""
     import torch
 
-    sizes = getattr(env, "felix_object_size", None)
-    if sizes is not None:
-        height = sizes[:, 1]
-
     perp, along = axis_from_pinch(env)
-    r = object_radius(env).float()
+    dims = object_dims(env)
+    r, height = dims[:, 0], dims[:, 1]
     (a_lo, b_lo), (a_hi, b_hi) = BETWEEN_X_FIT
     n = len(r)
     low = torch.stack(
@@ -322,16 +317,22 @@ def both_fingers(env: "ManagerBasedRlEnv") -> "torch.Tensor":
     return finger_contacts(env).prod(dim=1)
 
 
-def rise(env: "ManagerBasedRlEnv") -> "torch.Tensor":
-    """The object's height above resting on the table, over the lift, in [0, 1].
+def rest_z(env: "ManagerBasedRlEnv", entity: str = "object") -> "torch.Tensor":
+    """Each world's object's center height standing on the table (N,).
 
-    Resting: the start pool's (`felix_object_rest_z`: the table and half the object), else the object's default.
+    The entity's default height (the table and half the object the environment was built with), moved by how much
+    taller each world's object is than that one (`object_dims`; the host model keeps the built size).
     """
-    data = env.scene["object"].data
-    rest = getattr(env, "felix_object_rest_z", None)
-    if rest is None:
-        rest = data.default_root_state[:, 2]
-    return ((data.root_link_pos_w[:, 2] - rest) / LIFT_M).clamp(0.0, 1.0)
+    obj = env.scene[entity]
+    geom = int(obj.indexing.geom_ids[0])
+    built_half = float(env.sim.mj_model.geom_size[geom, 1])
+    return obj.data.default_root_state[:, 2] + object_dims(env, entity)[:, 1] / 2 - built_half
+
+
+def rise(env: "ManagerBasedRlEnv") -> "torch.Tensor":
+    """The object's height above standing on the table (`rest_z`), over the lift, in [0, 1]."""
+    z = env.scene["object"].data.root_link_pos_w[:, 2]
+    return ((z - rest_z(env)) / LIFT_M).clamp(0.0, 1.0)
 
 
 def tilt_cos(env: "ManagerBasedRlEnv") -> "torch.Tensor":

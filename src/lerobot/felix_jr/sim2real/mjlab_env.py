@@ -145,53 +145,20 @@ def table_spec(model: XleRobotModel, arm: str, table_z: float) -> "mujoco.MjSpec
 # the size the actor is told, off by an error drawn at each reset and kept for the episode (std, m): what a size
 # estimated from a camera is off by (a bias, not noise that averages away); the critic told the true size
 SIZE_ERROR_M = 0.002
-SIZED_FIELDS = ("geom_size", "geom_rbound", "geom_aabb", "body_mass", "body_inertia")
-
-
-def reset_from_sized_pool(
-    env: Any,
-    env_ids: Any,
-    path: str,
-    pool_weights: Mapping[str, float],
-    mass_range: tuple[float, float] = (1.0, 1.0),
-    size_error_m: float = 0.0,
-) -> None:
-    """Mjlab reset event for a pool whose objects vary in size.
-
-    `start_pool.reset_from_pool`, then each reset world's object made its start's (`start_pool.resize_objects`), its
-    mass times a log-uniform draw in `mass_range`; the error in the size the actor is told drawn (`size_error_m`, std).
-
-    `env_cfg` declares the fields it writes per world (`SIZED_FIELDS`) and the constants recomputed after (mjlab's
-    `requires_model_fields`, `set_const`: the object's mass changes its subtree mass and inverse weights).
-    """
-    import torch
-
-    from .start_pool import reset_from_pool, resize_objects
-
-    rows = reset_from_pool(env, env_ids, path, pool_weights)
-    if rows is None:
-        return
-    lo, hi = np.log(mass_range[0]), np.log(mass_range[1])
-    scale = torch.exp(lo + (hi - lo) * torch.rand(len(env_ids), device=rows.device))
-    resize_objects(env, env_ids, env._felix_pool["objects"][rows], scale)
-    if not hasattr(env, "felix_size_error"):
-        env.felix_size_error = torch.zeros(env.num_envs, 2, device=rows.device)
-    env.felix_size_error[env_ids] = size_error_m * torch.randn(len(env_ids), 2, device=rows.device)
 
 
 def object_size(env: Any, estimated: bool = False) -> Any:
-    """Each world's object's radius and height (m): an observation, for a pool whose objects vary in size.
+    """Each world's object's radius and height (m, `mjlab_task.object_dims`): an observation.
 
-    `estimated`: off by the episode's error (`reset_from_sized_pool`'s `size_error_m`: the actor's view). Zeros before
-    the first reset (the observation manager reads every term once when built, for its shape).
+    For a pool whose objects vary in size; `estimated`: off by the episode's error (`pool_reset.PoolReset.size_error`:
+    the actor's view).
     """
-    import torch
+    from . import mjlab_task as task
+    from .pool_reset import pool_reset
 
-    sizes = getattr(env, "felix_object_size", None)
-    if sizes is None:
-        return torch.zeros(env.num_envs, 2, device=env.device)
-    error = getattr(env, "felix_size_error", None) if estimated else None
-    return sizes[:, :2] if error is None else sizes[:, :2] + error
+    dims = task.object_dims(env)
+    term = pool_reset(env) if estimated else None
+    return dims if term is None else dims + term.size_error
 
 
 def env_cfg(
@@ -239,7 +206,7 @@ def env_cfg(
         from .start_pool import StartPool
 
         pool = StartPool.load(Path(start_pool))
-        sized = pool.sizes_vary  # (the object resized per world at each reset: `reset_from_sized_pool`)
+        sized = pool.sizes_vary  # (the object resized per world at each reset: `pool_reset.PoolReset`)
         radius, height, mass = (float(v) for v in pool.objects[0])
         table_z = pool.table_z
         obj = sc.Cylinder("object", -0.35, 0.13, radius, height, mass)  # (where: each start's own)
@@ -300,24 +267,24 @@ def env_cfg(
         ),
     }
     if start_pool is not None:
-        from .start_pool import reset_from_pool
+        from .pool_reset import TERM, PoolReset
 
-        params: dict[str, Any] = {"path": str(start_pool), "pool_weights": dict(pool_weights or POOL_WEIGHTS)}
-        if sized:
-            from mjlab.managers.event_manager import RecomputeLevel, requires_model_fields
-
-            # TODO: this seems to be key to randomizing object parameters across sims
-            #   please describe in detail in comments
-            reset: Any = requires_model_fields(*SIZED_FIELDS, recompute=RecomputeLevel.set_const)(
-                reset_from_sized_pool
-            )
-            params["mass_range"] = MASS_RANGE if randomize else (1.0, 1.0)
-            params["size_error_m"] = size_error_m if randomize else 0.0
-        else:
-            reset = reset_from_pool
+        # the pool's starts written at each reset; for objects of several sizes each world's object resized too, the
+        # fields it writes made per world (`PoolReset`: how, and why `set_const` after)
         events = {
             "reset_scene": events["reset_scene"],
-            "reset_from_pool": EventTermCfg(func=reset, mode="reset", params=params),
+            TERM: EventTermCfg(
+                func=PoolReset,
+                mode="reset",
+                params={
+                    "path": str(start_pool),
+                    "pool_weights": dict(pool_weights or POOL_WEIGHTS),
+                    "robot": SceneEntityCfg("robot"),
+                    "object": SceneEntityCfg("object"),
+                    "mass_range": MASS_RANGE if randomize and sized else (1.0, 1.0),
+                    "size_error_m": size_error_m if randomize and sized else 0.0,
+                },
+            ),
         }
     if randomize:  # (`grasp_check.physics_draws`' ranges, about the fitted values; log-uniform as there)
         events |= {
@@ -357,7 +324,7 @@ def env_cfg(
                         },
                     )
                 }
-            ),  # (a sized pool's mass drawn at each reset instead: `reset_from_sized_pool`)
+            ),  # (a sized pool's mass drawn at each reset instead: `pool_reset.PoolReset`)
         }
     return ManagerBasedRlEnvCfg(
         scene=SceneCfg(num_envs=num_envs, env_spacing=0.0, entities=entities, sensors=task.sensors()),
@@ -369,9 +336,7 @@ def env_cfg(
         events=events,
         rewards={  # (staged, each stage paying more than the one before: `mjlab_task`'s docstring)
             "reach": RewardTermCfg(func=task.reach, weight=REWARD_WEIGHTS["reach"]),
-            "between_jaws": RewardTermCfg(
-                func=task.between_jaws, weight=REWARD_WEIGHTS["between_jaws"], params={"height": obj.height}
-            ),
+            "between_jaws": RewardTermCfg(func=task.between_jaws, weight=REWARD_WEIGHTS["between_jaws"]),
             "both_fingers": RewardTermCfg(func=task.both_fingers, weight=REWARD_WEIGHTS["both_fingers"]),
             "rise": RewardTermCfg(func=task.rise, weight=REWARD_WEIGHTS["rise"]),
             "held": RewardTermCfg(func=task.held, weight=REWARD_WEIGHTS["held"]),

@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 
 from . import mjlab_task as task
-from .start_pool import POOLS, StartPool
+from .start_pool import POOLS
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -36,15 +36,6 @@ CAMERA = {
 GIF_EVERY, GIF_SCALE = 2, 0.5  # (tensorboard's: every other frame, half size; the mp4 keeps them all)
 SHEET_AT_S = (0.0, 1.5, 4.0, 11.5)  # the contact sheet's moments
 COLORS = {"held": (0, 200, 0), "fingers": (255, 200, 0), "tipped": (230, 0, 0), "table": (230, 0, 0)}
-
-
-def _pools_of_worlds(env: "ManagerBasedRlEnv") -> list[str]:
-    """Each world's start pool (the start it holds, found in the pool by its state)."""
-    cache = env._felix_pool
-    pool = StartPool.load(Path(cache["path"]))
-    layout = pool.layout(env.sim.mj_model)[0]
-    now = env.sim.data.qpos.cpu().numpy()
-    return [str(pool.pool[int(np.abs(layout - now[w]).max(axis=1).argmin())]) for w in range(env.num_envs)]
 
 
 def _label(image: np.ndarray, lines: list[tuple[str, tuple[int, int, int]]]) -> None:
@@ -78,14 +69,14 @@ def record(
         CAMERA["azimuth"],
         CAMERA["elevation"],
     )
-    pools = _pools_of_worlds(env)
-    n = env.num_envs
-    from .start_pool import _object_ids
+    from .pool_reset import object_ids, pool_reset
 
-    _, object_geom = _object_ids(m)
-    sizes = (
-        env.sim.model.geom_size[..., object_geom, :].cpu().numpy().reshape(-1, 3)
-    )  # (each world's, if resized)
+    term = pool_reset(env)
+    n = env.num_envs
+    pools = term.pools_of_worlds() if term is not None else [""] * n
+    _, object_geom = object_ids(env)
+    # each world's object size (its own once resized: the copy of the model rendering each world is given it)
+    sizes = env.sim.model.geom_size[..., object_geom, :].cpu().numpy().reshape(-1, 3)
     ended: list[str | None] = [None] * n
     fps = max(1, int(round(1.0 / env.step_dt)))
     path.parent.mkdir(parents=True, exist_ok=True)
