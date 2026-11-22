@@ -232,12 +232,16 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
   (45 in-jaws / lifted worlds, CPU): every one of the 6 held-then-lost episodes lost "held" to a finger coming off,
   with the object still fully lifted (rise 1.00) and upright (2-7 deg); the gripper's target had opened first (0.31-0.46
   rad to 0.66-1.03, the jaws following), mostly late (steps 230-340 of 360); ordinary physics draws (pad friction
-  0.31-0.34 in a 0.25-0.39 range, 62-88 g, 42-57 mm). Not slip: the policy's gripper creeps open. The likely cause is
-  the delta gripper action (targets accumulate: a slightly positive mean output in some held states drifts it open)
-  with nothing paying for squeezing (held needs contact, not force; the policy sees no time; a time-out is no
-  failure). On the robot it would drop held bottles. To confirm: the gripper target's mean drift while held, in the
-  worlds that keep holding too; longer episodes (drift: losses grow with time). Fixes to weigh: a squeeze term while
-  held (the gripper servo's load) or a penalty on opening while lifted; an absolute or latched gripper command.
+  0.31-0.34 in a 0.25-0.39 range, 62-88 g, 42-57 mm). Not slip: the policy's gripper opens.
+  **Not a creep, a random walk** (checked on `20261122_171622`'s `model_700`, 128 in-jaws / lifted worlds, episodes
+  doubled to 24 s): the gripper target's mean change while held is nil (+0.02 mrad a step in the 114 worlds that kept
+  holding, +0.00 in the 13 that lost it) but it jitters (90th percentile +7.5 / +8.4 mrad a step); the targets
+  accumulate (the delta action), so a zero-mean jitter wanders, and now and then opens the jaws past contact. Holding
+  decays with time: of the worlds held at some point, 98.4 % held at 6 s, 94.5 % at 12 s (the trained episode), 96.9 %
+  at 18 s (some regrasp), 89.8 % at 24 s. Nothing pays for keeping it closed (held needs contact, not force; the policy
+  sees no time; a time-out is no failure). On the robot, where a hold lasts longer than 12 s, it would drop bottles.
+  Fixes to weigh: a squeeze term while held (the gripper servo's load) or a penalty on opening while lifted; an
+  absolute or latched gripper command (no random walk).
 
 ### Next (decided 2026-11-21)
 
