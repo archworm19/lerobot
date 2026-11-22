@@ -16,7 +16,7 @@ simulator's truth (the object's pose with a little noise, the fingers' contacts)
   actuators' torque over the servo's stall torque: the real servos report a load), each finger's pads touching the
   object (privileged), the last action.
 - **Rewards** (positive and staged: an all-negative reward with episodes ended by failure teaches ending them):
-  reaching the grasp point (where the object's axis passes the pinch point in a grasp: `GRASP_POINT_M`, measured over
+  reaching the grasp point (where the object's axis passes the pinch point in a grasp: `grasp_point`, measured over
   the pool's starts in the jaws), the object between the jaws (`BETWEEN_*_M`), both fingers on it, its rise above
   resting on the table towards the lift, held (upright within `HELD_MAX_TILT_DEG`); a small action-rate penalty and
   one on the object's swing while lifted. **Terminations:**
@@ -56,13 +56,16 @@ REACH_STD_M = 0.05
 # over the pyri pool's starts (2026-11-21; the pinch to the axis line, the grasp's height along the axis apart): in the
 # jaws (-16, 1, -11) mm (5th-95th: x -18 to -15, y +-7, z -18 to +2); the jaws open around it (-30, 2, -12) (x -36 to
 # -24); at the attack (-30, -1, +34) (z +20 to +52)
-GRASP_POINT_M = (-0.016, 0.001, -0.011)
-BETWEEN_LOW_M = (
-    -0.038,
-    -0.015,
-    -0.025,
-)  # the box "between the jaws": the open jaws' starts and the closed ones'
-BETWEEN_HIGH_M = (-0.012, 0.015, 0.006)
+# For objects of several sizes, refit over the multi1 pool's starts (radius 20-30 mm; 2026-11-21): across the jaws the
+# axis sits about a radius from the pinch point, in the jaws x = -0.79 r + 2.0 mm (residual 1.0 mm; at pyri's 22.5 mm
+# -15.8, as measured), z = +0.67 r - 24.1 (residual 6.7); the jaws open around it x = -1.10 r - 4.9 (residual 3.2).
+# Each axis (per metre of radius, at no radius; m):
+GRASP_POINT_FIT = ((-0.79, 0.0020), (0.0, 0.001), (0.67, -0.0241))
+# the box "between the jaws", from the open jaws' starts to the closed ones': across the jaws its ends follow the radius
+# as those do (at pyri's radius -38 and -12 mm, as measured); y and z fixed
+BETWEEN_X_FIT = ((-1.10, -0.0049 - 0.0084), (-0.79, 0.0020 + 0.0038))  # low, high
+BETWEEN_LOW_M = (None, -0.015, -0.025)
+BETWEEN_HIGH_M = (None, 0.015, 0.006)
 ON_BODY_MARGIN_M = 0.005  # the grasp's height this far inside the object's ends at least
 HELD_MAX_TILT_DEG = 10.0  # held only upright within this
 
@@ -262,12 +265,31 @@ def axis_from_pinch(env: "ManagerBasedRlEnv") -> tuple["torch.Tensor", "torch.Te
     return center - along[:, None] * axis, along
 
 
+def object_radius(env: "ManagerBasedRlEnv") -> "torch.Tensor":
+    """Each world's object's radius (N,), from the model (per world once resized, `start_pool.resize_objects`)."""
+    from .start_pool import _object_ids
+
+    cache = env.__dict__.setdefault("_felix_object_ids", {})
+    if "geom" not in cache:
+        cache["body"], cache["geom"] = _object_ids(env.sim.mj_model)
+    radius = env.sim.model.geom_size[..., cache["geom"], 0].reshape(-1)
+    return radius.expand(env.num_envs) if radius.numel() == 1 else radius
+
+
+def grasp_point(env: "ManagerBasedRlEnv") -> "torch.Tensor":
+    """Where the object's axis passes the pinch point in a grasp, for each world's radius (pinch frame, (N, 3))."""
+    import torch
+
+    r = object_radius(env).float()
+    return torch.stack([a * r + b for a, b in GRASP_POINT_FIT], dim=1)
+
+
 def reach(env: "ManagerBasedRlEnv", std: float = REACH_STD_M) -> "torch.Tensor":
-    """exp(-|the object's axis from the grasp point (`GRASP_POINT_M`)| / std)."""
+    """exp(-|the object's axis from the grasp point (`grasp_point`)| / std)."""
     import torch
 
     perp, _ = axis_from_pinch(env)
-    return torch.exp(-torch.linalg.norm(perp - torch.tensor(GRASP_POINT_M, device=env.device), dim=1) / std)
+    return torch.exp(-torch.linalg.norm(perp - grasp_point(env), dim=1) / std)
 
 
 def between_jaws(env: "ManagerBasedRlEnv", height: float) -> "torch.Tensor":
@@ -282,8 +304,15 @@ def between_jaws(env: "ManagerBasedRlEnv", height: float) -> "torch.Tensor":
         height = sizes[:, 1]
 
     perp, along = axis_from_pinch(env)
-    low = torch.tensor(BETWEEN_LOW_M, device=env.device)
-    high = torch.tensor(BETWEEN_HIGH_M, device=env.device)
+    r = object_radius(env).float()
+    (a_lo, b_lo), (a_hi, b_hi) = BETWEEN_X_FIT
+    n = len(r)
+    low = torch.stack(
+        [a_lo * r + b_lo, *(torch.full((n,), v, device=env.device) for v in BETWEEN_LOW_M[1:])], dim=1
+    )
+    high = torch.stack(
+        [a_hi * r + b_hi, *(torch.full((n,), v, device=env.device) for v in BETWEEN_HIGH_M[1:])], dim=1
+    )
     inside = ((perp > low) & (perp < high)).all(dim=1)
     return (inside & (along.abs() < height / 2 - ON_BODY_MARGIN_M)).float()
 

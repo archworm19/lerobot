@@ -142,6 +142,9 @@ def table_spec(model: XleRobotModel, arm: str, table_z: float) -> "mujoco.MjSpec
 # ---- the task's terms ----------------------------------------------------------------------------------------------
 
 
+# the size the actor is told, off by an error drawn at each reset and kept for the episode (std, m): what a size
+# estimated from a camera is off by (a bias, not noise that averages away); the critic told the true size
+SIZE_ERROR_M = 0.002
 SIZED_FIELDS = ("geom_size", "geom_rbound", "geom_aabb", "body_mass", "body_inertia")
 
 
@@ -151,11 +154,12 @@ def reset_from_sized_pool(
     path: str,
     pool_weights: Mapping[str, float],
     mass_range: tuple[float, float] = (1.0, 1.0),
+    size_error_m: float = 0.0,
 ) -> None:
     """Mjlab reset event for a pool whose objects vary in size.
 
     `start_pool.reset_from_pool`, then each reset world's object made its start's (`start_pool.resize_objects`), its
-    mass times a log-uniform draw in `mass_range`.
+    mass times a log-uniform draw in `mass_range`; the error in the size the actor is told drawn (`size_error_m`, std).
 
     `env_cfg` declares the fields it writes per world (`SIZED_FIELDS`) and the constants recomputed after (mjlab's
     `requires_model_fields`, `set_const`: the object's mass changes its subtree mass and inverse weights).
@@ -170,17 +174,24 @@ def reset_from_sized_pool(
     lo, hi = np.log(mass_range[0]), np.log(mass_range[1])
     scale = torch.exp(lo + (hi - lo) * torch.rand(len(env_ids), device=rows.device))
     resize_objects(env, env_ids, env._felix_pool["objects"][rows], scale)
+    if not hasattr(env, "felix_size_error"):
+        env.felix_size_error = torch.zeros(env.num_envs, 2, device=rows.device)
+    env.felix_size_error[env_ids] = size_error_m * torch.randn(len(env_ids), 2, device=rows.device)
 
 
-def object_size(env: Any) -> Any:
+def object_size(env: Any, estimated: bool = False) -> Any:
     """Each world's object's radius and height (m): an observation, for a pool whose objects vary in size.
 
-    Zeros before the first reset (the observation manager reads every term once when built, for its shape).
+    `estimated`: off by the episode's error (`reset_from_sized_pool`'s `size_error_m`: the actor's view). Zeros before
+    the first reset (the observation manager reads every term once when built, for its shape).
     """
     import torch
 
     sizes = getattr(env, "felix_object_size", None)
-    return torch.zeros(env.num_envs, 2, device=env.device) if sizes is None else sizes[:, :2]
+    if sizes is None:
+        return torch.zeros(env.num_envs, 2, device=env.device)
+    error = getattr(env, "felix_size_error", None) if estimated else None
+    return sizes[:, :2] if error is None else sizes[:, :2] + error
 
 
 def env_cfg(
@@ -196,6 +207,7 @@ def env_cfg(
     start_pool: str | Path | None = None,
     pool_weights: Mapping[str, float] | None = None,
     object_noise_m: float = OBJECT_NOISE_M,
+    size_error_m: float = SIZE_ERROR_M,
 ) -> "ManagerBasedRlEnvCfg":
     """The grasp-and-lift environment: `obj` on the table at `table_z`, the arm from `start` (the module docstring).
 
@@ -205,6 +217,8 @@ def env_cfg(
     `give_scale`: mjlab's correction to the fingers' give (`MJLAB_GIVE_SCALE`); 1.0 for the CPU simulator's model as is
     (`model_differences` then finds none). The task's action, observations, rewards and terminations: `mjlab_task`;
     `object_noise_m` the object pose's noise in the actor's observations (std, m; the axis's a tenth, unitless).
+    `size_error_m`: for a pool whose objects vary in size, the error in the radius and height the actor is told, drawn
+    at each reset and kept for the episode (std, m; with `randomize` only).
     """
     require_package("mjlab", extra="felix_jr_gpu")
     from mjlab.actuator import XmlActuatorCfg
@@ -266,7 +280,10 @@ def env_cfg(
         "actions": ObservationTermCfg(func=base_mdp.last_action),
     }
     if sized:  # (one object's runs keep their observations: their checkpoints still load)
-        terms["object_size"] = ObservationTermCfg(func=object_size)
+        terms["object_size"] = ObservationTermCfg(func=object_size, params={"estimated": True})
+    critic_terms = dict(terms)  # (the true size: the actor's is off by the episode's error)
+    if sized:
+        critic_terms["object_size"] = ObservationTermCfg(func=object_size)
     events: dict[str, EventTermCfg] = {
         "reset_scene": EventTermCfg(func=base_mdp.reset_scene_to_default, mode="reset"),
         "reset_object": EventTermCfg(
@@ -289,10 +306,13 @@ def env_cfg(
         if sized:
             from mjlab.managers.event_manager import RecomputeLevel, requires_model_fields
 
+            # TODO: this seems to be key to randomizing object parameters across sims
+            #   please describe in detail in comments
             reset: Any = requires_model_fields(*SIZED_FIELDS, recompute=RecomputeLevel.set_const)(
                 reset_from_sized_pool
             )
             params["mass_range"] = MASS_RANGE if randomize else (1.0, 1.0)
+            params["size_error_m"] = size_error_m if randomize else 0.0
         else:
             reset = reset_from_pool
         events = {
@@ -343,7 +363,7 @@ def env_cfg(
         scene=SceneCfg(num_envs=num_envs, env_spacing=0.0, entities=entities, sensors=task.sensors()),
         observations={
             "actor": ObservationGroupCfg(terms, enable_corruption=True),
-            "critic": ObservationGroupCfg(dict(terms), enable_corruption=False),
+            "critic": ObservationGroupCfg(critic_terms, enable_corruption=False),
         },
         actions={"joint_targets": task.delta_action_cfg(model, arm)},
         events=events,

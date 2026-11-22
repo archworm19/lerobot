@@ -128,6 +128,7 @@ def test_a_sized_pool_resizes_each_worlds_object(tmp_path):
     (a wrong size or stale collision bounds would sink it or pop it up), its size observed."""
     import torch
 
+    from lerobot.felix_jr.sim2real import mjlab_task as task
     from lerobot.felix_jr.sim2real.start_pool import _object_ids
 
     model = XleRobotModel.load(api.MODEL)
@@ -160,6 +161,10 @@ def test_a_sized_pool_resizes_each_worlds_object(tmp_path):
         assert float(m.body_inertia[w, body, 2]) == pytest.approx(mass * r * r / 2, rel=1e-5)
         assert float(env.felix_object_rest_z[w]) == pytest.approx(TABLE_Z + h / 2, abs=1e-6)
         assert obs["actor"][w, -2:].cpu().numpy() == pytest.approx([r, h], abs=1e-6)
+        assert obs["critic"][w, -2:].cpu().numpy() == pytest.approx([r, h], abs=1e-6)  # (the true size)
+        assert float(task.grasp_point(env)[w, 0]) == pytest.approx(
+            -0.79 * r + 0.0020, abs=1e-6
+        )  # (its radius')
     for _ in range(10):
         env.step(torch.zeros(8, 6))
     after = env.sim.data.qpos[:, z].cpu().numpy()

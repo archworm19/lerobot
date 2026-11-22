@@ -184,6 +184,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--save-interval", type=int, default=100)
     parser.add_argument("--pool-weights", nargs="+", default=None, metavar="POOL=W")
     parser.add_argument("--object-noise-mm", type=float, default=1000 * me.OBJECT_NOISE_M)
+    parser.add_argument(
+        "--size-error-mm",
+        type=float,
+        default=1000 * me.SIZE_ERROR_M,
+        help="objects of several sizes: the error in the size the actor is told, an episode's (std)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--logger", choices=("tensorboard", "wandb"), default="tensorboard")
     parser.add_argument("--log-dir", type=Path, default=None)
@@ -228,6 +234,7 @@ def main(argv: list[str] | None = None) -> None:
         start_pool=args.pool,
         pool_weights=weights,
         object_noise_m=args.object_noise_mm / 1000,
+        size_error_m=args.size_error_mm / 1000,
         randomize=True,
     )
     cfg.seed = args.seed
@@ -241,6 +248,7 @@ def main(argv: list[str] | None = None) -> None:
         "device": device,
         "pool_weights": weights or me.POOL_WEIGHTS,
         "object_noise_m": args.object_noise_mm / 1000,
+        "size_error_m": args.size_error_mm / 1000,
         "reward_weights": me.REWARD_WEIGHTS,
         "action": {
             "arm_step_deg": task.ARM_STEP_DEG,

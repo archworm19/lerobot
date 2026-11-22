@@ -238,4 +238,15 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
   cylinder in the environment, resized per world at reset (`mdp.dr.geom_size`, which recomputes `geom_rbound` and
   `geom_aabb`), its mass and inertia to match (`dr.pseudo_inertia`, not `dr.body_mass`, which leaves the inertia); the
   size in the privileged observations.
+  **Built (2026-11-21):** `StartPool.objects` (a size a start), the per-world resize at reset
+  (`mjlab_env.reset_from_sized_pool`, `start_pool.resize_objects`: size, bounding sphere and box, mass times a
+  log-uniform draw, a solid cylinder's inertia; `set_const` after), the resting height and `between_jaws`' height per
+  world, the radius and height observed. The size the actor is told is off by an error drawn at each reset and kept for
+  the episode (`SIZE_ERROR_M` 2 mm: a camera's estimate is off by a bias, not noise that averages away; SimToolReal
+  perturbs its bounding box alike); the critic is told the true size. The grasp point and the box between the jaws
+  refit against the radius over `multi1`'s starts (`mjlab_task.GRASP_POINT_FIT`, `BETWEEN_X_FIT`: in the jaws the axis
+  sits x = -0.79 r + 2.0 mm from the pinch point, residual 1.0 mm; the fixed -16 mm was 6 mm off at 30 mm).
+  **`multi1`** (1,024 placements, 40-60 x 100-200 mm, 40-120 g, up to 4 grasps each): 931 anchored; the unanchored
+  are short objects close in (under ~260 mm ahead, mostly 100-133 mm tall, worst wide and short). Pools (random split,
+  15 %): `multi1_train` 16,384 starts from 2,382 grasps on 791 placements, `multi1_test` 4,096 from 459 on 140.
 - Then fewer privileged observations (the finger contacts dropped).

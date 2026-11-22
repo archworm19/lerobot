@@ -191,6 +191,7 @@ def make_video_env(
         start_pool=str(pool or settings.get("eval_pool") or settings["pool"]),
         pool_weights=dict.fromkeys(POOLS, 1.0),
         object_noise_m=float(settings.get("object_noise_m", me.OBJECT_NOISE_M)),
+        size_error_m=float(settings.get("size_error_m", me.SIZE_ERROR_M)),
         randomize=True,
     )
     env = me.make_env(cfg, device=device)
