@@ -209,7 +209,10 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
 - **A spatial holdout:** placements split by a region, not at random (`start_pool --split ahead|side|diameter|height
   --holdout-at high|low|middle`): an extrapolation number beside the random split's interpolation one. In `pyri2`'s
   476 anchored placements reach spans only 0.22-0.35 m ahead (its farthest 15 % a 2 cm band), the side -0.15 to
-  +0.15 m: the first, `pyri2side`, holds out the side's high quarter (the arm turned past where it trained).
+  +0.15 m: the first, `pyri2side`, holds out the side's high quarter (the arm turned past where it trained). `--plot` draws
+  the placements (`placement_plot.py`: the table from above and the sizes, training / held out / unanchored; with sizes
+  that vary, the table again per diameter and height range), `--plot-only` to preview a split without drawing pools.
+  `b1` (24 placements over 40-60 mm x 100-200 mm) already shows the short wide objects mostly unanchored.
 - **Objects of several sizes.** A bank holds one object (`--object D H G`); its grasps are in absolute units (depth mm,
   height along the object cm), and its in_jaws and lifted starts valid for that size only, so a bank per size on a
   grid (diameters 40 / 50 / 60 mm x heights 90 / 120 / 150 mm, the corners and the centre first), sizes between held

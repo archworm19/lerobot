@@ -4,6 +4,7 @@
       [--per-pool attack=1024 at_object=1024 in_jaws=1024 lifted=1024] [--seed 0] [--workers 6]
       [--holdout 0.15 [--test-per-pool 1024]]   # a held-out split by placement: <out>_train.npz, <out>_test.npz
       [--split random|ahead|side|diameter|height] [--holdout-at high|low|middle]
+      [--plot [PNG]] [--plot-only]   # the placements drawn (`placement_plot`): where, what size, which held out
 
 The held-out split is by placement (a placement's starts are near copies of each other: a split by start would leak):
 at random (`--split random`: placements among the trained ones, an interpolation test), or a region of the placements
@@ -244,10 +245,10 @@ def reset_from_pool(
             # start's commands go in as targets, by name (each actuator drives the joint it is named after)
             "targets": _targets(env, sim.mj_model),
         }
-        env._felix_pool = cache  # type: ignore[attr-defined]
-        env.felix_object_z0 = torch.zeros(env.num_envs, device=dev)  # type: ignore[attr-defined]
+        env._felix_pool = cache
+        env.felix_object_z0 = torch.zeros(env.num_envs, device=dev)
         # resting on the table: what the object's rise is measured from (`mjlab_task.rise`)
-        env.felix_object_rest_z = torch.full(  # type: ignore[attr-defined]
+        env.felix_object_rest_z = torch.full(
             (env.num_envs,), pool.table_z + pool.object_size[1] / 2, device=dev
         )
     ids = torch.arange(env.num_envs, device=sim.data.qpos.device) if env_ids is None else env_ids
@@ -266,7 +267,7 @@ def reset_from_pool(
     env.scene[entity].set_joint_position_target(
         cache["ctrl"][rows][:, columns], joint_ids=joint_ids, env_ids=ids
     )
-    env.felix_object_z0[ids] = cache["qpos"][rows, cache["object_z"]].float()  # type: ignore[attr-defined]
+    env.felix_object_z0[ids] = cache["qpos"][rows, cache["object_z"]].float()
 
 
 def _targets(env: "ManagerBasedRlEnv", m: "mujoco.MjModel", entity: str = "robot") -> tuple[Any, Any, str]:
@@ -365,6 +366,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--split", choices=SPLIT_KEYS, default="random", help="held out at random or by a region"
     )
     parser.add_argument("--holdout-at", choices=("high", "low", "middle"), default="high")
+    parser.add_argument(
+        "--plot",
+        type=Path,
+        nargs="?",
+        const=Path(""),
+        default=None,
+        help="the placements drawn (where, what size, which held out) into this png (default: <out>_placements.png)",
+    )
+    parser.add_argument(
+        "--plot-only", action="store_true", help="only the plot (a split previewed): no pools drawn"
+    )
     args = parser.parse_args(argv)
     per_pool = {k: int(v) for k, v in (item.split("=") for item in args.per_pool)}
     unknown = set(per_pool) - set(POOLS)
@@ -372,17 +384,19 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error(f"unknown pools {sorted(unknown)} (known: {POOLS})")
     started = time.perf_counter()
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    from . import bank
+
+    config, lines = bank.load(args.bank)
+    base = XleRobotModel.load(args.model)
+    base_xy = base.frame_pose(f"{config.arm}_base_link", base.joint_vector())[:2, 3]
+    test: set[int] | None = None
+    jobs: list[tuple[Path, dict[str, int], set[int] | None]]
     if args.holdout <= 0:
         jobs = [(args.out, per_pool, None)]
     else:  # (split by placement: a placement's starts are near copies of each other, a split by start would leak)
-        from . import bank
-
-        config, lines = bank.load(args.bank)
         anchored = sorted(
             (line["placement"] for line in lines if line["anchor"] is not None), key=lambda p: p["index"]
         )
-        base = XleRobotModel.load(args.model)
-        base_xy = base.frame_pose(f"{config.arm}_base_link", base.joint_vector())[:2, 3]
         train, test = split_placements(
             anchored, args.holdout, args.split, args.holdout_at, base_xy, args.seed
         )
@@ -398,6 +412,21 @@ def main(argv: Sequence[str] | None = None) -> None:
             (stem.with_name(stem.name + "_train.npz"), per_pool, train),
             (stem.with_name(stem.name + "_test.npz"), dict.fromkeys(per_pool, args.test_per_pool), test),
         ]
+    if args.plot is not None or args.plot_only:
+        from .placement_plot import plot_placements
+
+        stem = args.out.with_suffix("")
+        png = (
+            args.plot if args.plot not in (None, Path("")) else stem.with_name(stem.name + "_placements.png")
+        )
+        split = (
+            "no held-out split"
+            if test is None
+            else f"held out: {args.split} {args.holdout_at if args.split != 'random' else ''} {args.holdout:.0%}"
+        )
+        print(f"placements drawn: {plot_placements(lines, base_xy, test, png, f'{args.bank.stem}, {split}')}")
+        if args.plot_only:
+            return
     for out, counts_wanted, placements in jobs:
         pool = draw_pool(args.model, args.bank, counts_wanted, args.seed, args.workers, placements)
         pool.save(out)

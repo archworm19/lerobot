@@ -12,6 +12,7 @@ def _placement(index, ahead, side, diameter=0.05, height=0.12):
         "bottom_root": [0.1 - ahead, -0.2 + side, 0.78],
         "radius": diameter / 2,
         "height": height,
+        "mass_kg": 0.08,
     }
 
 
@@ -49,3 +50,15 @@ def test_random_is_reproducible_and_disjoint():
     assert a == split_placements(PLACEMENTS, 0.3, seed=1)
     train, test = a
     assert len(test) == 3 and not train & test and train | test == set(range(10))
+
+
+@pytest.mark.parametrize("vary", [False, True])
+def test_the_placements_drawn(tmp_path, vary):
+    """`placement_plot.plot_placements`: one object (the table alone) or several sizes (the grid by size range)."""
+    pytest.importorskip("matplotlib")
+    from lerobot.felix_jr.sim2real.placement_plot import plot_placements
+
+    placements = PLACEMENTS if vary else [_placement(i, 0.22 + 0.01 * i, -0.15 + 0.03 * i) for i in range(10)]
+    lines = [{"placement": p, "anchor": None if p["index"] == 3 else {}} for p in placements]
+    out = plot_placements(lines, BASE, {8, 9}, tmp_path / "placements.png", "test")
+    assert out.is_file() and out.stat().st_size > 10_000
