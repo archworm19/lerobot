@@ -150,6 +150,7 @@ The easiest version that should work: if it does not learn, the environment is w
 | `20261121_134628` | RTX 4090 | 4,096 x 1,500 | 42 min (1.67 s an iteration) | 99.2 / 99.5 / 98.7 / 99.9 / 100 % (train pool) | 98.0 / 98.7 / 98.7 / 96.9 / 95.4 % (train pool) |
 | `20261121_144032` | RTX 4090 | 4,096 x 1,000 | 27 min (1.6 s an iteration) | train 99.7 / 99.4 / 99.5 / 99.8 / 99.9 %; **held out 99.9 / 99.4 / 100 / 100 / 100 %** | train 97.5 / 98.4 / 99.5 / 96.0 / 95.9 %; **held out 98.3 / 98.7 / 100 / 97.5 / 97.1 %** |
 | `20261121_205721` | RTX 4090 | 4,096 x 1,000 | 29 min (1.7 s an iteration, the watcher beside it) | train 99.9 / 100 / 99.9 / 99.8 / 99.9 %; **side held out 98.7 / 95.8 / 99 / 100 / 100 %** | train 97.3 / 98.1 / 99 / 96.5 / 95.8 %; **side held out 95.6 / 90.5 / 99 / 96.5 / 96.4 %** |
+| `20261122_171622` | RTX 4090 | 4,096 x 700 (stopped) | 27 min (2.25 s an iteration, the watcher beside it) | **multi-size held out 99.3 / 99.6 / 100 / 98.4 / 99.2 %** | **multi-size held out 96.9 / 98.5 / 99.6 / 94.1 / 95.4 %** |
 
 ### 2026-11-21: the first runs (the positive control)
 
@@ -214,6 +215,29 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
   overfitting to the trained region; choosing a checkpoint by it would need a third split.
 - **Read:** the policy extrapolates in angle, a little worse on the approach. More of the table in training (the bank's
   reach and side as wide as the arm allows) is the cheap fix; the size grid next.
+
+### 2026-11-22: objects of several sizes
+
+- **`20261122_171622`** (RTX 4090, 4,096 worlds, stopped at 700 iterations, 27 min; commit `57342aa30`): the pool
+  `multi1_train` (16,384 starts from 2,382 grasps on 791 placements; cylinders 40-60 mm x 100-200 mm, 40-120 g, each
+  world's object resized at its reset) against `multi1_test` (4,096 starts on 140 placements never trained on, random
+  split); the size observed with a 2 mm error an episode (the critic the truth). **Held at the end on the held-out
+  placements: 96.9 %** (attack 98.5, at the object 99.6, in the jaws 94.1, lifted 95.4; held at any point 99.3 %):
+  one policy for the whole size range, as good as one object's runs (`pyri2`: 98.3 %). The held-out curve (all, %):
+  100 it. 88.9, 200 95.3, 300 96.8, then flat (96.3-96.9 to 700): stopped there. A first attempt
+  (`20261122_164732`) crashed at its first reset (a host tensor mixed into a GPU batch's check: fixed, `d4984cc7e`),
+  a second ran at 3.0 s an iteration (the constants' refresh: fixed, `57342aa30`; profiled above); stopped at 250.
+- **The drops: the policy opens the gripper.** Most of the shortfall is starts already gripping (in the jaws, lifted:
+  held at the end ~94-95 % though held at some point 98-99 %). Instrumented on `20261122_164732`'s `model_200`
+  (45 in-jaws / lifted worlds, CPU): every one of the 6 held-then-lost episodes lost "held" to a finger coming off,
+  with the object still fully lifted (rise 1.00) and upright (2-7 deg); the gripper's target had opened first (0.31-0.46
+  rad to 0.66-1.03, the jaws following), mostly late (steps 230-340 of 360); ordinary physics draws (pad friction
+  0.31-0.34 in a 0.25-0.39 range, 62-88 g, 42-57 mm). Not slip: the policy's gripper creeps open. The likely cause is
+  the delta gripper action (targets accumulate: a slightly positive mean output in some held states drifts it open)
+  with nothing paying for squeezing (held needs contact, not force; the policy sees no time; a time-out is no
+  failure). On the robot it would drop held bottles. To confirm: the gripper target's mean drift while held, in the
+  worlds that keep holding too; longer episodes (drift: losses grow with time). Fixes to weigh: a squeeze term while
+  held (the gripper servo's load) or a penalty on opening while lifted; an absolute or latched gripper command.
 
 ### Next (decided 2026-11-21)
 
