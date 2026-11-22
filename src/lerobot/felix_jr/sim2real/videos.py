@@ -12,6 +12,7 @@ on the pod's GPU (EGL); `main` films a checkpoint after the fact.
 """
 
 import argparse
+import copy
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -68,7 +69,7 @@ def record(
     import torch
 
     obs, _ = wrapped.reset()
-    m = env.sim.mj_model
+    m = copy.deepcopy(env.sim.mj_model)  # (its own: each world's object size set into it to render)
     d = mujoco.MjData(m)
     renderer = mujoco.Renderer(m, height=TILE[1], width=TILE[0])
     camera = mujoco.MjvCamera()
@@ -79,6 +80,12 @@ def record(
     )
     pools = _pools_of_worlds(env)
     n = env.num_envs
+    from .start_pool import _object_ids
+
+    _, object_geom = _object_ids(m)
+    sizes = (
+        env.sim.model.geom_size[..., object_geom, :].cpu().numpy().reshape(-1, 3)
+    )  # (each world's, if resized)
     ended: list[str | None] = [None] * n
     fps = max(1, int(round(1.0 / env.step_dt)))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,6 +101,7 @@ def record(
                 tiles = []
                 for w in range(n):
                     d.qpos[:], d.qvel[:] = qpos[w], qvel[w]
+                    m.geom_size[object_geom] = sizes[min(w, len(sizes) - 1)]
                     mujoco.mj_forward(m, d)
                     camera.lookat[:] = obj[w] + np.array([0.0, 0.0, 0.02])
                     renderer.update_scene(d, camera)

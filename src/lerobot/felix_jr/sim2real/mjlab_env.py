@@ -142,6 +142,47 @@ def table_spec(model: XleRobotModel, arm: str, table_z: float) -> "mujoco.MjSpec
 # ---- the task's terms ----------------------------------------------------------------------------------------------
 
 
+SIZED_FIELDS = ("geom_size", "geom_rbound", "geom_aabb", "body_mass", "body_inertia")
+
+
+def reset_from_sized_pool(
+    env: Any,
+    env_ids: Any,
+    path: str,
+    pool_weights: Mapping[str, float],
+    mass_range: tuple[float, float] = (1.0, 1.0),
+) -> None:
+    """Mjlab reset event for a pool whose objects vary in size.
+
+    `start_pool.reset_from_pool`, then each reset world's object made its start's (`start_pool.resize_objects`), its
+    mass times a log-uniform draw in `mass_range`.
+
+    `env_cfg` declares the fields it writes per world (`SIZED_FIELDS`) and the constants recomputed after (mjlab's
+    `requires_model_fields`, `set_const`: the object's mass changes its subtree mass and inverse weights).
+    """
+    import torch
+
+    from .start_pool import reset_from_pool, resize_objects
+
+    rows = reset_from_pool(env, env_ids, path, pool_weights)
+    if rows is None:
+        return
+    lo, hi = np.log(mass_range[0]), np.log(mass_range[1])
+    scale = torch.exp(lo + (hi - lo) * torch.rand(len(env_ids), device=rows.device))
+    resize_objects(env, env_ids, env._felix_pool["objects"][rows], scale)
+
+
+def object_size(env: Any) -> Any:
+    """Each world's object's radius and height (m): an observation, for a pool whose objects vary in size.
+
+    Zeros before the first reset (the observation manager reads every term once when built, for its shape).
+    """
+    import torch
+
+    sizes = getattr(env, "felix_object_size", None)
+    return torch.zeros(env.num_envs, 2, device=env.device) if sizes is None else sizes[:, :2]
+
+
 def env_cfg(
     model: XleRobotModel,
     arm: str = "right",
@@ -184,9 +225,12 @@ def env_cfg(
         from .start_pool import StartPool
 
         pool = StartPool.load(Path(start_pool))
-        radius, height, mass = pool.object_size
+        sized = pool.sizes_vary  # (the object resized per world at each reset: `reset_from_sized_pool`)
+        radius, height, mass = (float(v) for v in pool.objects[0])
         table_z = pool.table_z
         obj = sc.Cylinder("object", -0.35, 0.13, radius, height, mass)  # (where: each start's own)
+    else:
+        sized = False
     obj = obj or sc.Cylinder("object", -0.356, 0.132, 0.0265, 0.11, 0.116)  # feno at one of sim3's spots
     start = start or {**REST, "gripper.pos": 30.0}
     entities = {
@@ -221,6 +265,8 @@ def env_cfg(
         "finger_contacts": ObservationTermCfg(func=task.finger_contacts),
         "actions": ObservationTermCfg(func=base_mdp.last_action),
     }
+    if sized:  # (one object's runs keep their observations: their checkpoints still load)
+        terms["object_size"] = ObservationTermCfg(func=object_size)
     events: dict[str, EventTermCfg] = {
         "reset_scene": EventTermCfg(func=base_mdp.reset_scene_to_default, mode="reset"),
         "reset_object": EventTermCfg(
@@ -239,13 +285,19 @@ def env_cfg(
     if start_pool is not None:
         from .start_pool import reset_from_pool
 
+        params: dict[str, Any] = {"path": str(start_pool), "pool_weights": dict(pool_weights or POOL_WEIGHTS)}
+        if sized:
+            from mjlab.managers.event_manager import RecomputeLevel, requires_model_fields
+
+            reset: Any = requires_model_fields(*SIZED_FIELDS, recompute=RecomputeLevel.set_const)(
+                reset_from_sized_pool
+            )
+            params["mass_range"] = MASS_RANGE if randomize else (1.0, 1.0)
+        else:
+            reset = reset_from_pool
         events = {
             "reset_scene": events["reset_scene"],
-            "reset_from_pool": EventTermCfg(
-                func=reset_from_pool,
-                mode="reset",
-                params={"path": str(start_pool), "pool_weights": dict(pool_weights or POOL_WEIGHTS)},
-            ),
+            "reset_from_pool": EventTermCfg(func=reset, mode="reset", params=params),
         }
     if randomize:  # (`grasp_check.physics_draws`' ranges, about the fitted values; log-uniform as there)
         events |= {
@@ -270,16 +322,22 @@ def env_cfg(
                     "ranges": STIFFNESS_RANGE,
                 },
             ),
-            "object_mass": EventTermCfg(
-                func=dr.body_mass,
-                mode="startup",
-                params={
-                    "asset_cfg": SceneEntityCfg("object"),
-                    "operation": "scale",
-                    "distribution": "log_uniform",
-                    "ranges": MASS_RANGE,
-                },
-            ),
+            **(
+                {}
+                if sized
+                else {
+                    "object_mass": EventTermCfg(
+                        func=dr.body_mass,
+                        mode="startup",
+                        params={
+                            "asset_cfg": SceneEntityCfg("object"),
+                            "operation": "scale",
+                            "distribution": "log_uniform",
+                            "ranges": MASS_RANGE,
+                        },
+                    )
+                }
+            ),  # (a sized pool's mass drawn at each reset instead: `reset_from_sized_pool`)
         }
     return ManagerBasedRlEnvCfg(
         scene=SceneCfg(num_envs=num_envs, env_spacing=0.0, entities=entities, sensors=task.sensors()),

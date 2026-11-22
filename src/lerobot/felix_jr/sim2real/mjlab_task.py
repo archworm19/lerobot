@@ -271,8 +271,15 @@ def reach(env: "ManagerBasedRlEnv", std: float = REACH_STD_M) -> "torch.Tensor":
 
 
 def between_jaws(env: "ManagerBasedRlEnv", height: float) -> "torch.Tensor":
-    """1 where the object's axis is in the box between the jaws and the grasp on its body (`height`: the object's)."""
+    """1 where the object's axis is in the box between the jaws and the grasp on its body.
+
+    `height`: the object's; each world's own when the start pool keeps them (`env.felix_object_size`).
+    """
     import torch
+
+    sizes = getattr(env, "felix_object_size", None)
+    if sizes is not None:
+        height = sizes[:, 1]
 
     perp, along = axis_from_pinch(env)
     low = torch.tensor(BETWEEN_LOW_M, device=env.device)

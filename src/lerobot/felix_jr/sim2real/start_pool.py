@@ -72,7 +72,8 @@ def _layout(m: "mujoco.MjModel") -> dict[str, Any]:
 class StartPool:
     """Starts, by name: per joint its position (`qpos[name]`, (N, width)) and velocity, per actuator its command.
 
-    And each start's pool and anchor (the bank's), the object's size (one object: the bank's), the table's height.
+    And each start's pool and anchor (the bank's), its object's size (`objects`, (N, 3): radius, height (m), mass (kg);
+    one size given, every start's), the table's height.
     """
 
     qpos: dict[str, np.ndarray]
@@ -80,11 +81,28 @@ class StartPool:
     ctrl: dict[str, np.ndarray]
     pool: np.ndarray
     anchor: np.ndarray
-    object_size: tuple[float, float, float]  # radius, height (m), mass (kg)
+    objects: np.ndarray  # (N, 3): radius, height (m), mass (kg); a (3,) one for every start
     table_z: float
     placements: np.ndarray | None = (
         None  # the bank's placements drawn from (a split's: `--holdout`), None: all
     )
+
+    def __post_init__(self) -> None:
+        """`objects` one row a start (one size given: broadcast to every start)."""
+        self.objects = np.broadcast_to(np.asarray(self.objects, dtype=np.float64), (len(self.pool), 3)).copy()
+
+    @property
+    def sizes_vary(self) -> bool:
+        """The starts' objects not all one size."""
+        return bool(len(self) and (self.objects != self.objects[0]).any())
+
+    @property
+    def object_size(self) -> tuple[float, float, float]:
+        """The one object's radius, height (m) and mass (kg); a pool whose sizes vary has none (`objects`)."""
+        if self.sizes_vary:
+            raise ValueError("the starts' objects vary in size: see `objects`")
+        r, h, m = self.objects[0]
+        return float(r), float(h), float(m)
 
     def __len__(self) -> int:
         """How many starts."""
@@ -99,7 +117,7 @@ class StartPool:
             path,
             pool=self.pool,
             anchor=self.anchor,
-            object_size=np.array(self.object_size),
+            objects=self.objects,
             table_z=np.array(self.table_z),
             placements=np.array([] if self.placements is None else self.placements, dtype=int),
             **arrays,
@@ -113,14 +131,14 @@ class StartPool:
             kind: {k.split("/", 1)[1]: z[k] for k in z.files if k.startswith(f"{kind}/")}
             for kind in ("qpos", "qvel", "ctrl")
         }
-        size = z["object_size"]
+        objects = z["objects"] if "objects" in z.files else z["object_size"]  # (older pools: one size)
         return cls(
             part["qpos"],
             part["qvel"],
             part["ctrl"],
             z["pool"],
             z["anchor"],
-            (float(size[0]), float(size[1]), float(size[2])),
+            objects,
             float(z["table_z"]),
             z["placements"] if "placements" in z.files and len(z["placements"]) else None,
         )
@@ -190,9 +208,6 @@ def draw_pool(
     else:
         _init(str(model_path), str(bank_path), placements)
         rows = [_draw(t) for t in tasks]
-    sizes = {r["object"] for r in rows}
-    if len(sizes) != 1:
-        raise ValueError(f"the bank has more than one object ({sorted(sizes)}): one object per pool so far")
     stack = {
         kind: {name: np.stack([r[kind][name] for r in rows]) for name in rows[0][kind]}
         for kind in ("qpos", "qvel", "ctrl")
@@ -203,7 +218,7 @@ def draw_pool(
         stack["ctrl"],
         np.array([r["pool"] for r in rows]),
         np.array([r["anchor"] for r in rows]),
-        rows[0]["object"],
+        np.array([r["object"] for r in rows]),
         float(np.median([r["table_z"] for r in rows])),
         None if placements is None else np.array(sorted(placements)),
     )
@@ -217,8 +232,13 @@ def reset_from_pool(
     env_ids: "torch.Tensor | None",
     path: str,
     pool_weights: Mapping[str, float],
-) -> None:
-    """Mjlab reset event: each world in `env_ids` given a start (a pool by `pool_weights`, then a start of it)."""
+) -> "torch.Tensor | None":
+    """Mjlab reset event: each world in `env_ids` given a start (a pool by `pool_weights`, then a start of it).
+
+    Each world's object size kept (`env.felix_object_size`, (num_envs, 3): radius, height, mass), and its resting
+    height (`env.felix_object_rest_z`); the object itself resized by `resize_objects` (`mjlab_env`'s sized reset). The
+    rows drawn (None: no world reset).
+    """
     import torch
 
     sim = env.sim
@@ -244,16 +264,19 @@ def reset_from_pool(
             # mjlab derives the controls from the robot's joint position targets (each step, and at a reset): the
             # start's commands go in as targets, by name (each actuator drives the joint it is named after)
             "targets": _targets(env, sim.mj_model),
+            "objects": torch.as_tensor(pool.objects, device=dev, dtype=torch.float32),
+            "table_z": float(pool.table_z),
         }
         env._felix_pool = cache
         env.felix_object_z0 = torch.zeros(env.num_envs, device=dev)
         # resting on the table: what the object's rise is measured from (`mjlab_task.rise`)
         env.felix_object_rest_z = torch.full(
-            (env.num_envs,), pool.table_z + pool.object_size[1] / 2, device=dev
+            (env.num_envs,), pool.table_z + float(pool.objects[0, 1]) / 2, device=dev
         )
+        env.felix_object_size = cache["objects"][0].repeat(env.num_envs, 1)
     ids = torch.arange(env.num_envs, device=sim.data.qpos.device) if env_ids is None else env_ids
     if len(ids) == 0:
-        return
+        return None
     which = torch.multinomial(cache["weights"], len(ids), replacement=True)
     rows = torch.empty(len(ids), dtype=torch.long, device=ids.device)
     for i, members in enumerate(cache["rows"]):
@@ -268,6 +291,58 @@ def reset_from_pool(
         cache["ctrl"][rows][:, columns], joint_ids=joint_ids, env_ids=ids
     )
     env.felix_object_z0[ids] = cache["qpos"][rows, cache["object_z"]].float()
+    size = cache["objects"][rows]
+    env.felix_object_size[ids] = size
+    env.felix_object_rest_z[ids] = cache["table_z"] + size[:, 1] / 2
+    return rows
+
+
+def resize_objects(
+    env: "ManagerBasedRlEnv",
+    env_ids: "torch.Tensor",
+    sizes: "torch.Tensor",
+    mass_scale: "torch.Tensor | None" = None,
+) -> None:
+    """The object (a cylinder) in each world of `env_ids` made `sizes` ((n, 3): radius, height (m), mass (kg)).
+
+    Its geom's size, bounding sphere and box (what the collision broadphase reads), its body's mass (times
+    `mass_scale`, if given) and inertia (a solid cylinder's). The model fields must be per world (`mjlab_env`'s sized
+    reset asks for them) and the constants recomputed after (mjlab does, for a reset event that declares it).
+    """
+    import torch
+
+    m = env.sim.model
+    cache = env._felix_pool
+    if "object_geom" not in cache:
+        cache["object_body"], cache["object_geom"] = _object_ids(env.sim.mj_model)
+    body, geom = cache["object_body"], cache["object_geom"]
+    r, h, mass = sizes[:, 0], sizes[:, 1], sizes[:, 2]
+    if mass_scale is not None:
+        mass = mass * mass_scale
+    half = h / 2
+    m.geom_size[env_ids, geom, 0] = r.to(m.geom_size.dtype)
+    m.geom_size[env_ids, geom, 1] = half.to(m.geom_size.dtype)
+    m.geom_rbound[env_ids, geom] = torch.sqrt(r * r + half * half).to(m.geom_rbound.dtype)
+    m.geom_aabb[env_ids, geom, 1] = torch.stack([r, r, half], dim=1).to(m.geom_aabb.dtype)
+    m.body_mass[env_ids, body] = mass.to(m.body_mass.dtype)
+    side = mass * (3 * r * r + h * h) / 12
+    m.body_inertia[env_ids, body] = torch.stack([side, side, mass * r * r / 2], dim=1).to(
+        m.body_inertia.dtype
+    )
+
+
+def _object_ids(m: "mujoco.MjModel") -> tuple[int, int]:
+    """The object's body (its free joint's) and its one geom, a cylinder."""
+    import mujoco
+
+    joints = [j for j in range(m.njnt) if m.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE]
+    if len(joints) != 1:
+        raise ValueError(f"expected one free joint (the object), found {len(joints)}")
+    body = int(m.jnt_bodyid[joints[0]])
+    geoms = [g for g in range(m.ngeom) if m.geom_bodyid[g] == body]
+    if len(geoms) != 1 or m.geom_type[geoms[0]] != mujoco.mjtGeom.mjGEOM_CYLINDER:
+        raise ValueError(f"expected the object's body to have one cylinder, found geoms {geoms}")
+    return body, geoms[0]
 
 
 def _targets(env: "ManagerBasedRlEnv", m: "mujoco.MjModel", entity: str = "robot") -> tuple[Any, Any, str]:
