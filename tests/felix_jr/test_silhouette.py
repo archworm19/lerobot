@@ -1,5 +1,7 @@
 """A cylinder's silhouette in a wrist camera and its position refined against the image (`harness/silhouette.py`).
 
+EXPERIMENTAL, as the module is (see its docstring): delete this file with it.
+
 The frames are rendered here independently of the module: each pixel's ray (through the lens, undistorted) cast at
 the true cylinder (its side and its top), the object a colour on a noisy, shaded background.
 """

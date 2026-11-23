@@ -875,6 +875,44 @@ The table-coloured mask had to be closed (not opened) over the object's edges: w
 cp2 read +2.78 / +0.18. Tests: `test_contacts.py` (the contacts and the move's signs on synthetic cylinders),
 `smoke_tests/test_wrist_align_smoke.py` (the hold and a planned move on the fake robot).
 
+### Wrist silhouettes against the head's fit (offline, 2026-11-23): not shown to help; experimental
+
+The question: on the final approach the head's view is blocked (the arm, the wrist camera's mount), so can a wrist
+frame correct the head's cylinder from the object's outline alone (no depth)? `harness/silhouette.py` (**experimental,
+not wired in; removable with its test**) predicts the cylinder's outline in a wrist frame (contour generators and rims
+through the calibrated lens) and fits it to the image two ways: `refine` (scan lines along the predicted side edges,
+Gauss-Newton) and `chamfer_refine` (the whole outline against the distance transform of Canny edges, a grid search).
+`tests/felix_jr/test_silhouette.py` renders synthetic frames by ray casting: from up to 2 cm off, 100% come back within
+2 mm, and past that it says "no estimate" rather than a wrong answer.
+
+**On the recorded frames** (97 wrist frames, bowl5-8 and ruler2, each after a head fit; scratch scripts, data not
+kept): 0 `ok` with either method at the head's size. The fixed finger is the strongest edge (masked by edge frequency
+over all frames: 7.6% of the image). Searching position, radius and height together on six frames:
+
+| frame | outline on edges | the fit against the head |
+| --- | --- | --- |
+| bowl6 wristview21 | 88% | moved 12, -20 mm; top 16 mm lower |
+| bowl6 wristview13 | 64% | moved 12 mm; top 16 mm lower |
+| ruler2 wristview5 / 10 | 50-53% | moved ~1 cm; radius x0.5-0.6 (the cap, not the tapered body) |
+| bowl7 wristview5 | 48% | moved -12, -28 mm; top 26 mm lower |
+| bowl8 wristview7 (a thin pen) | 33% | no clear fit |
+
+- **The fits that land look right by eye**, on the cap's rim: seen from above, the top rim is the strongest edge, so
+  on a capped or tapered bottle it fits the cap, not the body to grasp.
+- **One view cannot tell height from distance:** a lower, farther top looks like a higher, nearer one. bowl7's fits
+  within 5 points of the best spread over 4 cm. With the head's top height held, the fits get worse (bowl6 35-53%,
+  bowl7's spread 4-6 cm): the wrist frames really disagree with the head's height.
+- **So the head and the wrist cameras disagree by 1-3 cm across and 1.5-2.5 cm in height**, fairly consistently within
+  a session (a bias, not noise): the head's fit or the wrist camera's pose (the arm's chain, the camera on its mount,
+  [hardware_risks.md](hardware_risks.md)) is off, and one view per frame cannot say which. None of these frames can
+  judge a refinement.
+
+**Takeaways.** A wrist refinement is not guaranteed to improve a bad head fit; at best it is "never worse, sometimes
+better", and that is unverified on real frames. What grasping needs is the object relative to the jaws, and the wrist
+camera is rigid to them: measured in the camera's own frame (visual servoing on the final approach, or a policy on the
+wrist images), the head and arm calibration drop out, leaving the short, stable camera-to-jaw offset. If silhouettes
+come back: two views with poses checked against a known marker first, and a model of the cap.
+
 ### Deprecated by these findings (2026-11-08); the clear-cut ones removed (2026-11-09)
 
 Marked in `harness/api.py` (`@tool(..., deprecated=...)`) on 2026-11-08. **Removed on 2026-11-09**, with the code
