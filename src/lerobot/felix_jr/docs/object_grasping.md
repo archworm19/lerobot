@@ -849,8 +849,10 @@ processing and pose normalization, and aligns the prediction to our poses by a U
 package's `evo` dependency, the same fit). Parity with the package's own `inference`: the single-frame depth within
 0.01%, the posed depth within 0.2% per frame (`smoke_tests/test_depth_anything_smoke.py`, against frozen depths of
 synthetic frames, `reference/da3_small_parity.npz`; skipped without the weights cached). The checkpoint
-(`scratch/da3_check.py`) now runs it in process (bowl8's checkpoint 2 again: the same contacts within 0.1 mm), ~8 s
-on the laptop's CPU / MPS. To upgrade DA3: bump the pin, regenerate the parity reference from the package's own
+(`scratch/da3_check.py`) now runs it in process (bowl8's checkpoint 2 again: the same contacts within 0.1 mm). Its
+speed on the M1, warm (measured 2026-11-23, 640x480 frames at `PROCESS_RES` 504): **MPS 0.18 s for one frame, 0.89 s
+for four**; CPU 1.3 s and 7.9 s (the "~8 s" noted here before was four frames on the CPU). The first call on MPS takes
+0.6-1.1 s. To upgrade DA3: bump the pin, regenerate the parity reference from the package's own
 `inference`, re-run the test.
 
 ### The checkpoint as tools (2026-11-09)
