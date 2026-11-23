@@ -287,7 +287,37 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
   (in the jaws, lifted: as good or better without; partly noise). Overall the same (~89 %), the two effects
   cancelling. On the robot the touch must come from what it measures (the gripper's position against its target, the
   loads): whether the simulated ones are faithful enough is the open question (the servos' load never compared with
-  the robot's). B1's films show the arm rocking while it holds (being measured against A's).
+  the robot's).
+
+### 2026-11-22: B1's rocking: the frozen estimate contradicts the grasp
+
+- **Seen in B1's films:** after the pick, the arm and the bottle keep swaying while held. **Measured** (`model_699` of
+  B1 and of A, 64 worlds of their held-out pools, CPU, while held): the arm's joints move at 0.58 rad/s (A: 0.15), the
+  bottle's tilt spreads 1.08 deg within an episode (A: 0.48); the bottle's own angular speed is about the same (0.044
+  rad/s, A 0.054); B1's arm actions reverse less often a step (15 %, A 28 %). So not jitter: slow, sustained sweeps of
+  the whole arm with the bottle, where A holds still with small corrections.
+- **The likely cause is the experiment's design:** the estimate is frozen in the root frame. Once the bottle is lifted
+  it moves with the hand, but the estimate stays where it stood on the table: in the pinch frame the actor is told the
+  object is below and beside the jaws while everything else says it is held. Each arm move shifts that phantom, which
+  can never be lined up: the policy keeps sweeping. A contradiction we built in, not the policy probing; it fits the
+  gripping starts holding less (84-87 %).
+- **Does it cost holds? Mostly not, directly** (B1's `model_699`, 128 worlds of the held-out pool, CPU): of 126 held
+  at some point, 8 lost the hold; the arm moved as fast while held in the worlds that kept it (0.56 rad/s) as in those
+  that lost it (0.53), and the slower and faster halves lost alike (6.3 % each). The losses: a finger off 6, tilted past
+  10 deg 1, both 1: the tilt the rocking brings costs 1-2 holds in 126, the rest is the jaws opening, as before. Every
+  B1 world rocks, though, so this cannot rule out a blanket effect (rocking raising every world's odds of a finger
+  coming off): the carried estimate (idea 1) is the test.
+- **Ideas for the next session:**
+  1. **Carry the estimate with the gripper once grasped** (recommended): from the first step both fingers touch,
+     freeze the estimate in the pinch frame instead of the root frame, as a real system's belief would follow a held
+     object. B1 again with it: how much of B's ~8-point gap is the frozen estimate's artefact, how much not seeing.
+     (On the robot the "grasped" moment must come from what it measures: the gripper stopped short of its target.)
+  2. Mask the estimate after a grasp (zeroed, with a grasped flag): cruder.
+  3. Keep it, and give the policy its lift height to learn to ignore the stale estimate: indirect.
+  4. The drops' fixes, which apply to every variant: a squeeze term while held, or a latched gripper command.
+  5. A live but noisy, delayed pose (the wrist camera's tracking), between A and B.
+  6. The servos' loads, simulated against the robot's (grasps and lifts recorded, replayed in the simulator), before
+     trusting any policy that leans on them (B2 above).
 
 ### Next (decided 2026-11-21)
 
