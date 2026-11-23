@@ -153,6 +153,7 @@ The easiest version that should work: if it does not learn, the environment is w
 | `20261122_171622` | RTX 4090 | 4,096 x 700 (stopped) | 27 min (2.25 s an iteration, the watcher beside it) | **multi-size held out 99.3 / 99.6 / 100 / 98.4 / 99.2 %** | **multi-size held out 96.9 / 98.5 / 99.6 / 94.1 / 95.4 %** |
 | `20261122_174436` | RTX 4090 | 4,096 x 700 | 25 min (the watcher beside it) | train 96.2 % at the end; **no finger contacts, held out 99.4 / 99.8 / 100 / 99.2 / 98.6 %** | **no finger contacts, held out 97.1 / 98.3 / 99.8 / 95.7 / 94.6 %** |
 | `20261122_181122` | RTX 4090 | 4,096 x 700 | 25 min (the watcher beside it) | train 88.0 % at the end; **estimated pose, held out 98.5 / 97.9 / 98.8 / 98.4 / 99.0 %** | **estimated pose, held out 88.9 / 88.8 / 95.4 / 84.1 / 87.1 %** |
+| `20261122_185115` | RTX 4090 | 4,096 x 700 | 24 min (the watcher beside it) | train 87.5 % at the end; **estimated pose, no finger contacts, held out 96.0 / 89.2 / 99.0 / 97.8 / 98.4 %** | **estimated pose, no finger contacts, held out 89.6 / 83.7 / 94.1 / 89.4 / 91.7 %** |
 
 ### 2026-11-21: the first runs (the positive control)
 
@@ -272,6 +273,21 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
   gripping hold to the end 84-87 % (95 % with the live pose). Unable to see the object move in its grip, the gripper's
   random walk (above) costs more. A squeeze term or a latched gripper (the drops' fixes) would likely help most here;
   a live but noisy, delayed pose (the wrist camera's tracking) is the other lever.
+
+### 2026-11-22: experiment B2, the estimated pose without finger contacts
+
+- **`20261122_185115`** (RTX 4090, 4,096 worlds x 700 iterations, 24 min; commit `e269d870c`): B1 without the finger
+  contacts (`--object-pose estimated --actor-exclude finger_contacts`): only what the robot measures, the object known
+  as estimated at the reset. **Held at the end on the held-out placements: 89.6 %** (B1 88.9): attack 83.7 (B1 88.8),
+  at the object 94.1 (95.4), in the jaws 89.4 (84.1), lifted 91.7 (87.1). Held at some point 96.0 % (B1 98.5): the
+  attack starts' 89.2 (B1 97.9). The curve (all, %): 100 it. 73.9, 200 83.5, 300 86.2, 400 85.3, 500 88.6, 600 89.0,
+  699 89.6.
+- **Read:** without the live pose, the contacts matter where the object is reached for blind: from the attack the
+  policy gets it 89 % of the time without them, 98 % with (they tell it it has touched). Holding does not need them
+  (in the jaws, lifted: as good or better without; partly noise). Overall the same (~89 %), the two effects
+  cancelling. On the robot the touch must come from what it measures (the gripper's position against its target, the
+  loads): whether the simulated ones are faithful enough is the open question (the servos' load never compared with
+  the robot's). B1's films show the arm rocking while it holds (being measured against A's).
 
 ### Next (decided 2026-11-21)
 
