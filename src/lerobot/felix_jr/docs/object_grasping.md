@@ -852,7 +852,32 @@ synthetic frames, `reference/da3_small_parity.npz`; skipped without the weights 
 (`scratch/da3_check.py`) now runs it in process (bowl8's checkpoint 2 again: the same contacts within 0.1 mm). Its
 speed on the M1, warm (measured 2026-11-23, 640x480 frames at `PROCESS_RES` 504): **MPS 0.18 s for one frame, 0.89 s
 for four**; CPU 1.3 s and 7.9 s (the "~8 s" noted here before was four frames on the CPU). The first call on MPS takes
-0.6-1.1 s. To upgrade DA3: bump the pin, regenerate the parity reference from the package's own
+0.6-1.1 s.
+
+**Resolution against accuracy (offline, 2026-11-23).** `contact_patches` (the radius free, the table's scale) on the
+saved holds at each `PROCESS_RES`, on MPS: bowl7's bottle (wristscan1: 8 frames, wristscan4: 4; radius 1.45 cm),
+bowl8's chapstick (wristscan1/3/5, 4 frames; 0.875 cm; boxes drawn by hand, the wood filter off: the chapstick is
+wood-coloured), ruler2's bottle (holdviews1, the session's box).
+
+| `PROCESS_RES` | 4-frame hold (MPS) | radius error, median (worst), 5 holds | the approach distance (`ahead`) |
+| --- | --- | --- | --- |
+| 252 | 0.15-0.18 s | 2.2 mm (3.9) | 1-3 cm farther than at 504-644 on bowl8 |
+| 336 | 0.28-0.37 s | 3.6 mm (4.9) | |
+| 420 | 0.5-0.65 s | 1.5 mm (4.4) | |
+| **504 (ours)** | 0.83-1.3 s | **0.7 mm (3.3)** | |
+| 644 | 1.9-3.0 s | 1.1 mm (6.4) | within ~5 mm of 504 |
+
+- **504 is the sweet spot;** below it the radius errors grow 2-5x and the contacts move by centimetres. Each number is
+  one run on one hold and they are not monotonic (644 is not better than 504), so read the table as "about 1 mm at
+  504, 2-4 mm below 420", not finer. At 644, bowl7's 8-frame scan took 97 s (memory), and its radius came out 6 mm off.
+- **MPS = CPU** at 504 (the radius within 0.1 mm, the same contacts), at 7-10x the speed: the parity test's
+  (CPU) result holds on MPS.
+- **No resolution rescues ruler2's plain white bottle** (radius 1.3-1.4 cm against 2.9 at every one): an accuracy
+  problem of the object, not of resolution.
+- The cost grows faster than the frame count (the views attend to each other): 1 frame at 504 is 0.18 s, 4 frames
+  0.9 s. Fewer frames at 504 may beat 4 frames at 336; not measured.
+
+To upgrade DA3: bump the pin, regenerate the parity reference from the package's own
 `inference`, re-run the test.
 
 ### The checkpoint as tools (2026-11-09)
