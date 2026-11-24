@@ -70,7 +70,7 @@ class VitS14(nn.Module):
 
     def forward(self, rgb: torch.Tensor) -> torch.Tensor:
         """`rgb` (B, H, W, 3) uint8 -> tokens (B, 1 + H/14 * W/14, width)."""
-        x = rgb.permute(0, 3, 1, 2).float().div_(255.0)
+        x = rgb.permute(0, 3, 1, 2).to(self.patch.weight.dtype).div_(255.0)
         x = self.patch(x).flatten(2).transpose(1, 2)
         x = torch.cat([self.cls.expand(len(x), -1, -1), x], dim=1)
         return self.norm(self.blocks(x))
@@ -169,6 +169,25 @@ def bench(
     return result
 
 
+def vit_variants(batch: int, size: tuple[int, int], device: str, repeats: int = 10) -> dict[str, float]:
+    """The ViT alone on `batch` random frames (ms): under autocast (as `bench`), its weights in bf16, and those compiled."""
+    rgb = torch.randint(0, 256, (batch, size[1], size[0], 3), dtype=torch.uint8, device=device)
+    out: dict[str, float] = {}
+    with torch.inference_mode():
+        vit = VitS14().to(device).eval()
+        with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
+            out["autocast"] = _timed(lambda: vit(rgb), repeats, device)
+        half = VitS14().to(device, torch.bfloat16).eval()
+        out["bf16"] = _timed(lambda: half(rgb), repeats, device)
+    compiled = torch.compile(half)
+    with torch.inference_mode():
+        started = time.perf_counter()
+        compiled(rgb)  # (the compile itself)
+        out["compile_s"] = time.perf_counter() - started
+        out["bf16_compiled"] = _timed(lambda: compiled(rgb), repeats, device)
+    return out
+
+
 def main(argv: list[str] | None = None) -> None:
     """The command line (the module docstring)."""
     parser = argparse.ArgumentParser(
@@ -180,7 +199,20 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--out", type=Path, default=None, help="a folder for the frames and the numbers")
+    parser.add_argument("--vit-only", action="store_true", help="only the ViT's variants, on random frames")
     args = parser.parse_args(argv)
+    if args.vit_only:
+        for n in args.num_envs:
+            v = vit_variants(n, tuple(args.size), args.device)
+            print(
+                f"ViT-S/14 on {n} frames at {args.size[0]}x{args.size[1]}: "
+                + ", ".join(
+                    f"{k} {x:.1f} ms ({1000 * n / x:.0f} frames/s)" for k, x in v.items() if k != "compile_s"
+                )
+                + f"; compiled in {v['compile_s']:.0f} s",
+                flush=True,
+            )
+        return
     results = []
     for n in args.num_envs:
         r = bench(args.pool, n, tuple(args.size), args.steps, args.device, args.out)
