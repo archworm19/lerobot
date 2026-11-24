@@ -429,8 +429,13 @@ or room: the first thing a background would fix). On an L40S (run `20261123_2050
 - **Rendering is cheap:** 65k frames/s, linear in the worlds; at 4096 it doubles the step (60 -> 128 ms).
 - **The ViT is the cost:** 5.2k frames/s whatever the batch, 6x the rest of the step at 4096; with it the environment
   runs ~4.5k steps/s against ~68k without the camera. For distillation that is ~40 min per 10M frames.
-- **Not yet tried:** the ViT compiled (`torch.compile`; it reaches ~45 TFLOP/s, a fraction of the card's bf16), the
-  image seen at a lower rate than the control (every 2nd or 3rd step), fewer tokens (112 x 84: 6 x 8 patches).
+- **Its weights in bf16, not autocast, double it: 10.2k frames/s** (`--vit-only`, 4096 frames: autocast 797 ms, bf16
+  403 ms, bf16 compiled 400 ms). `torch.compile` adds ~1% (the bf16 model already runs PyTorch's fused attention);
+  not worth it, and the image cannot compile anyway (no C compiler nor Python headers for Triton: `gcc` and
+  `python3.12-dev` installed by hand on the pod to try it). With bf16 weights: ~530 ms a step at 4096 worlds,
+  **~7.8k env steps/s, ~20 min per 10M frames**. To check with DINOv2-S's real code (its attention should be
+  as fused). Not yet tried: the image at a lower rate than the control (every 2nd or 3rd step), fewer tokens
+  (112 x 84: 6 x 8 patches).
 
 **On the robot (the M1, measured 2026-11-22):** DINOv2 ViT-S/14 at 224 px 17 ms on MPS (25 ms CPU), 448 px 98 ms,
 4 frames at 224 px 58 ms; CoTracker3 online 141 ms a frame on MPS; small PointNets (11k-239k parameters, 256 points)
