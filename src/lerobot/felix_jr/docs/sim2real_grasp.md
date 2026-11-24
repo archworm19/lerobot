@@ -437,6 +437,16 @@ or room: the first thing a background would fix). On an L40S (run `20261123_2050
   as fused). Not yet tried: the image at a lower rate than the control (every 2nd or 3rd step), fewer tokens
   (112 x 84: 6 x 8 patches).
 
+**Step 2's data, `sim2real/probe_data.py`.** Experiment A's policy (`20261122_174436`: no finger contacts, the live
+pose; 97.1 % held out) plays from the `multi1` pools (train and held-out recorded apart), its actions given Gaussian
+noise of a per-world scale up to 0.3; every 6th step each world's frame and labels (the object in the pinch and root
+frames, its size, its share of the frame, held, the start's pool, row and step). **The labels are the rendered
+object:** the cylinder they describe, through the model's pinch-to-camera transform and the calibrated lens without
+its distortion, covers the rendered object at IoU 0.98-0.99 (the smoke test: > 0.95; a 5 mm shift of the camera fails
+it). MuJoCo Warp renders the calibrated pinhole, its principal point included (IoU 0.99 against 0.8 assuming it
+centred), scaled with the resolution. **So a real frame compares with a simulated one undistorted
+(`cv2.undistort` with the calibrated lens) and then resized to 224 x 168.**
+
 **On the robot (the M1, measured 2026-11-22):** DINOv2 ViT-S/14 at 224 px 17 ms on MPS (25 ms CPU), 448 px 98 ms,
 4 frames at 224 px 58 ms; CoTracker3 online 141 ms a frame on MPS; small PointNets (11k-239k parameters, 256 points)
 0.14-0.76 ms. MLX has DINOv2 Base and Large (mlx-image), not Small; nothing for CoTracker.
