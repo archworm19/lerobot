@@ -447,6 +447,65 @@ it). MuJoCo Warp renders the calibrated pinhole, its principal point included (I
 centred), scaled with the resolution. **So a real frame compares with a simulated one undistorted
 (`cv2.undistort` with the calibrated lens) and then resized to 224 x 168.**
 
+### The probe's results (RTX 4090, 2026-11-23)
+
+`sim2real/probe_train.py`: frozen DINOv2-S (torch.hub, bf16), three heads trained side by side, 20 epochs (47-61 s
+each). Errors on the held-out placements (`multi1_test`: 140 placements never trained on; the sizes overlap the
+training's, 40-60 mm x 100-200 mm), the object's center in the pinch frame (its mid-height point), median / 90th
+percentile. Two datasets:
+
+- **`probe`** (run `20261123_214249`): whole episodes, every 6th step, 3 rounds: 181k training frames, 60k held out.
+  **94 % held** (the teacher grasps within ~1 s and holds for the rest of the 12 s), nothing beyond ~12 cm.
+- **`probe2`** (run `20261123_220808`): each episode's first 2 s only (`--steps 60 --every 3`), 10 rounds: 205k
+  training frames, 61k held out; 71 % held (half the starts already grip), ~5x the approach frames.
+
+| head (trained on `probe2`, held-out `probe2`) | all | 4-5 cm, held | 4-5 cm, not held | 8-10 cm, not held |
+| --- | --- | --- | --- | --- |
+| linear (the class token) | 9.6 / 20.3 mm | | | |
+| mean (class token + the patches' mean, MLP) | 6.4 / 15.2 mm | | | |
+| **attention (4 learned queries over the patches)** | **5.6 / 14.0 mm** | 3.8 / 10.0 | 5.7 / 12.8 | 7.7 / 15.9 |
+| (a constant: the training set's mean) | | 37 mm | | 76 mm (8-10 cm, all) |
+
+- **The features carry the geometry:** a constant guess is 25-75 mm off (the sizes and grip heights vary); the
+  attention head is best everywhere, ~2x the class token alone: the geometry is in the patch tokens.
+- **The error against the distance** (attention, `probe2`; the center from the pinch point): lowest at 4-5 cm (where a
+  held object sits: 3.8 held, 5.7 not held), rising both closer (0-3 cm: 8-10 mm: the fingers cover the object, or
+  the camera sees only its top) and farther (8-10 cm 7.7, 10-12 cm 10.2, 12-16 cm 20 mm not held: few frames, 59).
+  Before the grasp it is ~1.5x held at the same distance.
+- **Against the time since the start** (`probe2`, attack starts): from 9.4 / 19.5 mm at the reset to ~5 / 11 mm two
+  seconds in, as the gripper closes on the object. (The scratch script's time bins for `probe2` were labelled as of
+  12 s; its frames span the first 2 s.)
+- **More approach data helped ~20 % before the grasp** (not held, the first run's heads against `probe2`'s, on the
+  same held-out frames: 4-5 cm 6.8 -> 5.7 mm, 6-8 cm 9.0 -> 6.6, 8-10 cm 9.6 -> 7.7, 10-12 cm 12.3 -> 10.2); held
+  unchanged (3.8). 5x the data for 20 %: what is left is more what one frame shows than data.
+- **The size and the axis:** radius 0.3 / 0.9 mm, the axis's direction 0.9 / 2.2 deg (the first run; the height not
+  yet reported).
+
+**Directionally right** (attention, `probe2` held out; per axis of the pinch frame; the sign counted against the
+frames' mean position):
+
+| axis | median error, not held / held | bias | slope (predicted on true) | sign right, offsets > 2 / 5 / 10 mm (not held) |
+| --- | --- | --- | --- | --- |
+| x (the closing line) | **0.9 / 0.5 mm** | 0.0 mm | 0.97 | 100 / 100 / 100 % |
+| y (along the hinge: the cylinder's axis) | 4.0 / 3.9 mm | -0.8 mm | 0.95 | 98 / 99 / 100 % |
+| z (along the fingers) | 3.5 / 2.5 mm | 0.0 mm | 0.95 | 96 / 99 / 100 % |
+
+- **Across the jaws, ~1 mm;** the signs right 96-100 % for offsets over 2 mm on every axis, the slopes near 1: a closed
+  loop corrects the right way at about the right rate.
+- **The y error is the height:** upright cylinders lie along the pinch frame's y (its true spread 43 mm: heights
+  100-200 mm). Seen from above, where the mid-height point is depends on how tall the object is; for a grasp it only
+  sets how high on it the jaws close. A target that avoids it: the axis's point at the jaws' height.
+- **The axis:** 1.4 / 3.1 deg before the grasp; the lean's sign right 100 % where it leans over 5 deg.
+- **Frame to frame** (3 policy steps, ~100 ms): the error changes by 1.0 (x), 3.9 (y), 3.0 (z) mm, 0.5-0.8 of its
+  size: part slow bias, part noise; a short history of frames or smoothing would help a policy.
+
+**So:** the 3 mm bar came from a frozen estimate (B1, which could not correct); in closed loop what counts is the sign
+and the gain, and where precision counts (across the jaws) it is ~1 mm. **Next:** the closed-loop test: experiment A's
+teacher on held-out placements with its object inputs (the pose in the pinch and root frames, the size) replaced
+every step by the probe's; then the axis point at the jaws' height as the target, two or three frames as input, and
+the real wrist frames through the probe (undistorted, 224 x 168) as the background check. The analysis scripts (by
+distance and time; by axis) are scratch for now; the datasets and heads were on the pod, not kept.
+
 **On the robot (the M1, measured 2026-11-22):** DINOv2 ViT-S/14 at 224 px 17 ms on MPS (25 ms CPU), 448 px 98 ms,
 4 frames at 224 px 58 ms; CoTracker3 online 141 ms a frame on MPS; small PointNets (11k-239k parameters, 256 points)
 0.14-0.76 ms. MLX has DINOv2 Base and Large (mlx-image), not Small; nothing for CoTracker.
