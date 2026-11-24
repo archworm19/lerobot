@@ -404,6 +404,38 @@ size, mass and softness (feno: a softer bottle), the attack offsets, the wrist c
 3. ~~The reset sampler and its pools.~~ **Built (2026-11-19, above).**
 4. The environment around it (observations, actions, reward), then the teacher.
 
+## The wrist camera in mjlab, and a frozen DINO's cost (2026-11-23)
+
+The direction (2026-11-23): a student on the wrist camera's images through a frozen DINOv2-S, distilled from the
+privileged teacher (`rl_experiments.md`), instead of hand-built perception (the silhouettes and DA3 at a hold did not
+hold up: `object_grasping.md` 7). The order: (1) render and cost, (2) a probe: a small attention head over the frozen
+patch tokens, trained on the teacher's rollouts to predict the object in the pinch frame, held-out error in the
+simulator, overlays on the real wrist frames (the background test: randomize the table and background only if it
+fails there), (3) the student by DAgger.
+
+**Step 1, `sim2real/render_bench.py`.** mjlab's `CameraSensorCfg` wraps the arm's calibrated `wrist_camera` (its
+intrinsics scaled with the resolution; the camera's own module left out, geom groups 0-2, as `view.render`). **224 x
+168** (the real frames' 4:3; 16 x 12 patches of 14 px; a square image would stretch it). The frames look as expected:
+the fingers at the bottom, the object between them; plain colours, and **black past the table's far edge** (no floor
+or room: the first thing a background would fix). On an L40S (run `20261123_205000`), random actions, the
+`multi1p` pool:
+
+| worlds | step | with the camera | the render alone | a ViT-S/14 (DINOv2-S's shape, bf16) | env steps/s, all | peak memory |
+| --- | --- | --- | --- | --- | --- | --- |
+| 256 | 33 ms | 38 ms | 3.9 ms (65k frames/s) | 47 ms (5.5k frames/s) | 3.0k | 0.7 GB |
+| 1024 | 49 ms | 57 ms | 15.7 ms (65k frames/s) | 198 ms (5.2k frames/s) | 4.0k | 2.5 GB |
+| 4096 | 60 ms | 128 ms | 63 ms (65k frames/s) | 792 ms (5.2k frames/s) | 4.5k | 9.8 GB |
+
+- **Rendering is cheap:** 65k frames/s, linear in the worlds; at 4096 it doubles the step (60 -> 128 ms).
+- **The ViT is the cost:** 5.2k frames/s whatever the batch, 6x the rest of the step at 4096; with it the environment
+  runs ~4.5k steps/s against ~68k without the camera. For distillation that is ~40 min per 10M frames.
+- **Not yet tried:** the ViT compiled (`torch.compile`; it reaches ~45 TFLOP/s, a fraction of the card's bf16), the
+  image seen at a lower rate than the control (every 2nd or 3rd step), fewer tokens (112 x 84: 6 x 8 patches).
+
+**On the robot (the M1, measured 2026-11-22):** DINOv2 ViT-S/14 at 224 px 17 ms on MPS (25 ms CPU), 448 px 98 ms,
+4 frames at 224 px 58 ms; CoTracker3 online 141 ms a frame on MPS; small PointNets (11k-239k parameters, 256 points)
+0.14-0.76 ms. MLX has DINOv2 Base and Large (mlx-image), not Small; nothing for CoTracker.
+
 ## Next
 
 1. **The gripper sweep on both arms** (`gripper_sweep --arm both --out <urdf>`): the left arm's fitted twice, the
