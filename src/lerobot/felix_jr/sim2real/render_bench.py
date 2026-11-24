@@ -38,8 +38,8 @@ GEOM_GROUPS = tuple(
 )
 
 
-def camera_cfg(width: int, height: int) -> Any:
-    """The wrist camera as an mjlab sensor: RGB at `width` x `height`."""
+def camera_cfg(width: int, height: int, data_types: tuple[str, ...] = ("rgb",)) -> Any:
+    """The wrist camera as an mjlab sensor: `data_types` ("rgb", "depth", "segmentation") at `width` x `height`."""
     from mjlab.sensor import CameraSensorCfg
 
     return CameraSensorCfg(
@@ -47,7 +47,7 @@ def camera_cfg(width: int, height: int) -> Any:
         camera_name=f"robot/{WRIST_CAMERA}",
         width=width,
         height=height,
-        data_types=("rgb",),
+        data_types=data_types,
         use_textures=True,
         use_shadows=False,
         enabled_geom_groups=GEOM_GROUPS,

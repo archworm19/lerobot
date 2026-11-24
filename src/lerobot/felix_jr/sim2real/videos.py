@@ -165,11 +165,16 @@ def checkpoint_step(name: str, final_step: int) -> int:
 
 
 def make_video_env(
-    settings: dict[str, Any], worlds: int, device: str, pool: str | Path | None = None
+    settings: dict[str, Any],
+    worlds: int,
+    device: str,
+    pool: str | Path | None = None,
+    sensors: tuple[Any, ...] = (),
 ) -> tuple[Any, Any]:
     """An environment as a run's (`settings.json`), every pool equally likely: (the env, its rsl_rl wrapper).
 
     `pool`: its starts (default: the run's held-out pool, `eval_pool`, if it has one, else its training pool).
+    `sensors`: mjlab sensors added to the scene's (e.g. the wrist camera, `render_bench.camera_cfg`).
     """
     from mjlab.rl import RslRlVecEnvWrapper
 
@@ -190,6 +195,7 @@ def make_video_env(
         estimate_noise_m=float(settings.get("estimate_noise_m", 0.003)),
         randomize=True,
     )
+    cfg.scene.sensors = (*cfg.scene.sensors, *sensors)
     env = me.make_env(cfg, device=device)
     return env, RslRlVecEnvWrapper(env)
 
