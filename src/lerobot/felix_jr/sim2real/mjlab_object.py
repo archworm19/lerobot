@@ -60,6 +60,14 @@ SIZE_ERROR_M = 0.002
 # x = -0.79 r + 2.0 mm (residual 1.0 mm; at pyri's 22.5 mm -15.8, as measured), z = +0.67 r - 24.1 (residual 6.7); the
 # jaws open around it x = -1.10 r - 4.9 (residual 3.2). Each axis (per metre of radius, at no radius; m):
 GRASP_POINT_FIT = ((-0.79, 0.0020), (0.0, 0.001), (0.67, -0.0241))
+# The fit depends on the grasps' angle, not only the radius: refit over the multi2 pool's in-jaws starts (radius 8-30
+# mm, grasps up to 60 deg from above; 2026-11-25) the axis sits at a nearly constant depth along the fingers (z -3 mm),
+# where the side fit was up to 15 mm off for the thinnest (residual 5.5-7.8 mm by radius; the side fit's own on multi1
+# 4.8-8.2). Chosen by the run (`env_cfg(grasp_point_fit=...)`, recorded in its settings):
+GRASP_POINT_FITS = {
+    "side": GRASP_POINT_FIT,  # multi1's: side grasps (0-30 deg), radius 20-30 mm
+    "steep": ((-0.87, 0.0034), (-0.15, 0.0047), (-0.04, -0.0032)),  # multi2's: 0-60 deg, radius 8-30 mm
+}
 # the box "between the jaws", from the open jaws' starts to the closed ones': across the jaws its ends follow the radius
 # as those do (at pyri's radius -38 and -12 mm, as measured); y and z fixed
 BETWEEN_X_FIT = ((-1.10, -0.0049 - 0.0084), (-0.79, 0.0020 + 0.0038))  # low, high
@@ -110,6 +118,9 @@ class MjlabCylinder:
     pose_estimate: bool = False  # the actor told a pose estimated at the episode's reset, not the live pose
     estimate_noise_m: float = 0.003  # the estimate's error beyond the start's own perception offset (std, m)
     estimate_axis_deg: float = 2.0  # its axis's tilt from vertical (std, deg)
+    grasp_point_fit: str = (
+        "side"  # which of `GRASP_POINT_FITS` says where a grasp holds it (the reach reward's target)
+    )
 
     # ---- construction ----
 
@@ -383,7 +394,7 @@ class MjlabCylinder:
         import torch
 
         r = self.dims(env)[:, 0]
-        return torch.stack([a * r + b for a, b in GRASP_POINT_FIT], dim=1)
+        return torch.stack([a * r + b for a, b in GRASP_POINT_FITS[self.grasp_point_fit]], dim=1)
 
     def between_jaws(self, env: "ManagerBasedRlEnv") -> "torch.Tensor":
         """1 where its axis is in the box between our claw's jaws (for its radius) and the grasp on its body."""

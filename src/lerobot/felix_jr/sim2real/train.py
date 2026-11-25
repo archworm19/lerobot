@@ -197,6 +197,12 @@ def main(argv: list[str] | None = None) -> None:
         help="the estimate's noise beyond the start's perception offset",
     )
     parser.add_argument(
+        "--grasp-point-fit",
+        default="side",
+        choices=("side", "steep"),
+        help="where a grasp holds the object (the reach reward's target): side (multi1's) or steep (multi2's)",
+    )
+    parser.add_argument(
         "--actor-exclude",
         nargs="+",
         default=[],
@@ -257,6 +263,7 @@ def main(argv: list[str] | None = None) -> None:
         actor_exclude=tuple(args.actor_exclude),
         object_pose=args.object_pose,
         estimate_noise_m=args.estimate_noise_mm / 1000,
+        grasp_point_fit=args.grasp_point_fit,
         randomize=True,
     )
     cfg.seed = args.seed
@@ -274,6 +281,7 @@ def main(argv: list[str] | None = None) -> None:
         "actor_exclude": list(args.actor_exclude),
         "object_pose": args.object_pose,
         "estimate_noise_m": args.estimate_noise_mm / 1000,
+        "grasp_point_fit": args.grasp_point_fit,
         "reward_weights": me.REWARD_WEIGHTS,
         "action": {
             "arm_step_deg": task.ARM_STEP_DEG,

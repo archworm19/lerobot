@@ -151,6 +151,7 @@ def env_cfg(
     actor_exclude: Sequence[str] = (),
     object_pose: str = "live",
     estimate_noise_m: float = 0.003,
+    grasp_point_fit: str = "side",
 ) -> "ManagerBasedRlEnvCfg":
     """The grasp-and-lift environment: `body` on the table at `table_z`, the arm from `start` (the module docstring).
 
@@ -165,6 +166,8 @@ def env_cfg(
     `object_pose`: the object's pose the actor is told: "live", or "estimated" (at the episode's reset, as perception
     would: the start's perception offset and `estimate_noise_m` of noise; then frozen: `MjlabCylinder.draw_estimate`).
     `actor_exclude`: observation terms the actor goes without (privileged ones dropped: the critic keeps them).
+    `grasp_point_fit`: where a grasp holds the object, by radius (`mjlab_object.GRASP_POINT_FITS`: "side" for side
+    grasps, multi1's; "steep" for grasps up to 60 deg from above, multi2's): the reach reward's target.
     `size_error_m`: for a pool whose objects vary in size, the error in the radius and height the actor is told, drawn
     at each reset and kept for the episode (std, m; with `randomize` only).
     """
@@ -202,7 +205,10 @@ def env_cfg(
         size_error_m=size_error_m if randomize and sized else 0.0,
         pose_estimate=object_pose == "estimated",
         estimate_noise_m=estimate_noise_m,
+        grasp_point_fit=grasp_point_fit,
     )
+    if grasp_point_fit not in obj.GRASP_POINT_FITS:
+        raise ValueError(f"grasp_point_fit: one of {sorted(obj.GRASP_POINT_FITS)}, not {grasp_point_fit!r}")
     if object_pose not in ("live", "estimated"):
         raise ValueError(f"object_pose: live or estimated, not {object_pose!r}")
     start = start or {**REST, "gripper.pos": 30.0}

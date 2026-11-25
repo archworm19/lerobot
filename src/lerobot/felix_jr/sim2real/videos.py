@@ -229,6 +229,7 @@ def make_video_env(
         actor_exclude=tuple(settings.get("actor_exclude", ())),
         object_pose=str(settings.get("object_pose", "live")),
         estimate_noise_m=float(settings.get("estimate_noise_m", 0.003)),
+        grasp_point_fit=str(settings.get("grasp_point_fit", "side")),
         randomize=True,
     )
     cfg.scene.sensors = (*cfg.scene.sensors, *sensors)
