@@ -3,6 +3,7 @@
   uv run --extra felix_jr --extra felix_jr_sim python -m lerobot.felix_jr.sim2real.bank <out.jsonl>
       [--placements 20] [--arm right] [--seed 0] [--workers 1] [--model <calibration.urdf>]
       [--object DIAMETER_MM HEIGHT_MM MASS_G] [--anchors N]
+      [--diameter-mm LO HI] [--height-mm LO HI] [--mass-g LO HI] [--psi-deg LO HI]
 
 Per placement: an upright cylinder drawn (`BankConfig`: its diameter, height and mass, where it stands from the arm's
 base), a feasible grasp drawn at random through the harness's filters (`harness.grasping.first_feasible`, at each of
@@ -403,11 +404,38 @@ def main() -> None:
     parser.add_argument(
         "--anchors", type=int, default=1, help="distinct grasps accepted a placement (its anchors)"
     )
+    for name, unit, default in (
+        ("diameter", "mm", DIAMETER_M),
+        ("height", "mm", HEIGHT_M),
+        ("mass", "g", MASS_KG),
+    ):
+        parser.add_argument(
+            f"--{name}-{unit}",
+            nargs=2,
+            type=float,
+            default=None,
+            metavar=("LO", "HI"),
+            help=f"the objects' {name}s drawn from (default {1000 * default[0]:g}-{1000 * default[1]:g} {unit})",
+        )
+    parser.add_argument(
+        "--psi-deg",
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=("LO", "HI"),
+        help=f"the grasps' angles from square to the axis (0) toward from above (90) (default {PSI_DEG})",
+    )
     args = parser.parse_args()
-    one: dict[str, tuple[float, float]] = {}
+    one: dict[str, Any] = {}
     if args.object is not None:
         d, h, g = (v / 1000 for v in args.object)
         one = {"diameter_m": (d, d), "height_m": (h, h), "mass_kg": (g, g)}
+    for name, key in (("diameter_mm", "diameter_m"), ("height_mm", "height_m"), ("mass_g", "mass_kg")):
+        value = getattr(args, name)
+        if value is not None:
+            one[key] = (value[0] / 1000, value[1] / 1000)
+    if args.psi_deg is not None:
+        one["psi_deg"] = tuple(args.psi_deg)
     config = BankConfig(arm=args.arm, seed=args.seed, anchors_per_placement=args.anchors, **one)
     tally, started = Tally(), time.perf_counter()
     for line in build_bank(args.model, config, args.placements, args.out, args.workers, args.resume):
