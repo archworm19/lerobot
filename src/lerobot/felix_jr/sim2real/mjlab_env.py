@@ -119,8 +119,12 @@ def robot_spec(model: XleRobotModel, arm: str, give_scale: float = 1.0) -> "mujo
     return spec
 
 
-def table_spec(model: XleRobotModel, arm: str, table_z: float) -> "mujoco.MjSpec":
-    """`scene_spec`'s table, in a body of its own (an entity needs one)."""
+def table_spec(model: XleRobotModel, arm: str, table_z: float, appearance: bool = False) -> "mujoco.MjSpec":
+    """`scene_spec`'s table, in a body of its own (an entity needs one).
+
+    `appearance`: with the room around it and the materials its look is randomized from (`appearance.room_spec`:
+    drawn only, the physics unchanged).
+    """
     import mujoco
 
     built = sc.scene_spec(model, arm, (), table_z, fingers=None)
@@ -128,6 +132,10 @@ def table_spec(model: XleRobotModel, arm: str, table_z: float) -> "mujoco.MjSpec
     spec = mujoco.MjSpec()
     body = spec.worldbody.add_body(name="table_body", pos=list(table.pos))
     body.add_geom(name="table", type=table.type, size=list(table.size), rgba=list(table.rgba))
+    if appearance:
+        from . import appearance as look
+
+        look.room_spec(spec, body, tuple(2 * float(v) for v in table.size))
     return spec
 
 
@@ -152,6 +160,7 @@ def env_cfg(
     object_pose: str = "live",
     estimate_noise_m: float = 0.003,
     grasp_point_fit: str = "side",
+    appearance: bool = False,
 ) -> "ManagerBasedRlEnvCfg":
     """The grasp-and-lift environment: `body` on the table at `table_z`, the arm from `start` (the module docstring).
 
@@ -166,6 +175,8 @@ def env_cfg(
     `object_pose`: the object's pose the actor is told: "live", or "estimated" (at the episode's reset, as perception
     would: the start's perception offset and `estimate_noise_m` of noise; then frozen: `MjlabCylinder.draw_estimate`).
     `actor_exclude`: observation terms the actor goes without (privileged ones dropped: the critic keeps them).
+    `appearance`: the scene's look randomized at each reset for the wrist camera (`appearance`: the table's, floor's and
+    walls' textures, the lights, the object's colour; a room around the table, drawn only).
     `grasp_point_fit`: where a grasp holds the object, by radius (`mjlab_object.GRASP_POINT_FITS`: "side" for side
     grasps, multi1's; "steep" for grasps up to 60 deg from above, multi2's): the reach reward's target.
     `size_error_m`: for a pool whose objects vary in size, the error in the radius and height the actor is told, drawn
@@ -221,7 +232,7 @@ def env_cfg(
             articulation=EntityArticulationInfoCfg(actuators=(XmlActuatorCfg(target_names_expr=(".*",)),)),
         ),
         cyl.entity: cyl.entity_cfg(),
-        "table": EntityCfg(spec_fn=lambda: table_spec(model, arm, table_z)),
+        "table": EntityCfg(spec_fn=lambda: table_spec(model, arm, table_z, appearance)),
     }
     pose_noise = (
         GaussianNoiseCfg(
@@ -330,6 +341,10 @@ def env_cfg(
                 }
             ),  # (a sized pool's mass drawn at each reset instead: the object's `write`)
         }
+    if appearance:
+        from . import appearance as look
+
+        events.update(look.events())
     return ManagerBasedRlEnvCfg(
         scene=SceneCfg(
             num_envs=num_envs, env_spacing=0.0, entities=entities, sensors=task.sensors(cyl.contact_match())

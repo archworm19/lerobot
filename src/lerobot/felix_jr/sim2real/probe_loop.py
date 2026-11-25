@@ -481,6 +481,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--hub", type=Path, default=None)
     parser.add_argument("--head", default="attention", help="which of the heads.pt's heads to use")
+    parser.add_argument("--appearance", action="store_true", help="the look randomized (`appearance`)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--steps", type=int, default=None, help="cap the episodes (a check; default: whole)")
     parser.add_argument(
@@ -503,7 +504,12 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     settings = json.loads((args.train_dir / "settings.json").read_text())
     env, wrapped = make_video_env(
-        settings, args.worlds, args.device, args.pool, sensors=(camera_cfg(*args.size),)
+        settings,
+        args.worlds,
+        args.device,
+        args.pool,
+        sensors=(camera_cfg(*args.size),),
+        appearance=args.appearance,
     )
     runner = MjlabOnPolicyRunner(wrapped, asdict(runner_cfg(1, 0, "tensorboard", 1, 24)), None, args.device)
     runner.load(str(args.train_dir / args.checkpoint), map_location=args.device)

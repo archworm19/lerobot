@@ -2,6 +2,7 @@
 
   python -m lerobot.felix_jr.sim2real.probe_data <a run's train/ folder> --pool <start pool .npz> --out <dir>
       [--checkpoint model_699.pt] [--worlds 1024] [--rounds 3] [--every 6] [--noise 0.3] [--size 224 168]
+      [--appearance]
 
 The teacher (a run's policy, its environment as `settings.json` has it) plays from the pool's starts, every pool equally
 likely, `--rounds` times `--steps` policy steps (default an episode's length; worlds that end are reset and go on), its
@@ -60,6 +61,7 @@ def record(
     size: tuple[int, int] = (224, 168),
     device: str = "cuda:0",
     seed: int = 0,
+    appearance: bool = False,
 ) -> dict[str, Any]:
     """The dataset (the module docstring) written into `out`; returns its summary."""
     from mjlab.rl import MjlabOnPolicyRunner
@@ -69,7 +71,7 @@ def record(
     torch.manual_seed(seed)
     settings = json.loads((train_dir / "settings.json").read_text())
     sensor = camera_cfg(*size, data_types=("rgb", "segmentation"))
-    env, wrapped = make_video_env(settings, worlds, device, pool, sensors=(sensor,))
+    env, wrapped = make_video_env(settings, worlds, device, pool, sensors=(sensor,), appearance=appearance)
     runner = MjlabOnPolicyRunner(wrapped, asdict(runner_cfg(1, 0, "tensorboard", 1, 24)), None, device)
     ckpt = train_dir / (checkpoint or "model_final.pt")
     runner.load(str(ckpt), map_location=device)
@@ -123,6 +125,7 @@ def record(
         "checkpoint": ckpt.name,
         "pool": str(pool),
         "noise": noise,
+        "appearance": appearance,
         "every": every,
         "seconds": time.perf_counter() - started,
         "visible_share": float((arrays["visible"] > 0).mean()),
@@ -153,6 +156,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--size", type=int, nargs=2, default=[224, 168], metavar=("W", "H"))
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--appearance", action="store_true", help="the look randomized (`appearance`)")
     args = parser.parse_args(argv)
     summary = record(
         args.train_dir,
@@ -167,6 +171,7 @@ def main(argv: list[str] | None = None) -> None:
         tuple(args.size),
         args.device,
         args.seed,
+        args.appearance,
     )
     print(json.dumps(summary, indent=1))
 

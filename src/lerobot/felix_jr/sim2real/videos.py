@@ -206,11 +206,13 @@ def make_video_env(
     device: str,
     pool: str | Path | None = None,
     sensors: tuple[Any, ...] = (),
+    appearance: bool | None = None,
 ) -> tuple[Any, Any]:
     """An environment as a run's (`settings.json`), every pool equally likely: (the env, its rsl_rl wrapper).
 
     `pool`: its starts (default: the run's held-out pool, `eval_pool`, if it has one, else its training pool).
-    `sensors`: mjlab sensors added to the scene's (e.g. the wrist camera, `render_bench.camera_cfg`).
+    `sensors`: mjlab sensors added to the scene's (e.g. the wrist camera, `render_bench.camera_cfg`). `appearance`: the
+    look randomized (`mjlab_env.env_cfg`; default: as the run's settings have it, else not).
     """
     from mjlab.rl import RslRlVecEnvWrapper
 
@@ -230,6 +232,7 @@ def make_video_env(
         object_pose=str(settings.get("object_pose", "live")),
         estimate_noise_m=float(settings.get("estimate_noise_m", 0.003)),
         grasp_point_fit=str(settings.get("grasp_point_fit", "side")),
+        appearance=bool(settings.get("appearance", False)) if appearance is None else appearance,
         randomize=True,
     )
     cfg.scene.sensors = (*cfg.scene.sensors, *sensors)
