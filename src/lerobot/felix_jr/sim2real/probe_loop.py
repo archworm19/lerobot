@@ -39,6 +39,7 @@ from . import mjlab_object as obj, mjlab_task as task
 from .mjlab_object import rotate, rotate_inverse
 from .pool_reset import pool_reset
 from .probe_train import HEADS, decode, dinov2_small, tokens
+from .refine import HELD_FRACTION
 from .render_bench import SENSOR, camera_cfg
 from .start_pool import POOLS
 from .videos import make_video_env
@@ -320,6 +321,8 @@ def run(
     errors: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
     fresh = torch.ones(n, dtype=torch.bool, device=dev)
     holding = task.held(env, cyl) > 0
+    # why each world's hold last broke (not by its episode ending): (lowered, a finger off, tilted past held's limit)
+    broke = torch.zeros(n, 3, dtype=torch.bool, device=dev)
     film_ended: list[str | None] = [None] * (film.k if film else 0)
     with torch.inference_mode():
         for step in range(steps or int(env.max_episode_length)):
@@ -344,6 +347,17 @@ def run(
             obs, _, dones, _ = wrapped.step(policy(obs))
             holding = task.held(env, cyl) > 0
             ended = dones.bool() & ~done
+            lost = before & ~holding & ~dones.bool() & ~done
+            if lost.any():
+                why = torch.stack(
+                    [
+                        task.rise(env, cyl) < HELD_FRACTION,
+                        task.both_fingers(env) <= 0,
+                        ~cyl.upright(env, task.HELD_MAX_TILT_DEG),
+                    ],
+                    dim=1,
+                )
+                broke = torch.where(lost[:, None], why, broke)
             held_at_end |= ended & before
             ever |= (holding & ~done & ~ended) | (ended & before)
             done |= ended
@@ -374,6 +388,18 @@ def run(
         "held_then_lost": float((ev & ~end).mean()),
         "never_held": float((~ev).mean()),
     }
+    lost_worlds = ev & ~end
+    why = broke.cpu().numpy()[lost_worlds]
+    if len(why):
+        # (a hold can break for several at once; and an episode can end lost without a recorded break: as it ended)
+        out["lost_why"] = {
+            "n": int(lost_worlds.sum()),
+            "lowered": float(why[:, 0].mean()),
+            "a_finger_off": float(why[:, 1].mean()),
+            "tilted_past_held_limit": float(why[:, 2].mean()),
+            "only_tilted": float((why[:, 2] & ~why[:, 0] & ~why[:, 1]).mean()),
+            "none_recorded": float((~why.any(axis=1)).mean()),
+        }
     if errors:
         out["probe_error"] = _error_report(errors, first_touch, end)
     return out
