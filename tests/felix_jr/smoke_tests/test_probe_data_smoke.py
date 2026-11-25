@@ -11,11 +11,11 @@ torch = pytest.importorskip("torch")
 
 from test_start_pool_smoke import _pool  # noqa: E402  (the same folder: pytest puts it on the path)
 
+from lerobot.felix_jr.calibration.merge_urdf import wrist_camera_frame  # noqa: E402
 from lerobot.felix_jr.calibration.xle_robot_model import (  # noqa: E402
     WristCamera,
     XleRobotModel,
     pinch_frame,
-    wrist_camera_frame,
 )
 from lerobot.felix_jr.harness import api  # noqa: E402
 from lerobot.felix_jr.harness.primitives import Cylinder  # noqa: E402

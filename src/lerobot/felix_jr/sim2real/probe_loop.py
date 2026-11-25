@@ -176,6 +176,113 @@ class Inputs:
         }
 
 
+FILM_COLUMNS = 4
+TRUE_COLOR, TOLD_COLOR = (0, 220, 0), (255, 40, 40)  # (RGB) the true object's axis, what the policy was told
+
+
+class Film:
+    """The first worlds filmed: the side view over the wrist frame, the true axis and the told one drawn.
+
+    Each world a tile: its side view (`videos.SideView`, labelled) over the wrist frame the probe saw, the true object's
+    axis (green) and the one the policy was told (red) drawn on it.
+    """
+
+    def __init__(self, env: Any, worlds: int, path: Path, title: str) -> None:
+        """The renderer, the wrist camera's projection (the model's, undistorted, at the frames' size), the writer."""
+        import cv2
+
+        from lerobot.felix_jr.calibration.merge_urdf import wrist_camera_frame
+        from lerobot.felix_jr.calibration.xle_robot_model import XleRobotModel, pinch_frame
+        from lerobot.felix_jr.harness import api
+
+        from .videos import TILE, SideView
+
+        self.env, self.k, self.title, self.tile = env, min(worlds, env.num_envs), title, TILE
+        self.view = SideView(env)
+        model = XleRobotModel.load(api.MODEL)
+        q = model.joint_vector()
+        self.cam_from_pinch = np.linalg.inv(
+            np.linalg.inv(model.frame_pose(pinch_frame("right"), q))
+            @ model.frame_pose(wrist_camera_frame("right"), q)
+        )
+        self.lens = model.wrist_cameras["right"]
+        self.outcome: list[str] = [""] * self.k
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rows = -(-self.k // FILM_COLUMNS)
+        size = (TILE[0] * min(self.k, FILM_COLUMNS), 2 * TILE[1] * rows)
+        fps = max(1, int(round(1.0 / env.step_dt)))
+        self.writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, size)
+        self.path = path
+
+    def _axis(self, img: np.ndarray, pose: np.ndarray, height: float, color: tuple[int, int, int]) -> None:
+        """A pinch-frame center and axis (6,) drawn on the wrist frame `img`: the axis over the height, the center."""
+        import cv2
+
+        h, w = img.shape[:2]
+        s = w / self.lens.width
+        pts = np.array([pose[:3], pose[:3] + pose[3:] * height / 2, pose[:3] - pose[3:] * height / 2])
+        cam = pts @ self.cam_from_pinch[:3, :3].T + self.cam_from_pinch[:3, 3]
+        if (cam[:, 2] <= 1e-3).any():
+            return
+        uv = np.column_stack(
+            [
+                self.lens.fx * s * cam[:, 0] / cam[:, 2] + self.lens.ppx * s,
+                self.lens.fy * s * cam[:, 1] / cam[:, 2] + self.lens.ppy * s,
+            ]
+        )
+        p = np.round(uv).astype(int)
+        cv2.line(img, tuple(p[1]), tuple(p[2]), color, 1, cv2.LINE_AA)
+        cv2.circle(img, tuple(p[0]), 3, color, -1, cv2.LINE_AA)
+
+    def frame(
+        self, step: int, pools: Any, told: dict[str, torch.Tensor] | None, ended: list[str | None]
+    ) -> None:
+        """This step's tiles written."""
+        import cv2
+
+        from .videos import _label, label
+
+        env, k = self.env, self.k
+        cyl = obj.of(env)
+        side = self.view.tiles(range(k))
+        rgb = env.scene.sensors[SENSOR].data.rgb[:k].cpu().numpy().copy()
+        truth = cyl.in_pinch(env)[:k].cpu().numpy()
+        size = cyl.size(env)[:k].cpu().numpy()
+        said = None if told is None else told["object_in_pinch"][:k].cpu().numpy()
+        said_size = (
+            None if told is None or "object_size" not in told else told["object_size"][:k].cpu().numpy()
+        )
+        tiles = []
+        for w in range(k):
+            reason = ended[w]
+            end = None if reason is None else reason + (f", {self.outcome[w]}" if self.outcome[w] else "")
+            label(side[w], env, w, str(pools[w]), step, end, self.title)
+            wrist = rgb[w]
+            self._axis(wrist, truth[w], float(size[w, 1]), TRUE_COLOR)
+            lines = []
+            if said is not None:
+                self._axis(
+                    wrist,
+                    said[w],
+                    float(said_size[w, 1] if said_size is not None else size[w, 1]),
+                    TOLD_COLOR,
+                )
+                e = 1000 * (said[w, :3] - truth[w, :3])
+                lines.append((f"told - true (mm) x {e[0]:+.0f} y {e[1]:+.0f} z {e[2]:+.0f}", (255, 255, 255)))
+            wrist = cv2.resize(wrist, self.tile, interpolation=cv2.INTER_LINEAR)
+            _label(wrist, [("wrist: green true, red told", (255, 255, 255)), *lines])
+            tiles.append(np.vstack([side[w], wrist]))
+        while len(tiles) % FILM_COLUMNS and len(tiles) > FILM_COLUMNS:
+            tiles.append(np.zeros_like(tiles[0]))
+        rows = [np.hstack(tiles[i : i + FILM_COLUMNS]) for i in range(0, len(tiles), FILM_COLUMNS)]
+        self.writer.write(cv2.cvtColor(np.vstack(rows), cv2.COLOR_RGB2BGR))
+
+    def close(self) -> None:
+        """The video finished."""
+        self.writer.release()
+        self.view.close()
+
+
 def run(
     env: Any,
     wrapped: Any,
@@ -183,8 +290,12 @@ def run(
     inputs: Inputs,
     seed: int,
     steps: int | None = None,
+    film: Film | None = None,
 ) -> dict[str, Any]:
-    """One episode in every world from fresh resets under `inputs`; the report (the module docstring)."""
+    """One episode in every world from fresh resets under `inputs`; the report (the module docstring).
+
+    `film`: its first worlds filmed.
+    """
     torch.manual_seed(seed)
     np.random.seed(seed)
     cyl = inputs.cyl
@@ -209,9 +320,12 @@ def run(
     errors: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
     fresh = torch.ones(n, dtype=torch.bool, device=dev)
     holding = task.held(env, cyl) > 0
+    film_ended: list[str | None] = [None] * (film.k if film else 0)
     with torch.inference_mode():
-        for _ in range(steps or int(env.max_episode_length)):
+        for step in range(steps or int(env.max_episode_length)):
             new = inputs(fresh)
+            if film is not None:
+                film.frame(step, which, new, film_ended)
             if new is not None:
                 actor = obs["actor"].clone()
                 for name, value in new.items():
@@ -234,6 +348,14 @@ def run(
             ever |= (holding & ~done & ~ended) | (ended & before)
             done |= ended
             fresh = dones.bool()
+            if film is not None:
+                from .videos import end_reasons
+
+                end_reasons(env, ended.cpu().numpy()[: film.k], film_ended)
+                for w in np.flatnonzero(ended.cpu().numpy()[: film.k]):
+                    film.outcome[w] = (
+                        "held" if bool(held_at_end[w]) else "lost" if bool(ever[w]) else "never held"
+                    )
         held_at_end |= ~done & holding
     out: dict[str, Any] = {"worlds": n}
     for name in ("all", *POOLS):
@@ -346,6 +468,10 @@ def main(argv: list[str] | None = None) -> None:
         metavar="COL,COL",
         help=f"also `matched_noise` on these columns only, one run a set ({', '.join(COLUMNS)})",
     )
+    parser.add_argument(
+        "--film", type=int, default=0, help="film this many worlds of each `--film-conditions` run"
+    )
+    parser.add_argument("--film-conditions", nargs="+", default=["truth", "probe"])
     args = parser.parse_args(argv)
     settings = json.loads((args.train_dir / "settings.json").read_text())
     env, wrapped = make_video_env(
@@ -382,7 +508,24 @@ def main(argv: list[str] | None = None) -> None:
         matched = None
         if kind == "matched_noise":
             matched = given or results.get("probe", {}).get("probe_error", {}).get("matched")
-        r = run(env, wrapped, policy, Inputs(kind, env, probe, noise_m, matched, cols), args.seed, args.steps)
+        film = (
+            Film(env, args.film, args.out / f"film_{c}.mp4", c)
+            if args.film and c in args.film_conditions
+            else None
+        )
+        try:
+            r = run(
+                env,
+                wrapped,
+                policy,
+                Inputs(kind, env, probe, noise_m, matched, cols),
+                args.seed,
+                args.steps,
+                film,
+            )
+        finally:
+            if film is not None:
+                film.close()
         r["seconds"] = time.perf_counter() - started
         results[c] = r
         print(

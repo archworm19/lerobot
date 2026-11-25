@@ -45,6 +45,84 @@ def _label(image: np.ndarray, lines: list[tuple[str, tuple[int, int, int]]]) -> 
             cv2.putText(image, text, (6, 18 + 18 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.5, c, width, cv2.LINE_AA)
 
 
+class SideView:
+    """Each world's side camera (`CAMERA`, aimed at its object), rendered by MuJoCo on a copy of the model."""
+
+    def __init__(self, env: "ManagerBasedRlEnv") -> None:
+        """The renderer for `env`'s worlds (each world's object size given to the copy as it renders it)."""
+        import mujoco
+
+        self.env = env
+        self.m = copy.deepcopy(env.sim.mj_model)
+        self.d = mujoco.MjData(self.m)
+        self.renderer = mujoco.Renderer(self.m, height=TILE[1], width=TILE[0])
+        self.camera = mujoco.MjvCamera()
+        self.camera.distance, self.camera.azimuth, self.camera.elevation = (
+            CAMERA["distance"],
+            CAMERA["azimuth"],
+            CAMERA["elevation"],
+        )
+        self.cyl = obj.of(env)
+        _, self.object_geom = self.cyl.ids(env)
+        self.sizes = env.sim.model.geom_size[..., self.object_geom, :].cpu().numpy().reshape(-1, 3)
+
+    def tiles(self, worlds: range) -> list[np.ndarray]:
+        """The worlds' current views (RGB, `TILE`)."""
+        import mujoco
+
+        env = self.env
+        qpos = env.sim.data.qpos.cpu().numpy()
+        qvel = env.sim.data.qvel.cpu().numpy()
+        centers = self.cyl.pose(env)[0].cpu().numpy()
+        out = []
+        for w in worlds:
+            self.d.qpos[:], self.d.qvel[:] = qpos[w], qvel[w]
+            self.m.geom_size[self.object_geom] = self.sizes[min(w, len(self.sizes) - 1)]
+            mujoco.mj_forward(self.m, self.d)
+            self.camera.lookat[:] = centers[w] + np.array([0.0, 0.0, 0.02])
+            self.renderer.update_scene(self.d, self.camera)
+            out.append(self.renderer.render().copy())
+        return out
+
+    def close(self) -> None:
+        """The renderer released."""
+        self.renderer.close()
+
+
+def label(
+    tile: np.ndarray,
+    env: "ManagerBasedRlEnv",
+    w: int,
+    pool: str,
+    step: int,
+    ended: str | None,
+    title: str = "",
+) -> None:
+    """`tile` (world `w`'s) labelled: the title, its start pool and time, then how it ended or what is happening."""
+    cyl = obj.of(env)
+    held = bool(task.held(env, cyl)[w] > 0)
+    fingers = int(task.finger_contacts(env)[w].sum())
+    state = (
+        [(f"ended: {ended}", COLORS["tipped"])]
+        if ended
+        else [("holding", COLORS["held"])]
+        if held
+        else [(f"fingers on: {fingers}", COLORS["fingers"])]
+    )
+    _label(tile, [(f"{title} {pool}  t {step * env.step_dt:4.1f} s", (255, 255, 255)), *state])
+
+
+def end_reasons(env: "ManagerBasedRlEnv", dones: np.ndarray, ended: list[str | None]) -> None:
+    """`ended` updated: why each world's episode ended (tipped, arm on the table, or time), the first time it does."""
+    tm = env.termination_manager
+    for w in np.flatnonzero(dones):
+        if w < len(ended) and ended[w] is None:
+            ended[w] = next(
+                (name for name in ("tipped", "arm_on_table") if bool(tm.get_term(name)[w])),
+                "time",
+            )
+
+
 def record(
     env: "ManagerBasedRlEnv",
     wrapped: Any,
@@ -57,28 +135,15 @@ def record(
 
     `frames`: every `GIF_EVERY`-th frame appended to it too, at `GIF_SCALE` (for tensorboard: `log_to_tensorboard`).
     """
-    import mujoco
     import torch
 
-    obs, _ = wrapped.reset()
-    m = copy.deepcopy(env.sim.mj_model)  # (its own: each world's object size set into it to render)
-    d = mujoco.MjData(m)
-    renderer = mujoco.Renderer(m, height=TILE[1], width=TILE[0])
-    camera = mujoco.MjvCamera()
-    camera.distance, camera.azimuth, camera.elevation = (
-        CAMERA["distance"],
-        CAMERA["azimuth"],
-        CAMERA["elevation"],
-    )
     from .pool_reset import pool_reset
 
+    obs, _ = wrapped.reset()
+    view = SideView(env)
     term = pool_reset(env)
     n = env.num_envs
     pools = term.pools_of_worlds() if term is not None else [""] * n
-    cyl = obj.of(env)
-    _, object_geom = cyl.ids(env)
-    # each world's object size (its own once resized: the copy of the model rendering each world is given it)
-    sizes = env.sim.model.geom_size[..., object_geom, :].cpu().numpy().reshape(-1, 3)
     ended: list[str | None] = [None] * n
     fps = max(1, int(round(1.0 / env.step_dt)))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,31 +151,9 @@ def record(
     try:
         with torch.inference_mode():
             for step in range(int(env.max_episode_length)):
-                qpos = env.sim.data.qpos.cpu().numpy()
-                qvel = env.sim.data.qvel.cpu().numpy()
-                centers = cyl.pose(env)[0].cpu().numpy()
-                held = (task.held(env, cyl) > 0).cpu().numpy()
-                fingers = task.finger_contacts(env).cpu().numpy()
-                tiles = []
-                for w in range(n):
-                    d.qpos[:], d.qvel[:] = qpos[w], qvel[w]
-                    m.geom_size[object_geom] = sizes[min(w, len(sizes) - 1)]
-                    mujoco.mj_forward(m, d)
-                    camera.lookat[:] = centers[w] + np.array([0.0, 0.0, 0.02])
-                    renderer.update_scene(d, camera)
-                    tile = renderer.render().copy()
-                    state = (
-                        [(f"ended: {ended[w]}", COLORS["tipped"])]
-                        if ended[w]
-                        else [("holding", COLORS["held"])]
-                        if held[w]
-                        else [(f"fingers on: {int(fingers[w].sum())}", COLORS["fingers"])]
-                    )
-                    _label(
-                        tile,
-                        [(f"{title} {pools[w]}  t {step * env.step_dt:4.1f} s", (255, 255, 255)), *state],
-                    )
-                    tiles.append(tile)
+                tiles = view.tiles(range(n))
+                for w, tile in enumerate(tiles):
+                    label(tile, env, w, pools[w], step, ended[w], title)
                 strip = np.hstack(tiles)
                 writer.write(cv2.cvtColor(strip, cv2.COLOR_RGB2BGR))
                 if frames is not None and step % GIF_EVERY == 0:
@@ -118,19 +161,12 @@ def record(
                         cv2.resize(strip, None, fx=GIF_SCALE, fy=GIF_SCALE, interpolation=cv2.INTER_AREA)
                     )
                 obs, _, dones, _ = wrapped.step(policy(obs))
-                tm = env.termination_manager
-                for w in np.flatnonzero(dones.cpu().numpy()):
-                    if ended[w] is None:
-                        reason = next(
-                            (name for name in ("tipped", "arm_on_table") if bool(tm.get_term(name)[w])),
-                            "time",
-                        )
-                        ended[w] = reason
+                end_reasons(env, dones.cpu().numpy(), ended)
                 if all(e is not None for e in ended):
                     break
     finally:
         writer.release()
-        renderer.close()
+        view.close()
     return path
 
 
