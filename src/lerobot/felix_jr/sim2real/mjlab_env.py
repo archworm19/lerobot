@@ -371,6 +371,9 @@ def env_cfg(
             "time_out": TerminationTermCfg(func=base_mdp.time_out, time_out=True),
             "tipped": TerminationTermCfg(func=task.tipped, params={"obj": cyl}),
             "arm_on_table": TerminationTermCfg(func=task.arm_on_table),
+            # (a world whose physics went NaN or infinite, reset before its observation is computed; a truncation, not
+            # the policy's failure: multi2's small, light objects diverged once in 42 M steps, 2026-11-25)
+            "nan": TerminationTermCfg(func=base_mdp.nan_detection, time_out=True),
         },
         sim=sim_cfg(),
         decimation=DECIMATION,
