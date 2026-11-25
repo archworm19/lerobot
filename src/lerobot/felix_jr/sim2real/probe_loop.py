@@ -38,7 +38,7 @@ import torch
 from . import mjlab_object as obj, mjlab_task as task
 from .mjlab_object import rotate, rotate_inverse
 from .pool_reset import pool_reset
-from .probe_train import HEADS, decode, dinov2_small, tokens
+from .probe_train import decode, dinov2_small, features, head_inputs, load_heads
 from .refine import HELD_FRACTION
 from .render_bench import SENSOR, camera_cfg
 from .start_pool import POOLS
@@ -52,20 +52,21 @@ COLUMNS = {"center_x": [0], "center_y": [1], "center_z": [2], "axis": [3, 4, 5],
 
 
 class Probe:
-    """The trained attention head on frozen DINOv2-S: wrist frames -> the object in the pinch frame and its size."""
+    """A trained head on frozen DINOv2-S: wrist frames -> the object in the pinch frame and its size."""
 
     def __init__(self, heads: Path, device: str, hub: Path | None = None, head: str = "attention") -> None:
         """The head `head` of `heads` (`probe_train`'s heads.pt) and DINOv2-S."""
-        saved = torch.load(heads, map_location=device)
-        self.scale = saved["scale"].to(device)
-        self.head = HEADS[head]().to(device).eval()
-        self.head.load_state_dict(saved["heads"][head])
+        trained, specs, self.scale = load_heads(heads, device)
+        if head not in trained:
+            raise ValueError(f"no head {head!r} in {heads} (there are {sorted(trained)})")
+        self.head, self.spec = trained[head], specs[head]
         self.dino = dinov2_small(device, hub)
 
     @torch.no_grad()
     def __call__(self, rgb: torch.Tensor) -> dict[str, torch.Tensor]:
         """Center (N, 3), axis (N, 3), size (N, 2) in the pinch frame (m), in_view (N,), from frames (N, H, W, 3)."""
-        return decode(self.head(*tokens(self.dino, rgb)), self.scale)
+        feats = features(self.dino, rgb, self.spec.blocks)
+        return decode(self.head(*head_inputs(feats, self.spec)), self.scale)
 
 
 def term_slices(env: Any, group: str = "actor") -> dict[str, slice]:
@@ -479,6 +480,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--size", type=int, nargs=2, default=[224, 168], metavar=("W", "H"))
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--hub", type=Path, default=None)
+    parser.add_argument("--head", default="attention", help="which of the heads.pt's heads to use")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--steps", type=int, default=None, help="cap the episodes (a check; default: whole)")
     parser.add_argument(
@@ -514,7 +516,7 @@ def main(argv: list[str] | None = None) -> None:
     needs_probe = any(c.startswith("probe") for c in args.conditions) or (
         given is None and ("matched_noise" in args.conditions or args.matched_sets)
     )
-    probe = Probe(args.heads, args.device, args.hub) if needs_probe else None
+    probe = Probe(args.heads, args.device, args.hub, args.head) if needs_probe else None
     noise_m = float(settings.get("object_noise_m", 0.001))
     # (`matched_noise` takes the probe's error statistics from the `probe` condition: that runs first)
     order = sorted(args.conditions, key=lambda c: (c == "matched_noise", CONDITIONS.index(c)))
