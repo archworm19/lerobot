@@ -46,6 +46,8 @@ from .videos import make_video_env
 CONDITIONS = ("truth", "truth_path", "probe", "probe_frozen", "matched_noise", "probe_smoothed")
 OBJECT_TERMS = ("object_in_root", "object_in_pinch", "object_size")
 SMOOTH = 0.5  # `probe_smoothed`: the new estimate's weight each step
+# `matched_noise`'s columns (center 3, axis 3, radius, height) by name, to add its noise to some inputs only
+COLUMNS = {"center_x": [0], "center_y": [1], "center_z": [2], "axis": [3, 4, 5], "radius": [6], "height": [7]}
 
 
 class Probe:
@@ -97,6 +99,7 @@ class Inputs:
         probe: Probe | None,
         noise_m: float,
         matched: dict[str, list[float]] | None = None,
+        columns: tuple[str, ...] = tuple(COLUMNS),
     ) -> None:
         """`noise_m`: the run's pose noise (`truth_path`); `matched`: the probe's error spread and correlation."""
         self.condition, self.env, self.probe, self.noise_m = condition, env, probe, noise_m
@@ -106,7 +109,10 @@ class Inputs:
         self.size = torch.zeros(n, 2, device=dev)
         self.have = torch.zeros(n, dtype=torch.bool, device=dev)
         if matched is not None:
-            self.sigma = torch.tensor(matched["sigma"], device=dev)  # (8,): center 3, axis 3, size 2
+            mask = torch.zeros(8, device=dev)  # (the noise only in `columns`)
+            for name in columns:
+                mask[COLUMNS[name]] = 1.0
+            self.sigma = mask * torch.tensor(matched["sigma"], device=dev)  # (8,): center 3, axis 3, size 2
             self.rho = torch.tensor(matched["rho"], device=dev)
             self.noise = self.sigma * torch.randn(n, 8, device=dev)
         self.last: dict[str, torch.Tensor] | None = None  # the probe's raw estimate this step
@@ -327,6 +333,19 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--hub", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--steps", type=int, default=None, help="cap the episodes (a check; default: whole)")
+    parser.add_argument(
+        "--matched-from",
+        type=Path,
+        default=None,
+        help="a probe_loop.json whose `probe` run's error statistics to use",
+    )
+    parser.add_argument(
+        "--matched-sets",
+        nargs="+",
+        default=[],
+        metavar="COL,COL",
+        help=f"also `matched_noise` on these columns only, one run a set ({', '.join(COLUMNS)})",
+    )
     args = parser.parse_args(argv)
     settings = json.loads((args.train_dir / "settings.json").read_text())
     env, wrapped = make_video_env(
@@ -335,21 +354,35 @@ def main(argv: list[str] | None = None) -> None:
     runner = MjlabOnPolicyRunner(wrapped, asdict(runner_cfg(1, 0, "tensorboard", 1, 24)), None, args.device)
     runner.load(str(args.train_dir / args.checkpoint), map_location=args.device)
     policy = runner.get_inference_policy(device=args.device)
-    needs_probe = any(c.startswith("probe") or c == "matched_noise" for c in args.conditions)
+    given = (
+        json.loads(args.matched_from.read_text())["probe"]["probe_error"]["matched"]
+        if args.matched_from
+        else None
+    )
+    needs_probe = any(c.startswith("probe") for c in args.conditions) or (
+        given is None and ("matched_noise" in args.conditions or args.matched_sets)
+    )
     probe = Probe(args.heads, args.device, args.hub) if needs_probe else None
     noise_m = float(settings.get("object_noise_m", 0.001))
     # (`matched_noise` takes the probe's error statistics from the `probe` condition: that runs first)
     order = sorted(args.conditions, key=lambda c: (c == "matched_noise", CONDITIONS.index(c)))
-    if "matched_noise" in order and "probe" not in order:
+    if given is None and ("matched_noise" in order or args.matched_sets) and "probe" not in order:
         order.insert(0, "probe")
+    sets = {f"matched_noise[{s}]": tuple(s.split(",")) for s in args.matched_sets}
+    for cols in sets.values():
+        unknown = set(cols) - set(COLUMNS)
+        if unknown:
+            parser.error(f"no columns {sorted(unknown)} (there are {list(COLUMNS)})")
+    order += list(sets)
     results: dict[str, Any] = {"settings": vars(args) | {"train_dir": str(args.train_dir)}}
     args.out.mkdir(parents=True, exist_ok=True)
     for c in order:
         started = time.perf_counter()
-        matched = (
-            results.get("probe", {}).get("probe_error", {}).get("matched") if c == "matched_noise" else None
-        )
-        r = run(env, wrapped, policy, Inputs(c, env, probe, noise_m, matched), args.seed, args.steps)
+        kind, cols = ("matched_noise", sets[c]) if c in sets else (c, tuple(COLUMNS))
+        matched = None
+        if kind == "matched_noise":
+            matched = given or results.get("probe", {}).get("probe_error", {}).get("matched")
+        r = run(env, wrapped, policy, Inputs(kind, env, probe, noise_m, matched, cols), args.seed, args.steps)
         r["seconds"] = time.perf_counter() - started
         results[c] = r
         print(
