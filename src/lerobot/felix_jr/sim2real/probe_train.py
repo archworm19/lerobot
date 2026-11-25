@@ -14,7 +14,7 @@ optimizer:
   (its attention maps say where it looks); over one block's tokens or several's side by side.
 
 `--heads basic`: the three on the last block (4 queries); `grid` (`GRID_SPECS`): those and attention over blocks 6, 9,
-12 and 9-12 together, with 1, 4 and 16 queries. Each predicts the object's center (3) and axis (3) in the pinch frame
+12 and 9-12 together, with 1 and 4 queries. Each predicts the object's center (3) and axis (3) in the pinch frame
 (`in_pinch`), its radius and height, and whether it is in view (the segmentation's share above `VISIBLE_SHARE`).
 Losses: Huber on the center and size, standardized by the training set's spread; 1 - cosine on the axis; those only
 for frames with the object in view; cross-entropy on in view. `--augment`: the training frames' colours jittered
@@ -67,7 +67,7 @@ BASIC_SPECS = (
 GRID_SPECS = BASIC_SPECS + tuple(
     HeadSpec(f"attn_L{'-'.join(map(str, (b[0], b[-1]) if len(b) > 1 else b))}_q{q}", "attention", b, q)
     for b in ((6,), (9,), (12,), (9, 10, 11, 12))
-    for q in (1, 4, 16)
+    for q in (1, 4)  # (16 queries dropped: 4x the training time of the basic heads, 2026-11-25)
     if not (b == (12,) and q == QUERIES)  # (the basic attention head)
 )
 SPECS = {"basic": BASIC_SPECS, "grid": GRID_SPECS}
