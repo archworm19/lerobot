@@ -95,3 +95,64 @@ def test_augmenting_changes_colours_but_keeps_the_frame():
     a, b = rgb.float().flatten(1), out.float().flatten(1)
     corr = ((a - a.mean(1, keepdim=True)) * (b - b.mean(1, keepdim=True))).mean(1) / (a.std(1) * b.std(1))
     assert (corr > 0.7).all(), corr
+
+
+def _camera():
+    """A camera 15 cm behind the pinch point looking along the pinch frame's +z (a stand-in for the wrist camera)."""
+    import numpy as np
+
+    cam_from_pinch = np.eye(4)
+    cam_from_pinch[2, 3] = 0.15
+    k = np.array([[150.0, 0.0, 112.0], [0.0, 150.0, 84.0], [0.0, 0.0, 1.0]])
+    return {"cam_from_pinch": cam_from_pinch, "k": k}
+
+
+def test_a_prior_head_starts_as_the_prior_and_its_projection_is_right():
+    """Untrained, every prior head returns its prior (the correction starts at none); the projector puts a point on
+    the camera's axis at the image's center; a prior behind the camera has no valid point."""
+    from lerobot.felix_jr.sim2real.probe_train import PRIOR_KINDS, HeadSpec, build, run_head
+    from lerobot.felix_jr.sim2real.refine_heads import POINTS, Projector
+
+    feats = {b: (torch.randn(3, DIM), torch.randn(3, GRID[0] * GRID[1], DIM)) for b in (9, 10, 11, 12)}
+    prior = torch.tensor([[0.0, 0.0, 0.05, 0.0, 1.0, 0.0, 0.02, 0.1]] * 3)
+    prior_z = prior.clone()
+    for kind in PRIOR_KINDS:
+        spec = HeadSpec(kind, kind, (9, 10, 11, 12), 4)
+        out = run_head(build(spec, _camera()), spec, feats, prior_z, prior)
+        assert out.shape == (3, OUT), kind
+        assert torch.allclose(out[:, :8], prior_z, atol=1e-6), kind
+    proj = Projector(**_camera())
+    grid, valid = proj(prior)
+    assert grid.shape == (3, POINTS, 2) and valid[:, 0].all()
+    assert torch.allclose(grid[:, 0], torch.zeros(3, 2), atol=1e-6)  # (the center on the camera's axis)
+    behind = prior.clone()
+    behind[:, 2] = -0.5
+    assert not proj(behind)[1].any()
+
+
+def test_prior_heads_learn_to_correct_and_need_a_prior():
+    """A few steps on made-up data reduce a prior head's loss; called without a prior it refuses."""
+    import pytest
+
+    from lerobot.felix_jr.sim2real.probe_train import HeadSpec, build, loss, run_head
+
+    torch.manual_seed(0)
+    spec = HeadSpec("prior_sample", "prior_sample", (12,), 4)
+    head = build(spec, _camera())
+    feats = {12: (torch.randn(16, DIM), torch.randn(16, GRID[0] * GRID[1], DIM))}
+    target = torch.tensor([[0.01, 0.0, 0.05, 0.0, 1.0, 0.0, 0.02, 0.1]] * 16)
+    prior = target.clone()
+    prior[:, 0] += 0.02
+    scale = torch.stack([torch.zeros(8), torch.ones(8)])
+    seen = torch.ones(16, dtype=torch.bool)
+    opt = torch.optim.Adam(head.parameters(), lr=1e-2)
+    first = None
+    for _ in range(30):
+        value = loss(run_head(head, spec, feats, prior, prior), target, seen, scale)
+        first = float(value) if first is None else first
+        opt.zero_grad()
+        value.backward()
+        opt.step()
+    assert float(value) < 0.5 * first
+    with pytest.raises(ValueError):
+        run_head(head, spec, feats)

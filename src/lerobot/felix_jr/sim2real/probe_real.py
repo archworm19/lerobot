@@ -6,7 +6,8 @@
 The real frames: the harness sessions' wrist frames (`harness/scratch/sessions/<name>/workspace.pkl`: the single
 views and each wrist scan's), each with the head camera's cylinder fitted before it, prepared as the simulator renders
 them (`docs/sim2real_grasp.md`): undistorted with the frame's calibrated lens, resized to 224 x 168. Every head of
-every `--heads` file runs on them (`probe_train.load_heads`; DINOv2-S once a frame). Per head:
+every `--heads` file runs on them (`probe_train.load_heads`; DINOv2-S once a frame); the heads that correct a prior
+(`refine_heads`) given each frame's head camera fit. Per head:
 
 - **scan consistency** (no ground truth needed): a wrist scan's frames see one static object from a few wrist rolls;
   the head's estimates of its center, taken to the root frame through each frame's own pinch pose, should agree: the
@@ -36,7 +37,15 @@ from typing import Any
 import numpy as np
 import torch
 
-from .probe_train import HeadSpec, decode, dinov2_small, features, head_inputs, load_heads
+from .probe_train import (
+    HeadSpec,
+    decode,
+    dinov2_small,
+    features,
+    load_heads,
+    run_head,
+    standardize,
+)
 
 SESSIONS_DIR = Path(__file__).resolve().parents[1] / "harness" / "scratch" / "sessions"
 SESSIONS = ("bowl5", "bowl6", "bowl7", "bowl8", "ruler2")
@@ -133,12 +142,20 @@ def estimate(
     out: dict[str, dict[str, list[np.ndarray]]] = {n: {} for n in heads}
     with torch.no_grad():
         for start in range(0, len(frames), batch):
-            rgb = torch.from_numpy(np.stack([f.rgb for f in frames[start : start + batch]])).to(device)
+            chunk = frames[start : start + batch]
+            rgb = torch.from_numpy(np.stack([f.rgb for f in chunk])).to(device)
             feats = features(dino, rgb, blocks)
+            # (the prior heads' prior: each frame's head camera fit)
+            prior = torch.from_numpy(np.stack([globals()["prior"](f) for f in chunk]).astype(np.float32)).to(
+                device
+            )
+            prior_z = standardize(prior, scale)
             for name, head in heads.items():
-                d = decode(head(*head_inputs(feats, specs[name])), scale)
+                d = decode(run_head(head, specs[name], feats, prior_z, prior), scale)
                 weights = getattr(head, "last_weights", None)
-                if weights is not None:
+                if (
+                    weights is not None and weights.shape[-1] == 12 * 16
+                ):  # (over the patches; a sampling head's: its points)
                     d["attention"] = weights.float().sum(dim=1)
                 for k, v in d.items():
                     out[name].setdefault(k, []).append(v.float().cpu().numpy())

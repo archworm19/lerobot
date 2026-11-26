@@ -70,7 +70,19 @@ GRID_SPECS = BASIC_SPECS + tuple(
     for q in (1, 4)  # (16 queries dropped: 4x the training time of the basic heads, 2026-11-25)
     if not (b == (12,) and q == QUERIES)  # (the basic attention head)
 )
-SPECS = {"basic": BASIC_SPECS, "grid": GRID_SPECS}
+# the refinement's heads (`refine_heads`: they correct the head camera's prior, `head_prior`) on blocks 9-12, beside two
+# of the grid's image-only heads as references
+REFINE_BLOCKS = (9, 10, 11, 12)
+REFINE_SPECS = (
+    HeadSpec("attention", "attention"),
+    HeadSpec("attn_L9-12_q4", "attention", REFINE_BLOCKS, 4),
+    HeadSpec("residual_mlp", "residual_mlp", REFINE_BLOCKS),
+    HeadSpec("prior_query", "prior_query", REFINE_BLOCKS, 4),
+    HeadSpec("prior_soft", "prior_soft", REFINE_BLOCKS, 4),
+    HeadSpec("prior_sample", "prior_sample", REFINE_BLOCKS),
+)
+SPECS = {"basic": BASIC_SPECS, "grid": GRID_SPECS, "refine": REFINE_SPECS}
+PRIOR_KINDS = ("residual_mlp", "prior_query", "prior_soft", "prior_sample")
 # the heads of files written before the specs were (their names: the basic ones)
 LEGACY = {s.name: s for s in BASIC_SPECS}
 
@@ -175,8 +187,8 @@ class AttentionHead(nn.Module):
         return self.mlp(pooled.flatten(1))
 
 
-def build(spec: HeadSpec) -> nn.Module:
-    """The head `spec` describes."""
+def build(spec: HeadSpec, camera: dict[str, Any] | None = None) -> nn.Module:
+    """The head `spec` describes; a prior head's `camera` (`refine_heads.sim_camera`; loading restores it)."""
     width = DIM * len(spec.blocks)
     if spec.kind == "linear":
         return LinearHead(width)
@@ -184,11 +196,37 @@ def build(spec: HeadSpec) -> nn.Module:
         return MeanHead(width)
     if spec.kind == "attention":
         return AttentionHead(width, spec.queries)
+    if spec.kind in PRIOR_KINDS:
+        from .refine_heads import build_prior_head
+
+        return build_prior_head(spec.kind, width, spec.queries, camera)
     raise ValueError(f"no head kind {spec.kind!r}")
 
 
 # the basic heads by name (their defaults: the last block, 4 queries)
 HEADS = {"linear": LinearHead, "mean": MeanHead, "attention": AttentionHead}
+
+
+def run_head(
+    head: nn.Module,
+    spec: HeadSpec,
+    feats: dict[int, tuple[torch.Tensor, torch.Tensor]],
+    prior_z: torch.Tensor | None = None,
+    prior: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """A head's outputs (B, OUT): a prior head's given the prior (standardized and in meters, pinch frame)."""
+    cls, patches = head_inputs(feats, spec)
+    if spec.kind in PRIOR_KINDS:
+        if prior_z is None or prior is None:
+            raise ValueError(f"head {spec.name!r} corrects a prior: none given")
+        return head(cls, patches, prior_z, prior)
+    return head(cls, patches)
+
+
+def standardize(cyl: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """Cylinders (B, 8: center, axis, radius, height; m) standardized as the targets (the axis as it is)."""
+    mean, std = scale
+    return (cyl - mean) / std
 
 
 def load_heads(path: Path, device: str) -> tuple[dict[str, nn.Module], dict[str, HeadSpec], torch.Tensor]:
@@ -247,13 +285,36 @@ class ProbeData:
         self.n = len(self.labels["in_pinch"])
         self.visible = self.labels["visible"] > VISIBLE_SHARE
 
+    @property
+    def has_pinch_pose(self) -> bool:
+        """Recorded with the gripper's pinch pose (`probe_data` since 2026-11-26): priors can be drawn for it."""
+        return "pinch_pos" in self.labels
+
+    def prior_table(self, seed: int) -> Any:
+        """The head camera's errors, one an episode (`head_prior.episode_errors`), drawn with `seed`."""
+        from .head_prior import HeadErrors, episode_errors
+
+        rounds, worlds = int(self.labels["round"].max()) + 1, int(self.labels["world"].max()) + 1
+        return episode_errors(rounds, worlds, HeadErrors(), np.random.default_rng(seed))
+
+    def priors(self, idx: np.ndarray, table: Any, mean_size: np.ndarray, device: str) -> torch.Tensor:
+        """The priors (B, 8; pinch frame, m) of the frames `idx` (sorted, as `batch` reads them)."""
+        from .head_prior import priors
+
+        _, pinch = priors(self.labels, np.sort(idx), table, mean_size)
+        return torch.from_numpy(pinch.astype(np.float32)).to(device)
+
     def targets(self) -> np.ndarray:
         """(N, 8): the center, the axis, the radius and height."""
         return np.concatenate([self.labels["in_pinch"], self.labels["size"]], axis=1).astype(np.float32)
 
     def batch(self, idx: np.ndarray, device: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """(frames (B, H, W, 3) uint8, targets (B, 8), in view (B,)) on `device`."""
-        idx = np.sort(idx)  # (the memory map read in order)
+        """The frames' priors, as `batch` reads them.
+
+        (frames (B, H, W, 3) uint8, targets (B, 8), in view (B,)) on `device`; `idx` sorted (the memory map read
+        in order: the priors of the same frames, `priors`, take the same sorted `idx`).
+        """
+        idx = np.sort(idx)
         rgb = torch.from_numpy(np.ascontiguousarray(self.frames[idx])).to(device)
         target = torch.from_numpy(self.targets()[idx]).to(device)
         return rgb, target, torch.from_numpy(self.visible[idx]).to(device)
@@ -294,9 +355,17 @@ def evaluate(
     scale: torch.Tensor,
     device: str,
     batch: int,
+    prior_table: Any = None,
+    mean_size: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """Each head's errors on `data` (the module docstring)."""
+    """Each head's errors on `data`, with the priors' when given.
+
+    Each head's errors on `data` (the module docstring); with `prior_table`, the priors too (the same for every
+    evaluation: the prior alone a row of its own) and each head's gain curve against them.
+    """
     preds: dict[str, list[dict[str, np.ndarray]]] = {name: [] for name in heads}
+    if prior_table is not None:
+        preds["(the prior alone)"] = []
     for h in heads.values():
         h.eval()
     blocks = _blocks(specs)
@@ -305,8 +374,16 @@ def evaluate(
             idx = np.arange(start, min(start + batch, data.n))
             rgb, _, _ = data.batch(idx, device)
             feats = features(dino, rgb, blocks)
+            prior = prior_z = None
+            if prior_table is not None:
+                assert mean_size is not None
+                prior = data.priors(idx, prior_table, mean_size, device)
+                prior_z = standardize(prior, scale)
+                p = {"center": prior[:, :3], "axis": prior[:, 3:6], "size": prior[:, 6:8]}
+                p["in_view"] = torch.ones(len(prior), dtype=torch.bool, device=device)
+                preds["(the prior alone)"].append({k: v.cpu().numpy() for k, v in p.items()})
             for name, h in heads.items():
-                out = decode(h(*head_inputs(feats, specs[name])), scale)
+                out = decode(run_head(h, specs[name], feats, prior_z, prior), scale)
                 preds[name].append({k: v.cpu().numpy() for k, v in out.items()})
     target = data.targets()
     seen = data.visible
@@ -314,6 +391,10 @@ def evaluate(
     pool = data.labels["pool"]
     held = data.labels["held"].astype(bool)
     result: dict[str, Any] = {}
+    prior_err = None
+    if prior_table is not None:
+        pc = np.concatenate([c["center"] for c in preds["(the prior alone)"]])
+        prior_err = 1000 * np.linalg.norm(pc - target[:, :3], axis=1)
     for name, chunks in preds.items():
         p = {k: np.concatenate([c[k] for c in chunks]) for k in chunks[0]}
         err_mm = 1000 * np.linalg.norm(p["center"] - target[:, :3], axis=1)
@@ -343,6 +424,10 @@ def evaluate(
             "height_mm": stats(everything, height_mm),
             "in_view_accuracy": float(np.mean(p["in_view"] == seen)),
         }
+        if prior_err is not None:
+            from .head_prior import gain_curve
+
+            result[name]["gain_curve"] = gain_curve(err_mm[seen], prior_err[seen])
     for h in heads.values():
         h.train()
     return result
@@ -373,7 +458,19 @@ def train(
     mean[3:6] = 0.0
     scale = torch.stack([mean, std])
     by_name = {s.name: s for s in specs}
-    heads = {s.name: build(s).to(device) for s in specs}
+    uses_prior = any(s.kind in PRIOR_KINDS for s in specs)
+    camera = None
+    if uses_prior:
+        if not (data.has_pinch_pose and test.has_pinch_pose):
+            raise ValueError(
+                "prior heads need data recorded with the pinch pose (probe_data since 2026-11-26)"
+            )
+        from .refine_heads import sim_camera
+
+        camera = sim_camera()
+    mean_size = seen_targets[:, 6:8].mean(axis=0)
+    test_table = test.prior_table(seed + 10_000) if uses_prior else None  # (the same priors every evaluation)
+    heads = {s.name: build(s, camera).to(device) for s in specs}
     blocks = _blocks(by_name)
     steps = epochs * (data.n // batch)
     optims = {name: torch.optim.AdamW(h.parameters(), lr=lr, weight_decay=1e-4) for name, h in heads.items()}
@@ -383,21 +480,29 @@ def train(
     started = time.perf_counter()
     for epoch in range(epochs):
         order = rng.permutation(data.n)
+        table = (
+            data.prior_table(seed + epoch) if uses_prior else None
+        )  # (the head's errors drawn again each epoch)
         losses = dict.fromkeys(heads, 0.0)
         nb = max(data.n // batch, 1)
         for b in range(nb):
-            rgb, target, seen = data.batch(order[b * batch : (b + 1) * batch], device)
+            idx = order[b * batch : (b + 1) * batch]
+            rgb, target, seen = data.batch(idx, device)
+            prior = prior_z = None
+            if table is not None:
+                prior = data.priors(idx, table, mean_size, device)
+                prior_z = standardize(prior, scale)
             if augmented:
                 rgb = augment(rgb)
             feats = features(dino, rgb, blocks)
             for name, h in heads.items():
-                value = loss(h(*head_inputs(feats, by_name[name])), target, seen, scale)
+                value = loss(run_head(h, by_name[name], feats, prior_z, prior), target, seen, scale)
                 optims[name].zero_grad(set_to_none=True)
                 value.backward()
                 optims[name].step()
                 sched[name].step()
                 losses[name] += float(value.detach()) / nb
-        metrics = evaluate(dino, heads, by_name, test, scale, device, batch)
+        metrics = evaluate(dino, heads, by_name, test, scale, device, batch, test_table, mean_size)
         history.append({"epoch": epoch, "loss": losses, "test": metrics})
         line = ", ".join(
             f"{n} {m['center_mm'].get('median', float('nan')):.1f}/{m['center_mm'].get('p90', float('nan')):.1f}"

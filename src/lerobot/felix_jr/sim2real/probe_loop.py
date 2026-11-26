@@ -38,7 +38,7 @@ import torch
 from . import mjlab_object as obj, mjlab_task as task
 from .mjlab_object import rotate, rotate_inverse
 from .pool_reset import pool_reset
-from .probe_train import decode, dinov2_small, features, head_inputs, load_heads
+from .probe_train import PRIOR_KINDS, decode, dinov2_small, features, head_inputs, load_heads
 from .refine import HELD_FRACTION
 from .render_bench import SENSOR, camera_cfg
 from .start_pool import POOLS
@@ -60,6 +60,10 @@ class Probe:
         if head not in trained:
             raise ValueError(f"no head {head!r} in {heads} (there are {sorted(trained)})")
         self.head, self.spec = trained[head], specs[head]
+        if self.spec.kind in PRIOR_KINDS:
+            raise NotImplementedError(
+                f"{head!r} corrects a prior: the closed loop has no head camera estimate yet"
+            )
         self.dino = dinov2_small(device, hub)
 
     @torch.no_grad()
