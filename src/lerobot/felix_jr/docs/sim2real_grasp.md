@@ -609,8 +609,42 @@ epoch, 20 epochs.
 - **The best head in simulation is not the best on real frames,** and none is best on all real measures: step 2's
   randomized look is aimed at this. To watch there: the scan spread below the first probe's 9.7 mm with the sizes kept.
 
-**Next:** step 2 (the same with `--appearance` and `probe_train --augment`, ~70 min on a 4090), step 3 (backgrounds
-composited by the segmentation); the real frames scored the same way after each; then the closed-loop test again.
+**Next:** step 2 (below).
+
+### Step 2: the look randomized (run `20261126_101219`, 2026-11-26)
+
+As step 1, the frames rendered with `--appearance` (`appearance.py`) and the heads trained with `--augment` (colour
+jitter, noise, blur); 184 s an epoch.
+
+| head | sim, all (median / p90 mm) | sim height / axis | real scans' spread (step 2 / step 1) | real radius error | real axis tilt (median) | real offset across the jaws |
+| --- | --- | --- | --- | --- | --- | --- |
+| linear | 15.9 / 33.5 | 23.0 mm / 4.6 deg | 17.0 / 33.7 mm | +7.3 mm | 14.2 deg (41.3) | 14 mm |
+| mean | 10.6 / 24.9 | 14.8 / 2.9 | 19.2 / 28.0 | +8.5 | 10.5 (20.0) | 10 |
+| attention (block 12, 4 queries) | 8.5 / 22.6 | 12.4 / 2.3 | 30.0 / 16.9 | +9.2 | 14.3 (14.7) | 9 |
+| block 6, 1 query | 7.5 / 20.4 | 11.3 / 2.1 | 17.8 / 15.7 | +7.3 | 15.4 (10.9) | 6 |
+| block 6, 4 queries | 7.6 / 20.6 | 11.1 / 2.0 | 19.6 / 27.6 | +6.7 | 12.9 (13.1) | **5** |
+| block 9, 1 query | 7.7 / 21.1 | 11.4 / 2.1 | 18.3 / 20.7 | +8.1 | 14.8 (21.7) | 9 |
+| block 9, 4 queries | 7.7 / 20.5 | 11.3 / 2.0 | 24.8 / 27.8 | +9.1 | 15.2 (34.5) | 6 |
+| block 12, 1 query | 8.7 / 22.7 | 12.5 / 2.5 | 23.8 / 28.0 | +9.6 | 11.7 (34.2) | 14 |
+| blocks 9-12, 1 query | 7.6 / 20.6 | 11.1 / 1.8 | 18.9 / 24.4 | +8.3 | 13.6 (12.1) | 7 |
+| blocks 9-12, 4 queries | **7.2** / 20.3 | **10.4 / 1.8** | 22.0 / 19.1 | +9.1 | **10.0** (11.7) | 9 |
+
+(the axis tilt in brackets: step 1's; the first probe, `multi1`: the scans' spread 9.7 mm)
+
+- **The look moved the attention onto the objects:** the bottle's top and body, the fingertip, the bottle's foot
+  between the fingers; the wood and the container's rim no longer. What it was aimed at, it fixed.
+- **The estimates no more consistent:** the scans' spread 17-30 mm (step 1 16-28; the first probe 9.7). The worst
+  cases better (the axis's tilt 10-15 deg for every head, step 1's up to 41; across the jaws 5-9 mm from the head's fit
+  for several heads), the radius a little wider (+7 to +9 mm). In simulation ~1 mm worse than step 1 (the harder
+  scenes); blocks 6 and 9 now as good as blocks 9-12.
+- **It also looks at the lip balm,** the other object in the scene: the simulated scenes have one object, so the probe
+  never had to choose. Likely part of the inconsistency: in a scan's frames the lip balm comes and goes, and the
+  estimate with it. The cylinder still drawn tall (120-150 mm against ~55): its center often on the bottle's top, its
+  height along the axis toward the lip balm.
+- **So (the roadmap's rule):** the spread did not come near 9.7 mm: the inconsistency is not mostly the look. Next the
+  refinement on the head camera's prior (which says which object and roughly where), before compositing; and
+  distractors in the simulated scenes.
+
 
 **On the robot (the M1, measured 2026-11-22):** DINOv2 ViT-S/14 at 224 px 17 ms on MPS (25 ms CPU), 448 px 98 ms,
 4 frames at 224 px 58 ms; CoTracker3 online 141 ms a frame on MPS; small PointNets (11k-239k parameters, 256 points)
@@ -630,13 +664,13 @@ background); `multi2` (objects the real ones' size) and its teacher (92.1 %); th
 step 1 (the grid of heads on `multi2`, plain rendering: the real sizes right, the real scans' spread worse, the axis
 tilted 11-41 deg on real frames against 1.4-1.9 in simulation). Ruled out (2026-11-25): the fingers' place in the
 image (the simulator's, rendered at each real frame's joints, sit on the real ones within a few pixels): the real
-axis's errors are scatter, not a lean.
+axis's errors are scatter, not a lean. Step 2 (2026-11-26: the randomized look): the attention onto the objects
+(the lip balm too), the real scans' spread not better (17-30 mm).
 
-**Next: step 2 (2026-11-26):** `probe_data --appearance`, `probe_train --heads grid --augment` (~70 min on a 4090),
-scored on the real frames. To watch: the scans' spread below the first probe's 9.7 mm with the sizes kept, the axis's
-tilt, the attention off the background.
+**Next (decided 2026-11-26): the cylinder refinement on the head camera's prior** (RAFT-style; the plan and its
+sub-experiments: "The cylinder refinement: the plan", below), then distractors, then compositing.
 
-**Then, the order undecided (decide on step 2's result):**
+**The candidates as they were weighed (2026-11-25; decided on step 2's result):**
 
 - **Step 3, backgrounds composited by the segmentation:** with some probability a frame, the pixels that are neither
   robot nor object replaced by a real photo (public images, or the wrist camera's own frames of the empty table and
@@ -658,8 +692,11 @@ tilt, the attention off the background.
   in `probe_data`'s labels (to put a base-frame prior in each frame's pinch frame), the prior drawn as the batch loads.
   On real frames it runs with the recorded head fits directly. For it first: it attacks the real scans' inconsistency
   and the axis's scatter whatever the look.
-- **How to decide:** if step 2 brings the real scans' spread near the first probe's (9.7 mm) or below, the visual line
-  is working: compositing next. If it barely moves it, the inconsistency is not mostly the look: the residual next.
+- **How it was decided:** if step 2 brought the real scans' spread near the first probe's (9.7 mm) or below,
+  compositing next; if it barely moved it, the residual next. It barely moved it (17-30 mm): the residual.
+- **Distractors (added 2026-11-26):** a second and third object on the table (drawn-only cylinders and boxes, the
+  look's materials): step 2's probe attends the lip balm, never having had to choose. Needed with or without a prior
+  (without, to learn which object; with, to learn to ignore the rest).
 
 **Smaller, any time:**
 
@@ -675,6 +712,75 @@ tilt, the attention off the background.
 probe's features plus proprioception, distilled from the teacher by DAgger, its errors its own); then the robot. Set
 aside (2026-11-25): the teacher's holding under drifting estimates (a teacher trained with matched noise, or relying
 on the gripper's pose once holding): the student, trained with the probe's errors, should learn it.
+
+## The cylinder refinement: the plan (2026-11-26)
+
+**The idea:** start from the head camera's cylinder (as the harness has it before the approach), expressed in the
+gripper's pinch frame through the arm's pose, and let the wrist camera correct it, as RAFT refines optical flow and
+Deformable DETR's decoder its boxes: keep an explicit estimate, look at the image where the estimate says to look,
+predict a correction, repeat. No explicit scene reconstruction or edge fitting: the only explicit part is projecting
+the estimate into the image (the camera's pose on the gripper and its lens: right, the finger check); what the
+features there mean is learned (the hand-built silhouette fit, `harness/silhouette.py`, is the explicit version that
+real clutter broke).
+
+**Training:**
+
+1. A frame and its truth (`probe_data`, with the gripper's pinch pose added to the labels).
+2. A **prior**: the truth with noise drawn from the head camera's measured errors, a little wider (the center 1-3 cm
+   off, fairly constant within a session; the height 1.5-2.5 cm; the radius up to 10 mm too large when a fit takes in a
+   cap; always upright), fixed in the base frame per episode, put in each frame's pinch frame through its pose; now and
+   then weakened ("something roughly here") so the network cannot only copy it. Drawn as the batch loads: one
+   recording serves any noise.
+3. The prior **as the query** (always): an embedding of its parameters (and learned parts) is the query token(s).
+4. The prior **as geometry** (an ablation): projected into the image (its center, ~8 points on each rim, the axis's
+   ends), deciding where the query reads DINO's patch features.
+5. The output a **correction** (prior + correction = truth), not the parameters themselves; the loop **unrolled**: the
+   corrected cylinder re-projected and corrected again, K rounds, one update operator (shared weights, a GRU-like
+   hidden state between rounds), a loss on every round weighted toward the last (RAFT; the estimate detached between
+   rounds).
+
+**At test time:** the head camera's estimate as the prior; K rounds; on the next frame the refined estimate (kept in the
+base frame: the object is static before the grasp) is the next prior (warm start, as RAFT on video): a temporal
+recurrence without training on sequences. Cost on the M1: DINOv2-S 17 ms a frame; the sampling 0.4 ms a round
+(`grid_sample`, forward; its backward is not on MPS: training on the pod's CUDA).
+
+**The sub-experiments, in order** (each scored the same way: in simulation the error against the prior's error, a "gain
+curve", never worse than the prior; on the real frames `probe_real` with the recorded head fits as the priors: the
+scans' spread, the axis's tilt, the size, warm-started across each scan's frames):
+
+0. **Infrastructure:** the pinch pose in `probe_data`'s labels; the prior generator; the gain curve; `probe_real` with
+   the head fits as priors.
+1. **References:** the prior alone (no image: its own error); step 2's image-only heads.
+2. **Residual MLP:** pooled features and the prior's embedding to one correction: does knowing the prior help at all?
+3. **The prior as the query, no geometry:** learned queries plus the prior's embedding attending over all patches.
+4. **Soft geometry:** the same, the attention biased toward the prior's projected outline (a term falling off with the
+   distance from it).
+5. **Hard geometry (deformable sampling):** DINO's features read at the prior's projected points and at offsets the
+   query predicts (bilinear: `grid_sample`; Deformable DETR's CUDA kernel not needed at this size), one round. 3, 4 and 5
+   on the same data: is the geometry worth it, and how hard? (Hard excludes the lip balm and the background outright;
+   it misses the object if the prior is far.)
+6. **Unrolled refinement:** the best of 3-5, K = 1-4 rounds, shared or separate weights, the correction in the pinch
+   frame or in the image's terms (the projected center's shift in pixels, the log of the depth, the apparent radius:
+   a pixel of correction the same near and far; converted back through the camera exactly).
+7. **Several hypotheses at test time:** the prior and perturbations of it, each refined, a confidence head (trained to
+   predict a hypothesis's error) to keep the best or weigh them: a learned particle filter, for the distractor (a
+   hypothesis pulled to the lip balm ranked low) and the height (several tried, the rims' fit decides).
+8. **A learned distribution:** K queries each predicting a hypothesis and a weight, trained winner-take-all plus the
+   weights (DETR's sets, a mixture): "this or that" instead of their average.
+9. **Uncertainty** for the policy (a variance a parameter: Gaussian likelihood); a confident correction applied, a
+   doubtful one falling back to the prior.
+10. **Trained temporal recurrence:** only if the warm start leaves jitter or drift that matters; its sequences from
+    the policy's own rollouts (with the student, DAgger).
+
+**Alternatives kept beside it:**
+
+- **Render and compare against a learned mask:** a light segmentation head on DINO's features (the simulator's masks
+  for free), then the cylinder adjusted at test time until its projected silhouette matches the mask (analysis by
+  synthesis): interpretable, consistent across frames by construction, two wrist cameras naturally; its masks on real
+  frames a direct read of the gap.
+- **A crop around the prior:** DINO's patches are 14 px (several mm of the object at 10-20 cm); a crop where the prior
+  projects, run at 224 px, gives 4-8x finer features on the object: a coarse-to-fine cascade (the whole frame, then
+  the crop).
 
 ## Next (the simulator, 2026-11-14 to 18)
 
