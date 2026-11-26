@@ -646,6 +646,53 @@ jitter, noise, blur); 184 s an epoch.
   distractors in the simulated scenes.
 
 
+### The cylinder refinement, sub-experiments 0-5 (run `20261126_115627`, 2026-11-26)
+
+`head_prior.py` (the head camera's errors, measured on the robot, drawn a little wider, one an episode),
+`refine_heads.py` (four heads correcting the prior, on DINOv2-S's blocks 9-12), `probe_train --heads refine
+--augment` on step 2's setup (the look randomized), recorded with the gripper's pinch pose; 123 s an epoch, 20.
+
+| head | sim center (median / p90) | real scans' spread | real radius error | real height | real correction (across / along / up the fingers) |
+| --- | --- | --- | --- | --- | --- |
+| the prior alone | 21.3 / 40.4 mm | 0 (one fit a scan) | +3.3 mm | 53 mm | - |
+| attention, block 12 (image only) | 8.4 / 22.2 | 20.1 | +7.7 | 110 | - |
+| blocks 9-12, 4 queries (image only) | 7.2 / 20.5 | 24.1 | +7.7 | 125 | - |
+| 2. residual MLP | 5.8 / 12.8 | 9.3 | +7.3 | 91 | 12 / 10 / 8 mm |
+| 3. the prior as the query (no geometry) | **4.2 / 10.3** | 11.3 | +6.4 | 75 | 8 / 11 / 10 |
+| 4. soft geometry | 4.3 / 10.8 | 10.1 | +8.2 | 57 | 9 / 7 / 6 |
+| **5. hard geometry (sampling at the prior's points)** | 4.5 / 10.9 | **7.3** | +5.1 | **59** | 11 / 9 / 8 |
+| (the first probe, `multi1`, image only) | | (9.7) | (+12.0) | (185) | |
+
+**Which parameters it corrects** (`probe_train --eval-only`: the prior's error -> the head's, median; the share
+improved; the correction's slope against the prior's error, 1 undoing it; the prior-as-query head, the other prior
+heads within ~0.3 mm):
+
+| parameter | prior -> head | improved | slope |
+| --- | --- | --- | --- |
+| center across the jaws (pinch x) | 10.9 -> **0.6 mm** | 96 % | 1.00 |
+| center along the hinge / the fingers (pinch y / z) | 8.4 / 9.4 -> 2.3 / 2.6 | 82 % | 0.93 |
+| center across the table (root x / y) | 11.0 / 10.8 -> 1.9 / 0.9 | 88 / 94 % | 0.97 / 0.99 |
+| center, vertical (root z) | 6.5 -> 2.6 | 75 % | 0.83 |
+| radius | 4.2 -> **0.5** | 89 % | 0.95 |
+| height | 11.3 -> 4.8 | 73 % | 0.76 |
+| axis | 6.1 -> 1.8 deg | 78 % | - |
+
+- **The refinement works, in simulation and on real frames.** In simulation the prior heads halve the best image-only
+  head's error (median and 90th percentile) and cut the prior's five-fold. On real frames hard geometry's scans spread
+  7.3 mm (the image-only heads 20-24, the first probe 9.7; the arm's own pose error between a scan's frames a few mm),
+  its heights right (57-59 mm, the objects ~50-60), its corrections ~1 cm (the head and the wrist cameras' measured
+  disagreement 1-3 cm). On the overlays the refined cylinder sits on the bottle's top and on the chapstick, the head's
+  prior a centimeter or two beside it: the first time the wrist camera visibly improves on the head's estimate.
+- **What it corrects:** the translation across the table and across the jaws almost completely (slope 1.0), the
+  radius too; the height and the vertical about three quarters (the single view's height ambiguity). Image-only heads
+  do no better than the prior on the height (11.3 -> 10.8-12.6 mm) or the vertical (6.5 -> 5.8-6.4): the prior is what
+  makes the height estimable.
+- **The geometry ties in simulation and wins on real frames:** the three attention heads within 0.3 mm in simulation,
+  but on real frames hard geometry the most consistent (7.3 against 10-11 mm) with the right height: real frames have
+  the lip balm and clutter, simulation neither; reading DINO's features only near the prior keeps them out.
+- **Wrong way:** the real radius 5.1 mm too wide (the prior 3.3): from above the bottle's wider cap (38 mm against the
+  body's 29) may be what it fits.
+
 **On the robot (the M1, measured 2026-11-22):** DINOv2 ViT-S/14 at 224 px 17 ms on MPS (25 ms CPU), 448 px 98 ms,
 4 frames at 224 px 58 ms; CoTracker3 online 141 ms a frame on MPS; small PointNets (11k-239k parameters, 256 points)
 0.14-0.76 ms. MLX has DINOv2 Base and Large (mlx-image), not Small; nothing for CoTracker.
@@ -668,7 +715,10 @@ axis's errors are scatter, not a lean. Step 2 (2026-11-26: the randomized look):
 (the lip balm too), the real scans' spread not better (17-30 mm).
 
 **Next (decided 2026-11-26): the cylinder refinement on the head camera's prior** (RAFT-style; the plan and its
-sub-experiments: "The cylinder refinement: the plan", below), then distractors, then compositing.
+sub-experiments: "The cylinder refinement: the plan", below), then distractors, then compositing. **Sub-experiments
+0-5 done (2026-11-26):** it works (real scans' spread 7.3 mm, heights right, the corrections ~1 cm); hard geometry the
+best on real frames, tied in simulation. Next sub-experiment 6 (unrolled rounds) on the hard-geometry head, then
+distractors, then the warm start across a scan's frames.
 
 **The candidates as they were weighed (2026-11-25; decided on step 2's result):**
 
