@@ -680,6 +680,7 @@ def train(
             table = table_to_torch(data.prior_table(seed + epoch), device)
         losses = {name: torch.zeros((), device=device) for name in heads}
         epoch_started, waited = time.perf_counter(), 0.0
+        step_times: list[float] = []
         fetched = time.perf_counter()
         for step, (frames, idx) in enumerate(batches):
             if step >= per_epoch:
@@ -710,11 +711,20 @@ def train(
                 optims[name].step()
                 sched[name].step()
                 losses[name] += value.detach() / per_epoch  # (on the device: no wait for it every step)
+            if max_steps:  # (a timing run: each step timed, the GPU waited for)
+                if device.startswith("cuda"):
+                    torch.cuda.synchronize()
+                step_times.append(time.perf_counter())
             fetched = time.perf_counter()
         train_s = time.perf_counter() - epoch_started
         print(
             f"epoch {epoch + 1}: {per_epoch} steps in {train_s:.0f} s ({per_epoch / train_s:.2f} a second), "
-            f"{waited:.0f} s of it waiting for batches",
+            f"{waited:.0f} s of it waiting for batches"
+            + (
+                f"; the second half's steps {1000 * float(np.median(np.diff(step_times[len(step_times) // 2 :]))):.0f} ms each"
+                if len(step_times) > 10
+                else ""
+            ),
             flush=True,
         )
         metrics = evaluate(dino, heads, by_name, test, scale, device, batch, test_table, mean_size, workers)
