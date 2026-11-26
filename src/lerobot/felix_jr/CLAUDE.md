@@ -24,7 +24,7 @@ running anything on the robot, and update it when what you do changes what it sa
   - `docs/object_grasping.md`: the object-centric grasping experiment (phases A-C built; next, coarse to fine with the wrist cameras): plan, interfaces, flow, what it replaces and what is deprecated, open questions.
   - `docs/camera_calibration.md`: the click calibration and `XleRobotModel`.
   - `docs/calibration_plan.md`: where the calibration is going (the procedure decided, the work in order).
-  - `docs/sim2real_grasp.md`: the research branch for a grasp policy trained in simulation (MuJoCo, `sim2real/`): the idea, the simulator on this Mac, the robot model, next steps.
+  - `docs/sim2real_grasp.md`: the research branch for a grasp policy trained in simulation (MuJoCo, `sim2real/`): the idea, the simulator on this Mac, the robot model, the wrist camera and the vision probe, and **the vision roadmap** (what is next and what is undecided).
   - `docs/sim_harness.md`: the simulator in the harness (plan): a shadow replay of every real execution first, then grasps planned and checked in the simulator.
   - `docs/sim_deploy.md`: the simulator on rented GPUs (plan): mjlab / MuJoCo Warp, the image, RunPod, code sync.
   - `docs/server_plan.md`: the Pi / laptop split and the protocol.

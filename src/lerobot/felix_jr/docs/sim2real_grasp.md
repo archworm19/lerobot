@@ -616,7 +616,67 @@ composited by the segmentation); the real frames scored the same way after each;
 4 frames at 224 px 58 ms; CoTracker3 online 141 ms a frame on MPS; small PointNets (11k-239k parameters, 256 points)
 0.14-0.76 ms. MLX has DINOv2 Base and Large (mlx-image), not Small; nothing for CoTracker.
 
-## Next
+## The vision roadmap (the wrist camera; a living list, newest decisions first)
+
+The goal: a grasp policy on the wrist camera's images that transfers to the robot, distilled from the privileged
+teacher (`rl_experiments.md`) through a frozen DINOv2-S. Each step is scored the same way: in simulation (the probe's
+held-out errors: by distance, by axis, the size) and on the real frames (`probe_real.py`: the scans' spread, the size
+against the measured objects, the axis's tilt, the offset from the head camera's fit). Results: the sections above.
+
+**Done (2026-11-23 to 25):** the wrist camera in mjlab and its cost; the probe (frozen DINOv2-S plus heads: ~1 mm
+across the jaws in simulation, the signs right); the closed-loop test (74.6 % against 96.7 %: it grasps, then steers
+by drifting estimates; set aside); the probe on real frames (sizes from the training's range, attention on the
+background); `multi2` (objects the real ones' size) and its teacher (92.1 %); the randomized look (`appearance.py`);
+step 1 (the grid of heads on `multi2`, plain rendering: the real sizes right, the real scans' spread worse, the axis
+tilted 11-41 deg on real frames against 1.4-1.9 in simulation). Ruled out (2026-11-25): the fingers' place in the
+image (the simulator's, rendered at each real frame's joints, sit on the real ones within a few pixels): the real
+axis's errors are scatter, not a lean.
+
+**Next: step 2 (2026-11-26):** `probe_data --appearance`, `probe_train --heads grid --augment` (~70 min on a 4090),
+scored on the real frames. To watch: the scans' spread below the first probe's 9.7 mm with the sizes kept, the axis's
+tilt, the attention off the background.
+
+**Then, the order undecided (decide on step 2's result):**
+
+- **Step 3, backgrounds composited by the segmentation:** with some probability a frame, the pixels that are neither
+  robot nor object replaced by a real photo (public images, or the wrist camera's own frames of the empty table and
+  the room: a scripted sweep, no object). One GPU operation a frame (the segmentation is already rendered). For it
+  first: it finishes the visual line one change at a time (clean comparisons), and any head (the residual's too)
+  gains from it.
+- **The residual on the head camera's prior:** the head's cylinder (in the pinch frame, through the gripper's pose)
+  given to the head, which predicts its correction; the axis and size mostly from the prior (upright, about the right
+  size), the network only correcting: it cannot get lost, and the head-to-wrist calibration offset is part of what it
+  corrects. Heads, simplest first: pooled features plus the prior to an MLP; queries started from the prior; then
+  **deformable sampling** (Deformable DETR): the prior's center, rims and axis projected into the patch grid (the camera's
+  pose on the gripper is right: the finger check), DINO's patch features sampled there and at learned offsets, the
+  correction re-projected and sampled again two or three times (as DETR's decoders and RAFT refine): the background
+  not sampled at all. Later recurrent (the object static before the grasp: a base-frame estimate refined frame by
+  frame, a GRU or a learned Kalman filter: less jitter), its sequences from the policy's own rollouts. **The risk:** the
+  simulated prior's errors must look like the real head's (offsets 1-3 cm, fairly constant within a session; the
+  height 1.5-2.5 cm; the radius too large by 5-10 mm when the fit takes in a cap; always upright): drawn a little wider,
+  fixed in the base frame per episode, now and then weakened (so the head cannot only copy it). Needs: the pinch pose
+  in `probe_data`'s labels (to put a base-frame prior in each frame's pinch frame), the prior drawn as the batch loads.
+  On real frames it runs with the recorded head fits directly. For it first: it attacks the real scans' inconsistency
+  and the axis's scatter whatever the look.
+- **How to decide:** if step 2 brings the real scans' spread near the first probe's (9.7 mm) or below, the visual line
+  is working: compositing next. If it barely moves it, the inconsistency is not mostly the look: the residual next.
+
+**Smaller, any time:**
+
+- The axis from the arm, not the image (the objects stand upright: vertical in the base frame, in the pinch frame
+  through the gripper's pose); the probe predicting position and size only, or the axis as a residual from vertical.
+  The closed-loop test found the axis the costliest input (its noise alone 96.5 -> 84.9 %).
+- Shadows in the renders (`camera_cfg(use_shadows=True)`: the real frames have soft ones under the object and the
+  fingers); the skybox per world; the left arm (its camera's view mirrors the right's: train on it too, or mirror).
+- The `multi2` teacher broken down by size (are the thinnest or shortest the 5 points under `multi1`?).
+- `probe_real`: the finger check and the axis's tilt as standing numbers.
+
+**After the probe holds up on real frames:** the closed-loop test again with the best head; then the student (the
+probe's features plus proprioception, distilled from the teacher by DAgger, its errors its own); then the robot. Set
+aside (2026-11-25): the teacher's holding under drifting estimates (a teacher trained with matched noise, or relying
+on the gripper's pose once holding): the student, trained with the probe's errors, should learn it.
+
+## Next (the simulator, 2026-11-14 to 18)
 
 1. **The gripper sweep on both arms** (`gripper_sweep --arm both --out <urdf>`): the left arm's fitted twice, the
    right's to run; a few sweeps per arm to average the hinge.
