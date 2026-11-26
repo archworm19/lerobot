@@ -693,6 +693,45 @@ heads within ~0.3 mm):
 - **Wrong way:** the real radius 5.1 mm too wide (the prior 3.3): from above the bottle's wider cap (38 mm against the
   body's 29) may be what it fits.
 
+### The cylinder refinement, sub-experiment 6: unrolled rounds (run `20261126_125158`, 2026-11-26)
+
+`refine_heads.IterativeSample`: hard geometry repeated, as RAFT refines (each round samples DINO at the current
+cylinder's projected points and at offsets its GRU hidden state predicts, corrects the cylinder, which the next round
+re-projects; the estimate detached between rounds, a loss on every round weighted 0.8 a round from the last).
+`probe_train --heads refine2 --augment` on sub-experiment 5's frames (no new recording); 108 s an epoch, 20.
+
+| head | sim center (median / p90) | sim height / vertical / axis | real scans' spread | real radius error | real height |
+| --- | --- | --- | --- | --- | --- |
+| the prior alone | 21.3 / 40.4 mm | 11.3 / 6.5 mm / 6.1 deg | 0 | +3.3 mm | 53 mm |
+| 1 round (`prior_sample`, as sub-experiment 5) | 4.4 / 10.5 | 4.9 / 2.6 / 1.9 | 7.5 | +3.3 | 52 |
+| 3 rounds, shared weights | 3.8 / 9.8 | 4.5 / 2.4 / 1.8 | 5.6 | +4.0 | 66 |
+| **3 rounds, separate weights** | **3.7 / 9.6** | **4.2 / 2.3 / 1.5** | **5.1** | +4.1 | 63 |
+| 3 rounds, shared, in the image's terms | 3.9 / 10.0 | 4.5 / 2.4 / 1.9 | 5.9 | +4.6 | 60 |
+
+The shared head evaluated at 1 / 2 / 3 / 4 / 5 rounds: 4.3, 3.8, 3.8, 4.0, 4.4 mm (the image's: 4.5, 4.0, 3.9, 4.1,
+4.3).
+
+- **Three rounds beat one by ~15 % in simulation,** in every parameter, the height and the vertical included, the axis
+  0.4 deg better with separate weights; **on real frames the scans' spread 7.5 -> ~5 mm**, near the floor the arm's own
+  pose error between a scan's frames sets; the radius and height near the real objects'.
+- **Separate weights a round slightly the best**; the correction's space does not matter (the image's terms caught up
+  from an early lag); **more rounds than trained do not help** (best at 2-3, drifting after): train with the rounds
+  used.
+- **Settled for now:** hard geometry, three rounds, separate weights; next distractors, then the warm start across a
+  scan's frames.
+
+**Training's speed (2026-11-26).** The GPU sat half idle on the refinement runs: one CPU thread at 100 % (each batch
+gathered from the memory map, the targets built, the priors in numpy, a `float()` of each head's loss every step,
+which waits for the GPU). Fixed: the labels on the GPU once, the priors in torch there (`head_prior.priors_torch`), the
+losses summed on the GPU; batches through a `DataLoader` (`--workers`). Timed on `refine2`'s heads (`--max-steps`,
+a 4090): no workers 5.12 steps a second, 2 of 20 s waiting for batches (~2,600 frames a second against the run's
+~1,900: the fixes on the GPU's side were the gain); 8 workers 4.28 (nothing left to hide: a little overhead).
+**`torch.compile`** (`--compile`; the image needs `gcc` and `python3.12-dev` for Triton's launcher, installed by hand
+for the test): after compiling, 145 ms a step against eager's 185 (22 % faster; 300 steps 50 s against 57 with the
+compiling), but 117 recompiles (the iterative head setting `round_outputs`, `eval_rounds` in its forward: past
+the cache's limit PyTorch falls back to eager). Next: the round outputs returned, the rounds an argument; then `gcc`
+and `python3.12-dev` in the image.
+
 **On the robot (the M1, measured 2026-11-22):** DINOv2 ViT-S/14 at 224 px 17 ms on MPS (25 ms CPU), 448 px 98 ms,
 4 frames at 224 px 58 ms; CoTracker3 online 141 ms a frame on MPS; small PointNets (11k-239k parameters, 256 points)
 0.14-0.76 ms. MLX has DINOv2 Base and Large (mlx-image), not Small; nothing for CoTracker.
@@ -717,8 +756,8 @@ axis's errors are scatter, not a lean. Step 2 (2026-11-26: the randomized look):
 **Next (decided 2026-11-26): the cylinder refinement on the head camera's prior** (RAFT-style; the plan and its
 sub-experiments: "The cylinder refinement: the plan", below), then distractors, then compositing. **Sub-experiments
 0-5 done (2026-11-26):** it works (real scans' spread 7.3 mm, heights right, the corrections ~1 cm); hard geometry the
-best on real frames, tied in simulation. Next sub-experiment 6 (unrolled rounds) on the hard-geometry head, then
-distractors, then the warm start across a scan's frames.
+best on real frames, tied in simulation. Sub-experiment 6 done (2026-11-26): three rounds, separate weights (the
+real scans' spread ~5 mm). Next distractors, then the warm start across a scan's frames.
 
 **The candidates as they were weighed (2026-11-25; decided on step 2's result):**
 
