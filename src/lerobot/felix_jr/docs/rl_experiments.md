@@ -154,6 +154,7 @@ The easiest version that should work: if it does not learn, the environment is w
 | `20261122_174436` | RTX 4090 | 4,096 x 700 | 25 min (the watcher beside it) | train 96.2 % at the end; **no finger contacts, held out 99.4 / 99.8 / 100 / 99.2 / 98.6 %** | **no finger contacts, held out 97.1 / 98.3 / 99.8 / 95.7 / 94.6 %** |
 | `20261122_181122` | RTX 4090 | 4,096 x 700 | 25 min (the watcher beside it) | train 88.0 % at the end; **estimated pose, held out 98.5 / 97.9 / 98.8 / 98.4 / 99.0 %** | **estimated pose, held out 88.9 / 88.8 / 95.4 / 84.1 / 87.1 %** |
 | `20261122_185115` | RTX 4090 | 4,096 x 700 | 24 min (the watcher beside it) | train 87.5 % at the end; **estimated pose, no finger contacts, held out 96.0 / 89.2 / 99.0 / 97.8 / 98.4 %** | **estimated pose, no finger contacts, held out 89.6 / 83.7 / 94.1 / 89.4 / 91.7 %** |
+| `20261125_154528` | RTX 4090 | 4,096 x 700 | 25 min (the watcher beside it) | **`multi2` (15-60 x 40-200 mm), no finger contacts, held out 98.2 / 99.2 / 97.6 / 96.9 / 99.0 % (it. 600)** | **held out 92.1 / 95.3 / 96.0 / 89.4 / 87.7 % (it. 600); 89.9 at 699** |
 
 ### 2026-11-21: the first runs (the positive control)
 
@@ -318,6 +319,30 @@ held-out pool as it is saved, beside the trainer, and `eval.json`'s `held_out` i
   5. A live but noisy, delayed pose (the wrist camera's tracking), between A and B.
   6. The servos' loads, simulated against the robot's (grasps and lifts recorded, replayed in the simulator), before
      trusting any policy that leans on them (B2 above).
+
+### 2026-11-25: `multi2`, objects the size of the real ones (the vision probe's teacher)
+
+- **Why:** the vision probe trained on `multi1` (40-60 mm x 100-200 mm) told every real object 185 mm tall: the real
+  ones are thinner and shorter (bowl8's chapstick 17.5 mm, bowl4's bottle 29 mm, both ~50-60 mm tall;
+  `sim2real_grasp.md`, the probe on real frames).
+- **The bank `multi2`** (`bank.py --diameter-mm 15 60 --height-mm 40 200 --mass-g 20 150 --psi-deg 0 60`): 1,024
+  placements, **973 anchored (95 %)**, as many of the shortest (40-80 mm: 94 %) as of the tallest (96 %); the thin
+  all (15-30 mm: 100 %), the widest least (45-60 mm: 85 %). The short ones anchored by the steepest grasps (~58 deg
+  below horizontal; `multi1`'s side grasps, 0-30 deg, had left a fifth of its shortest, 100-125 mm, unanchored). ~10
+  min on the Mac (2 s a placement on six workers; `multi1`'s 11.6). Pools: `multi2_train` 16,384 starts on 827
+  placements, `multi2_test` 4,096 on 146 (random 15 %); `multi2_placements.png`.
+- **The reach reward's target refit:** where a grasp holds the object (`mjlab_object.GRASP_POINT_FIT`) was fitted on
+  `multi1`'s side grasps; on `multi2`'s in-jaws starts it was up to 15 mm off along the fingers for the thinnest. The fit
+  depends on the grasps' angle, not only the radius (a fit on `multi2` biases `multi1`'s by up to 8 mm): a run's choice,
+  `--grasp-point-fit side|steep` (`GRASP_POINT_FITS`; steep: residual 5.5-7.8 mm by radius, no bias).
+- **A NaN:** the first run (`20261125_152309`) stopped at iteration 432 (42 M steps), the actor's observation NaN (a
+  world's physics diverged, likely a small light object): mjlab's `nan_detection` added as a termination (a
+  truncation: the world reset before its observation, not the policy's failure). Rerun: none in 700 iterations.
+- **`20261125_154528`** (as experiment A: no finger contacts, the live pose; `--grasp-point-fit steep`): **held at the
+  end on the held-out placements 92.1 % at iteration 600** (attack 95.3, at the object 96.0, in the jaws 89.4, lifted
+  87.7; held at some point 98.2 %), 89.9 % at 699. The curve: 75.5, 87.8, 89.5, 88.9, 90.0, 92.1, 89.9. About 5 points
+  under `multi1`'s 97.1 % on a much harder range; the shortfall is again holding on (the gripping starts held at the
+  end 85-89 %, at some point 96-99 %). Not yet broken down by size.
 
 ### Next (decided 2026-11-21)
 

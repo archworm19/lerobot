@@ -506,6 +506,112 @@ every step by the probe's; then the axis point at the jaws' height as the target
 the real wrist frames through the probe (undistorted, 224 x 168) as the background check. The analysis scripts (by
 distance and time; by axis) are scratch for now; the datasets and heads were on the pod, not kept.
 
+### The closed-loop test: the teacher seeing through the probe (`sim2real/probe_loop.py`, 2026-11-25)
+
+Experiment A's teacher on the 140 held-out placements (4,096 worlds, one 12 s episode each, every start pool alike),
+its object inputs (`object_in_root`, `object_in_pinch`, `object_size`) replaced every step; the physics, rewards and
+success on the true state. The probe: the attention head retrained on `probe2`-style data (run `20261125_121616`,
+5.6 / 13.8 mm). The frame a step's estimate comes from is the one rendered at the end of the step before (as the true
+pose's delay); out of view (rare), the last estimate kept.
+
+| condition | held at the end | held at some point | held, then lost | never held |
+| --- | --- | --- | --- | --- |
+| A. the truth (as trained) | 96.7 % | 99.3 % | 2.6 % | 0.7 % |
+| A'. the truth through the replacement (the plumbing) | 96.7 % | 99.3 % | 2.5 % | 0.7 % |
+| **B. the probe, live** | **74.6 %** | **97.5 %** | **22.9 %** | 2.5 % |
+| C. the probe frozen at the reset | 0.0 % | 90.0 % | 90.0 % | 10.0 % |
+| D. the truth + noise matched to the probe's (spread and step-to-step correlation) | 77.9 % | 98.5 % | 20.6 % | 1.5 % |
+| E. the probe, smoothed (an exponential average in the root frame) | 74.1 % | 97.3 % | 23.2 % | 2.7 % |
+
+- **It grasps; it does not keep holding.** With the probe 97.5 % reach a hold (the truth 99.3); the drop is "held,
+  then lost" (23 % against 2.6). At first touch the probe's error is the same for episodes that end held and not
+  (across the jaws 0.9 / 1.1 mm, y 4.9 / 5.0, z 3.3 / 3.5): the grasps are as good; something after loses them.
+- **The errors' size, not the probe's peculiarities:** matched noise loses nearly as much (77.9 %). The errors drift
+  slowly (step-to-step correlation 0.94-0.99), so smoothing does nothing (74.1 %). The frozen estimate fails for a
+  reason of its own: kept in the root frame, the lifted object still "sits on the table" and the teacher lets go
+  (one frame at the reset still reached a hold 90 % of the time, B1's level).
+- **Which input** (matched noise on each alone, run `20261125_130645`; the truth 96.5 % there): the radius 96.6, the
+  center across the jaws 96.4, along the cylinder 95.8, along the fingers 95.3, the height 93.3, **the axis 84.9**,
+  along the cylinder and the height together 90.2, all 77.6. **Why the holds broke** (`--film`, run
+  `20261125_131510`; a hold breaks by being lowered, a finger off, or tilting past `held`'s 10 deg): with the truth
+  99 % a finger off (the gripper's drops); with the probe 48 % only tilted (still gripped and lifted), 37 % not lifted
+  enough, 16 % a finger off; the axis's noise alone 74 % tilted; position and size alone 58 % not lifted enough. The
+  teacher steers by its object inputs after the grasp: told a lean (~1.5 deg of drift), it straightens the real
+  bottle past 10 deg; told the object 10-25 mm higher along it, it stops lifting short. It never had to rely on the
+  gripper's own pose once holding, its inputs near exact. A student distilled with the probe's errors (or a teacher
+  trained with matched noise) should; not pursued for now (2026-11-25: the sim-to-real gap first).
+- Films: `film_truth.mp4`, `film_probe.mp4`, `film_matched_noise[axis].mp4` (16 episodes each: the side view over the
+  wrist frame, the true axis green, the told red).
+
+### The probe on real wrist frames (`sim2real/probe_real.py`, 2026-11-25)
+
+The harness sessions' 97 wrist frames (bowl5-8, ruler2: single views and wrist scans; ruler2's 12 from the left arm,
+reported apart: the probe trained on the right's camera, whose view the left's mirrors), prepared as the simulator
+renders (undistorted, 224 x 168), each with the head camera's cylinder fitted before it. Per head: **scan spread**
+(a scan's frames see one static object from a few wrist rolls: the estimates' farthest from their mean in the root
+frame, median over the scans; no ground truth needed, a few mm of it the arm's own), the radius against the measured
+object's (29 mm bottle body; 17.5 mm chapstick; ~58 mm tapered bottle), the predicted height (the objects ~50-60 mm),
+the offset from the head camera's fit (rough: the head and wrist cameras disagree by 1-3 cm).
+
+- **The first probe (`multi1`, plain rendering):** the attention head's scans spread **9.7 mm**, its radius 12 mm too
+  large and its height 185 mm everywhere (the training's mean: the real objects are outside `multi1`'s sizes); not
+  lost (its estimate mostly on or near the bottle) but confused. **Its attention:** in simulation on the moving
+  finger's tip, the object's foot between the fingers, and the table's far corner where it meets the black past it
+  (a simulator-only landmark); on real frames over the wood grain, the transparent container's rim, the lip balm's cap.
+  The gap: the plain simulated table never taught it to ignore texture.
+
+### The look randomized (`sim2real/appearance.py`, 2026-11-25)
+
+From how others close the visual gap (DextrAH-RGB: HDRI backgrounds 30 % of the time, random table textures, random
+materials, colour jitter, blur; ManiSkill3 with LeRobot on a Koch arm: the real background composited behind the
+simulated robot and cube by the segmentation, 91.6 % zero-shot; SplatSim: Gaussian-splatted scenes, 86 % zero-shot,
+a capture per scene): in-renderer randomization first, compositing next, splats not now. MuJoCo Warp's renderer reads
+per world a geom's material (`geom_matid`), the skybox, the lights, colours and the camera's intrinsics; mjlab wraps
+most (`dr.geom_matid`, `dr.mat_*`, `dr.light_*`, `dr.cam_*`).
+
+- **Procedural textures** (wood grain, planks, mottled, woven, speckled, near plain) baked into 24 table, 12 floor and
+  12 wall materials; **a drawn-only room** in the table's entity: a textured top over the table carried on past its
+  far edge, a floor, three walls (planes: **MuJoCo Warp's renderer textures planes and meshes only**, a box takes one
+  texel's colour), two lights. **At each reset, per world:** the surfaces' materials, the lights' place and tint, the
+  object's colour (about half near white). `env_cfg(appearance=True)`, `--appearance` in `probe_data` and
+  `probe_loop`; the physics unchanged (the smoke test: the robot moves exactly as without). mjlab 1.6's
+  `dr.light_diffuse` declares `light_dir` as its per-world field: wrapped with the right one. Not yet: shadows
+  (`use_shadows`), compositing, the skybox.
+
+### Step 1: the probe on `multi2`, a grid of heads (run `20261125_170330`, 2026-11-25)
+
+The teacher: `multi2`'s (`rl_experiments.md`, `20261125_154528`, iteration 600). Its first 2 s, every 3rd step: 205k
+training frames, 61k held out, plain rendering. `probe_train --heads grid`: the linear and mean heads and attention
+over DINOv2-S's block 6, 9, 12 or 9-12 side by side, with 1 or 4 queries (16 queries dropped: 4x the time); 186 s an
+epoch, 20 epochs.
+
+| head | sim, all (median / p90 mm) | sim, not held | sim radius / height / axis | real scan spread | real radius error | real height |
+| --- | --- | --- | --- | --- | --- | --- |
+| linear | 11.8 / 27.0 | 14.1 / 31.6 | 1.0 / 17.3 mm / 3.2 deg | 33.7 mm | +13.5 mm | 192 mm |
+| mean | 8.0 / 20.8 | 9.1 / 21.4 | 0.6 / 12.0 / 2.1 | 28.0 | +5.7 | 226 |
+| attention (block 12, 4 queries) | 7.1 / 19.5 | 7.7 / 19.9 | 0.5 / 10.9 / 1.8 | 16.9 | +3.7 | 138 |
+| block 6, 1 query | 7.3 / 19.7 | 8.2 / 21.1 | 0.5 / 11.0 / 1.8 | **15.7** | **+3.3** | 146 |
+| block 6, 4 queries | 6.9 / 18.9 | 7.5 / 19.5 | 0.5 / 10.5 / 1.6 | 27.6 | +3.8 | 147 |
+| block 9, 1 query | 7.1 / 19.8 | 7.7 / 20.6 | 0.5 / 10.5 / 1.7 | 20.7 | +8.3 | **82** |
+| block 9, 4 queries | 7.1 / 19.7 | 7.7 / 20.3 | 0.5 / 10.4 / 1.8 | 27.8 | +7.1 | 87 |
+| block 12, 1 query | 7.4 / 19.5 | 8.0 / 20.5 | 0.6 / 11.0 / 1.9 | 28.0 | +5.7 | 150 |
+| blocks 9-12, 1 query | 6.6 / 18.3 | **6.8** / 18.0 | **0.4 / 9.5 / 1.4** | 24.4 | +7.2 | 131 |
+| **blocks 9-12, 4 queries** | **6.3** / 18.9 | 6.6 / 18.2 | 0.4 / 9.6 / 1.5 | 19.1 | +8.0 | 131 |
+| (the first probe's attention, `multi1`) | | | | (9.7) | (+12.0) | (185) |
+
+- **In simulation, blocks 9-12 side by side win** (~10 % on every measure); 1 or 4 queries hardly matter; block 6 is
+  as good as 9 or 12. Harder than `multi1` (5.6 mm): objects from 15 mm thin and 40-200 mm tall.
+- **On real frames the sizes came right and the consistency went wrong:** the radius now 3-8 mm too wide (12 before),
+  the height 82-150 mm (185; the block-9 heads nearest, and nearest the head camera's fit: 8-11 mm across and along
+  the bottle); but the scans spread 16-28 mm (9.7 before): with a harder range of sizes the heads lean on cues that
+  change between real frames. The red cylinder now sits on the bottle's top in most frames; the attention still
+  scattered over the container's rim, the lip balm's cap, the wood (`real_eval` sheets, scratch).
+- **The best head in simulation is not the best on real frames,** and none is best on all real measures: step 2's
+  randomized look is aimed at this. To watch there: the scan spread below the first probe's 9.7 mm with the sizes kept.
+
+**Next:** step 2 (the same with `--appearance` and `probe_train --augment`, ~70 min on a 4090), step 3 (backgrounds
+composited by the segmentation); the real frames scored the same way after each; then the closed-loop test again.
+
 **On the robot (the M1, measured 2026-11-22):** DINOv2 ViT-S/14 at 224 px 17 ms on MPS (25 ms CPU), 448 px 98 ms,
 4 frames at 224 px 58 ms; CoTracker3 online 141 ms a frame on MPS; small PointNets (11k-239k parameters, 256 points)
 0.14-0.76 ms. MLX has DINOv2 Base and Large (mlx-image), not Small; nothing for CoTracker.
