@@ -732,6 +732,32 @@ compiling), but 117 recompiles (the iterative head setting `round_outputs`, `eva
 the cache's limit PyTorch falls back to eager). Next: the round outputs returned, the rounds an argument; then `gcc`
 and `python3.12-dev` in the image.
 
+### Across frames: warm start or average (2026-11-26)
+
+`probe_real --warm-start` (and a scratch script for the variants): the refinement along chains of real frames of one
+static object: the 5 wrist scans (24 frames) and bowl6's 25 single views (one head camera fit, the bottle never
+picked; bowl7's and bowl8's views include the pick, under the same fit: not a static object). The spread of the
+estimates in the root frame (farthest from their mean) and the step between consecutive frames, median (mm):
+
+| head | how | scans: spread / step | bowl6's views: spread / step |
+| --- | --- | --- | --- |
+| 3 rounds, separate | independent (each frame from the head's fit) | 5.1 / 5.9 | 15.9 / 4.8 |
+| | warm, everything carried (the previous estimate the prior) | 6.3 / 6.7 | 29.0 / 5.8 |
+| | warm, the center only (the head's size and axis each frame) | 5.0 / 5.5 | 17.2 / 4.8 |
+| | **the running mean of the independent estimates** (root frame) | **1.8 / 1.0** | **5.2 / 0.6** |
+| 3 rounds, the image's terms | independent / running mean | 4.8 / 5.5, 1.7 / 1.0 | 14.1 / 6.1, 7.4 / 0.6 |
+| 1 round | independent / running mean | 6.1 / 7.7, 2.6 / 1.5 | 19.2 / 7.3, 13.7 / 0.7 |
+
+- **Chaining makes it worse; the center alone, no better.** The heads learned to correct priors 1-3 cm off; given one
+  already close they get no more precise, and add their few mm a frame, which compounds; carrying the refinement's
+  height forward also drops the head camera's (from depth: the better one; the heights drifted to 67-84 mm).
+- **The per-frame errors are largely independent: averaging cancels them.** The mean of each frame's independent
+  refinement settles within ~1 mm a frame; over bowl6's 25 views (the arm moving about) the spread 15.9 -> 5.2 mm.
+- **So the temporal part is a filter over independent refinements from the head's prior** (a running mean, or a
+  Kalman filter: the object static until grasped), not a recurrence; chaining would need training on priors of its own
+  outputs (sub-experiment 10). **The caveat:** a small spread is stable, not shown accurate: a bias common to the
+  frames survives averaging; ground truth on the robot (a marker, a measured placement) tells.
+
 **On the robot (the M1, measured 2026-11-22):** DINOv2 ViT-S/14 at 224 px 17 ms on MPS (25 ms CPU), 448 px 98 ms,
 4 frames at 224 px 58 ms; CoTracker3 online 141 ms a frame on MPS; small PointNets (11k-239k parameters, 256 points)
 0.14-0.76 ms. MLX has DINOv2 Base and Large (mlx-image), not Small; nothing for CoTracker.
@@ -757,7 +783,7 @@ axis's errors are scatter, not a lean. Step 2 (2026-11-26: the randomized look):
 sub-experiments: "The cylinder refinement: the plan", below), then distractors, then compositing. **Sub-experiments
 0-5 done (2026-11-26):** it works (real scans' spread 7.3 mm, heights right, the corrections ~1 cm); hard geometry the
 best on real frames, tied in simulation. Sub-experiment 6 done (2026-11-26): three rounds, separate weights (the
-real scans' spread ~5 mm). Next distractors, then the warm start across a scan's frames.
+real scans' spread ~5 mm). Next distractors. The warm start tried (2026-11-26): chaining hurts, averaging the independent estimates helps (a filter, not a recurrence).
 
 **The candidates as they were weighed (2026-11-25; decided on step 2's result):**
 

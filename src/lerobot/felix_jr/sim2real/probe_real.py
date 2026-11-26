@@ -38,6 +38,7 @@ import numpy as np
 import torch
 
 from .probe_train import (
+    PRIOR_KINDS,
     HeadSpec,
     decode,
     dinov2_small,
@@ -70,6 +71,8 @@ class RealFrame:
     head_fit: tuple[
         np.ndarray, np.ndarray, float, float
     ]  # the head camera's cylinder: center, axis (pinch), r, h
+    fit_id: str = ""  # the head camera fit it follows (frames after one fit: one static object)
+    time: float = 0.0
 
 
 def real_frames(sessions: Sequence[str], root: Path = SESSIONS_DIR) -> list[RealFrame]:
@@ -123,8 +126,99 @@ def real_frames(sessions: Sequence[str], root: Path = SESSIONS_DIR) -> list[Real
                     np.linalg.inv(view.pinch_from_camera),
                     np.asarray(view.root_from_pinch),
                     fit,
+                    f"{name}/{before[-1].id}",
+                    float(view.timestamp),
                 )
             )
+    return out
+
+
+def chains(frames: Sequence[RealFrame], min_length: int = 3) -> dict[str, list[list[int]]]:
+    """Sequences of frames of one static object, in order: each scan's and each run of single views.
+
+    "scans": each wrist scan's frames; "views": each run of single views after one head camera fit, by time (the object
+    stays put until it is picked, and a new fit follows any change).
+    """
+    scans: dict[str, list[int]] = {}
+    views: dict[str, list[int]] = {}
+    for i, f in enumerate(frames):
+        if f.scan is not None:
+            scans.setdefault(f"{f.session}/{f.scan}", []).append(i)
+        else:
+            views.setdefault(f.fit_id, []).append(i)
+    order = {k: sorted(v, key=lambda i: int(frames[i].label.rsplit(".", 1)[1])) for k, v in scans.items()}
+    by_time = {k: sorted(v, key=lambda i: frames[i].time) for k, v in views.items()}
+    return {
+        "scans": [v for v in order.values() if len(v) >= min_length],
+        "views": [v for v in by_time.values() if len(v) >= min_length],
+    }
+
+
+def warm_started(
+    frames: Sequence[RealFrame],
+    chain_sets: dict[str, list[list[int]]],
+    head: torch.nn.Module,
+    spec: HeadSpec,
+    scale: torch.Tensor,
+    dino: torch.nn.Module,
+    device: str,
+) -> dict[int, np.ndarray]:
+    """A prior head run along each chain, warm-started: each frame's prior the previous frame's estimate.
+
+    The first frame's prior is its head camera fit; the next's the previous estimate, through the root frame (the
+    previous pinch pose, then this one's). Returns each chained frame's estimate (8: center, axis, radius, height; its
+    pinch frame).
+    """
+    out: dict[int, np.ndarray] = {}
+    with torch.no_grad():
+        for chain in (c for cs in chain_sets.values() for c in cs):
+            rgb = torch.from_numpy(np.stack([frames[i].rgb for i in chain])).to(device)
+            feats = features(dino, rgb, spec.blocks)
+            current = prior(frames[chain[0]])
+            for j, i in enumerate(chain):
+                if j:  # (the previous estimate, put in this frame's pinch frame)
+                    before, now = frames[chain[j - 1]].root_from_pinch, frames[i].root_from_pinch
+                    move = np.linalg.inv(now) @ before
+                    current = np.concatenate(
+                        [move[:3, :3] @ current[:3] + move[:3, 3], move[:3, :3] @ current[3:6], current[6:8]]
+                    )
+                p = torch.from_numpy(current.astype(np.float32))[None].to(device)
+                one = {b: (c[j : j + 1], t[j : j + 1]) for b, (c, t) in feats.items()}
+                d = decode(run_head(head, spec, one, standardize(p, scale), p), scale)
+                current = np.concatenate(
+                    [d["center"][0].cpu().numpy(), d["axis"][0].cpu().numpy(), d["size"][0].cpu().numpy()]
+                )
+                out[i] = current.copy()
+    return out
+
+
+def chain_scores(
+    frames: Sequence[RealFrame], chain_sets: dict[str, list[list[int]]], center_pinch: dict[int, np.ndarray]
+) -> dict[str, dict[str, float]]:
+    """How much a static object's estimates move along each chain (root frame, mm).
+
+    The spread (the farthest from their mean), median over the chains; the step (between consecutive frames), median
+    over all steps.
+    """
+    out = {}
+    for kind, cs in chain_sets.items():
+        spreads, steps = [], []
+        for chain in cs:
+            pts = np.array(
+                [
+                    frames[i].root_from_pinch[:3, :3] @ center_pinch[i] + frames[i].root_from_pinch[:3, 3]
+                    for i in chain
+                ]
+            )
+            spreads.append(1000 * np.linalg.norm(pts - pts.mean(axis=0), axis=1).max())
+            steps += list(1000 * np.linalg.norm(np.diff(pts, axis=0), axis=1))
+        if cs:
+            out[kind] = {
+                "chains": len(cs),
+                "frames": sum(len(c) for c in cs),
+                "spread_mm": float(np.median(spreads)),
+                "step_mm": float(np.median(steps)),
+            }
     return out
 
 
@@ -322,6 +416,11 @@ def main(argv: list[str] | None = None) -> None:
         "--sheets", nargs="*", default=["attention"], help="heads to draw (default: attention)"
     )
     parser.add_argument("--hub", type=Path, default=None)
+    parser.add_argument(
+        "--warm-start",
+        action="store_true",
+        help="the prior heads also chained along scans and runs of views (each frame's prior the previous estimate)",
+    )
     parser.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
     args = parser.parse_args(argv)
     frames = real_frames(args.sessions)
@@ -342,8 +441,17 @@ def main(argv: list[str] | None = None) -> None:
             if not fs:
                 continue
             est = estimate(fs, heads, specs, scale, dino, args.device)
+            chain_sets = chains(fs) if args.warm_start and group == "right" else {}
             for name, e in est.items():
                 report["heads"].setdefault(f"{tag}/{name}", {})[group] = scores(fs, e)
+                if chain_sets and specs[name].kind in PRIOR_KINDS:
+                    warm = warm_started(fs, chain_sets, heads[name], specs[name], scale, dino, args.device)
+                    report.setdefault("warm_start", {})[f"{tag}/{name}"] = {
+                        "independent": chain_scores(fs, chain_sets, {i: e["center"][i] for i in warm}),
+                        "warm": chain_scores(fs, chain_sets, {i: w[:3] for i, w in warm.items()}),
+                        "warm_radius_mm": float(1000 * np.median([w[6] for w in warm.values()])),
+                        "warm_height_mm": float(1000 * np.median([w[7] for w in warm.values()])),
+                    }
                 if name in args.sheets and group == "right":
                     for session in sorted({f.session for f in fs}):
                         idx = [i for i, f in enumerate(fs) if f.session == session]
@@ -352,6 +460,20 @@ def main(argv: list[str] | None = None) -> None:
                             str(args.out / f"{tag}_{name}_{session}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 85]
                         )
     (args.out / "probe_real.json").write_text(json.dumps(report, indent=1))
+    if "warm_start" in report:
+        print(
+            "warm start (the root frame, mm): spread a chain / step between frames; independent -> warm-started"
+        )
+        for name, w in report["warm_start"].items():
+            line = f"{name:34s}"
+            for kind in ("scans", "views"):
+                a, b = w["independent"].get(kind), w["warm"].get(kind)
+                if a and b:
+                    line += (
+                        f"  {kind} ({a['chains']}, {a['frames']} frames): spread {a['spread_mm']:.1f} -> "
+                        f"{b['spread_mm']:.1f}, step {a['step_mm']:.1f} -> {b['step_mm']:.1f}"
+                    )
+            print(line + f"; warm r {w['warm_radius_mm']:.0f} h {w['warm_height_mm']:.0f} mm")
     print(f"{len(right)} right-arm frames, {len(left)} left-arm")
     print(
         f"{'head':34s} {'scan spread':>12s} {'radius err':>11s} {'height':>7s}  offset from the head fit x/y/z"
