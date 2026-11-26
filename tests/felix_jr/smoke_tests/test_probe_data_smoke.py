@@ -86,3 +86,24 @@ def test_the_labelled_object_is_the_rendered_one(tmp_path):
             rendered = np.isin(seg[i, ..., 0], ids) & (seg[i, ..., 1] == MJ_OBJ_GEOM)
             iou = (drawn.astype(bool) & rendered).sum() / (drawn.astype(bool) | rendered).sum()
             assert iou > 0.95, (i, moves, iou)
+
+
+def test_the_pinch_pose_labels_put_the_root_pose_in_the_pinch_frame(tmp_path):
+    """`probe_data`'s pinch pose (`mjlab_task.pinch_pose`) and `head_prior.to_pinch` take the object's root-frame pose
+    to exactly its pinch-frame pose (`in_pinch`): the quaternions' convention agrees, before and after the arm moves."""
+    from lerobot.felix_jr.sim2real import mjlab_task as task
+    from lerobot.felix_jr.sim2real.head_prior import to_pinch
+
+    model = XleRobotModel.load(api.MODEL)
+    path = tmp_path / "pool.npz"
+    _pool(model).save(path)
+    env = me.make_env(me.env_cfg(model, num_envs=2, start_pool=path, randomize=False), "cpu")
+    env.reset()
+    cyl = obj.of(env)
+    for moves in (0, 3):
+        for _ in range(moves):
+            env.step(0.3 * torch.ones(2, env.action_manager.total_action_dim))
+        pos, quat = task.pinch_pose(env)
+        root = np.concatenate([cyl.in_root(env).numpy(), cyl.size(env).numpy()], axis=1)
+        pinch = to_pinch(root, pos.numpy(), quat.numpy())
+        assert np.allclose(pinch[:, :6], cyl.in_pinch(env).numpy(), atol=1e-5), moves

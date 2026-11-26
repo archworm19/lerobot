@@ -12,6 +12,8 @@ itself avoids). Every `--every`-th step, each world's wrist frame (`render_bench
 - `in_pinch` (N, 6), `in_root` (N, 6): the object's center and axis in the pinch frame and the root frame, live and
   without noise (`MjlabCylinder.in_pinch`, `in_root`: the actor's `object_in_pinch`, `object_in_root`);
 - `size` (N, 2): its radius and height (true);
+- `pinch_pos` (N, 3), `pinch_quat` (N, 4, w x y z): the gripper's pinch frame in the root frame (what the robot knows
+  from its joints: a base-frame estimate put in each frame's pinch frame, `head_prior`);
 - `visible` (N,): the share of the frame that is the object (the camera's segmentation);
 - `held` (N,): held as the reward counts it; `pool` (N,): the start's pool (an index into `pools`); `row` (N,): the
   start's row in the pool file; `step` (N,): the step in the episode; `world`, `round` (N,).
@@ -87,7 +89,20 @@ def record(
     )
     labels: dict[str, list[np.ndarray]] = {
         k: []
-        for k in ("in_pinch", "in_root", "size", "visible", "held", "pool", "row", "step", "world", "round")
+        for k in (
+            "in_pinch",
+            "in_root",
+            "size",
+            "pinch_pos",
+            "pinch_quat",
+            "visible",
+            "held",
+            "pool",
+            "row",
+            "step",
+            "world",
+            "round",
+        )
     }
     pool_index = {p: i for i, p in enumerate(POOLS)}
     started, at = time.perf_counter(), 0
@@ -106,6 +121,9 @@ def record(
                 # (copies: on the CPU device `.cpu().numpy()` is a view, and these buffers change in place)
                 rows = term.rows.cpu().numpy().copy()
                 labels["in_pinch"].append(cyl.in_pinch(env).cpu().numpy())
+                pos, quat = task.pinch_pose(env)
+                labels["pinch_pos"].append(pos.cpu().numpy().copy())
+                labels["pinch_quat"].append(quat.cpu().numpy().copy())
                 labels["in_root"].append(cyl.in_root(env).cpu().numpy())
                 labels["size"].append(cyl.size(env).cpu().numpy())
                 labels["visible"].append(object_share(env, cyl).cpu().numpy())

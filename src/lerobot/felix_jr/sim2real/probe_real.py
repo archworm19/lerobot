@@ -16,6 +16,10 @@ every `--heads` file runs on them (`probe_train.load_heads`; DINOv2-S once a fra
 - **the offset from the head camera's fit** in the pinch frame (median |x|, |y|, |z|, mm): a rough reference only (the
   head and the wrist cameras disagree by 1-3 cm: `object_grasping.md`, the wrist silhouettes).
 
+The head camera's fits themselves are scored too ("the prior alone": the cylinder refinement's reference; its scans'
+spread zero by construction, one fit for a scan's frames, and its offset from itself zero: its size the number to
+read); `prior` gives a frame's fit as a prior.
+
 Frames from the left arm are reported apart (the probe was trained on the right arm's camera, whose view the left's
 mirrors). Writes `<out>/probe_real.json` and, for the `--sheets` heads, a sheet a session: each frame with the head's
 cylinder (red) and the head camera's (blue), and the head's attention (summed over its queries).
@@ -139,6 +143,18 @@ def estimate(
                 for k, v in d.items():
                     out[name].setdefault(k, []).append(v.float().cpu().numpy())
     return {n: {k: np.concatenate(v) for k, v in d.items()} for n, d in out.items()}
+
+
+def prior(frame: RealFrame) -> np.ndarray:
+    """The frame's head camera fit as a prior (8,: center, axis, radius, height; pinch frame), as `head_prior.priors`."""
+    center, axis, radius, height = frame.head_fit
+    return np.concatenate([center, axis, [radius, height]])
+
+
+def head_fit_estimate(frames: Sequence[RealFrame]) -> dict[str, np.ndarray]:
+    """The head camera's fits as if they were a head's estimates: the prior alone, the refinement's reference."""
+    p = np.stack([prior(f) for f in frames])
+    return {"center": p[:, :3], "axis": p[:, 3:6], "size": p[:, 6:8], "in_view": np.ones(len(frames), bool)}
 
 
 def scores(frames: Sequence[RealFrame], est: dict[str, np.ndarray]) -> dict[str, Any]:
@@ -297,6 +313,11 @@ def main(argv: list[str] | None = None) -> None:
     dino = dinov2_small(args.device, args.hub)
     args.out.mkdir(parents=True, exist_ok=True)
     report: dict[str, Any] = {"frames": {"right": len(right), "left": len(left)}, "heads": {}}
+    for group, fs in (("right", right), ("left", left)):  # (the prior alone: the reference)
+        if fs:
+            report["heads"].setdefault("head_fit (the prior alone)", {})[group] = scores(
+                fs, head_fit_estimate(fs)
+            )
     for path in args.heads:
         heads, specs, scale = load_heads(path, args.device)
         tag = path.parent.name
