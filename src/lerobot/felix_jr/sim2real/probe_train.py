@@ -57,6 +57,9 @@ class HeadSpec:
     kind: str
     blocks: tuple[int, ...] = (BLOCKS,)
     queries: int = QUERIES
+    rounds: int = 1  # (the iterative prior head's: `refine_heads.IterativeSample`)
+    shared: bool = True
+    space: str = "pinch"
 
 
 BASIC_SPECS = (
@@ -81,8 +84,17 @@ REFINE_SPECS = (
     HeadSpec("prior_soft", "prior_soft", REFINE_BLOCKS, 4),
     HeadSpec("prior_sample", "prior_sample", REFINE_BLOCKS),
 )
-SPECS = {"basic": BASIC_SPECS, "grid": GRID_SPECS, "refine": REFINE_SPECS}
-PRIOR_KINDS = ("residual_mlp", "prior_query", "prior_soft", "prior_sample")
+# sub-experiment 6: hard geometry unrolled (`refine_heads.IterativeSample`) against its one-round self
+REFINE2_SPECS = (
+    HeadSpec("prior_sample", "prior_sample", REFINE_BLOCKS),
+    HeadSpec("iter3_shared", "prior_iter", REFINE_BLOCKS, rounds=3, shared=True),
+    HeadSpec("iter3_separate", "prior_iter", REFINE_BLOCKS, rounds=3, shared=False),
+    HeadSpec("iter3_shared_image", "prior_iter", REFINE_BLOCKS, rounds=3, shared=True, space="image"),
+)
+SPECS = {"basic": BASIC_SPECS, "grid": GRID_SPECS, "refine": REFINE_SPECS, "refine2": REFINE2_SPECS}
+PRIOR_KINDS = ("residual_mlp", "prior_query", "prior_soft", "prior_sample", "prior_iter")
+ROUND_WEIGHT = 0.8  # each round's loss weighted ROUND_WEIGHT ** (rounds left after it), as RAFT's
+EVAL_ROUNDS = (1, 2, 3, 4, 5)  # a shared iterative head evaluated at each of these too
 # the heads of files written before the specs were (their names: the basic ones)
 LEGACY = {s.name: s for s in BASIC_SPECS}
 
@@ -199,7 +211,7 @@ def build(spec: HeadSpec, camera: dict[str, Any] | None = None) -> nn.Module:
     if spec.kind in PRIOR_KINDS:
         from .refine_heads import build_prior_head
 
-        return build_prior_head(spec.kind, width, spec.queries, camera)
+        return build_prior_head(spec.kind, width, spec.queries, camera, spec.rounds, spec.shared, spec.space)
     raise ValueError(f"no head kind {spec.kind!r}")
 
 
@@ -455,6 +467,16 @@ def evaluate(
             for name, h in heads.items():
                 out = decode(run_head(h, specs[name], feats, prior_z, prior), scale)
                 preds[name].append({k: v.cpu().numpy() for k, v in out.items()})
+                if (
+                    specs[name].kind == "prior_iter" and specs[name].shared
+                ):  # (more or fewer rounds than trained)
+                    for r in EVAL_ROUNDS:
+                        h.eval_rounds = r
+                        out = decode(run_head(h, specs[name], feats, prior_z, prior), scale)
+                        preds.setdefault(f"{name}@{r}", []).append(
+                            {k: v.cpu().numpy() for k, v in out.items()}
+                        )
+                    h.eval_rounds = None
     target = data.targets()
     seen = data.visible
     dist = np.linalg.norm(target[:, :3], axis=1)
@@ -549,6 +571,7 @@ def train(
         from .refine_heads import sim_camera
 
         camera = sim_camera()
+        camera["scale"] = scale.cpu().numpy()  # (the iterative head re-projects between rounds)
     mean_size = seen_targets[:, 6:8].mean(axis=0)
     test_table = test.prior_table(seed + 10_000) if uses_prior else None  # (the same priors every evaluation)
     heads = {s.name: build(s, camera).to(device) for s in specs}
@@ -577,7 +600,15 @@ def train(
                 rgb = augment(rgb)
             feats = features(dino, rgb, blocks)
             for name, h in heads.items():
-                value = loss(run_head(h, by_name[name], feats, prior_z, prior), target, seen, scale)
+                output = run_head(h, by_name[name], feats, prior_z, prior)
+                rounds = getattr(h, "round_outputs", None)
+                if rounds:  # (an iterative head: a loss on every round, the later weighted more)
+                    w = [ROUND_WEIGHT ** (len(rounds) - 1 - r) for r in range(len(rounds))]
+                    value = sum(
+                        wi * loss(o, target, seen, scale) for wi, o in zip(w, rounds, strict=True)
+                    ) / sum(w)
+                else:
+                    value = loss(output, target, seen, scale)
                 optims[name].zero_grad(set_to_none=True)
                 value.backward()
                 optims[name].step()

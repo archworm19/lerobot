@@ -255,16 +255,158 @@ class PriorSample(_Corrector):
         return self.correct(prior_z, self.out(torch.cat([pooled[:, 0], e], dim=1)))
 
 
+class _Round(nn.Module):
+    """One round of `IterativeSample`: sample, attend, update the hidden state, predict a correction.
+
+    The samples at the current cylinder's projected points and at offsets the hidden state predicts; the correction
+    starts at none.
+    """
+
+    def __init__(self, heads: int = 4) -> None:
+        super().__init__()
+        self.offsets = nn.Linear(WIDTH, POINTS * 2)
+        nn.init.zeros_(self.offsets.weight)
+        nn.init.zeros_(self.offsets.bias)
+        self.point_id = nn.Parameter(0.02 * torch.randn(POINTS, WIDTH))
+        self.missing = nn.Parameter(torch.zeros(WIDTH))
+        self.norm = nn.LayerNorm(WIDTH)
+        self.query = nn.Parameter(0.02 * torch.randn(1, WIDTH))
+        self.attend = nn.MultiheadAttention(WIDTH, heads, batch_first=True)
+        self.gru = nn.GRUCell(2 * WIDTH, WIDTH)
+        self.out = _mlp(WIDTH)
+
+    def forward(
+        self,
+        fmap: torch.Tensor,
+        hidden: torch.Tensor,
+        embedded: torch.Tensor,
+        grid: torch.Tensor,
+        valid: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(the hidden state, the correction (B, 9), the attention's weights)."""
+        b = len(fmap)
+        step = torch.tensor([2 / GRID[1], 2 / GRID[0]], device=grid.device)
+        grid = grid + 3 * torch.tanh(self.offsets(hidden).reshape(b, POINTS, 2)) * step
+        sampled = nn.functional.grid_sample(fmap, grid[:, :, None], mode="bilinear", align_corners=False)
+        tokens = sampled[..., 0].transpose(1, 2)
+        tokens = torch.where(valid[..., None], tokens, self.missing.expand_as(tokens))
+        tokens = self.norm(tokens + self.point_id)
+        q = self.query[None].expand(b, -1, -1) + hidden[:, None]
+        pooled, weights = self.attend(q, tokens, tokens, need_weights=True)
+        hidden = self.gru(torch.cat([pooled[:, 0], embedded], dim=1), hidden)
+        return hidden, self.out(hidden), weights
+
+
+class IterativeSample(_Corrector):
+    """Hard geometry unrolled, as RAFT refines (sub-experiment 6).
+
+    Each round samples DINO at the current cylinder's projected points, updates a hidden state (a GRU cell) and
+    corrects the cylinder, which the next round re-projects. `rounds` (at evaluation `eval_rounds` may run more, with
+    `shared` weights); `shared`: one round's weights for all, else a round's own; `space`: the correction in the pinch
+    frame (the center and size standardized, as the other heads) or in the image's terms ("image": the projected
+    center's shift in pixels, the log of its depth, the logs of the radius and height: a pixel the same near and far).
+    The estimate detached between rounds (RAFT), each round's output kept (`round_outputs`) for a loss on every round.
+    """
+
+    def __init__(
+        self,
+        width: int,
+        cam_from_pinch: np.ndarray | None = None,
+        k: np.ndarray | None = None,
+        scale: np.ndarray | None = None,
+        rounds: int = 3,
+        shared: bool = True,
+        space: str = "pinch",
+    ) -> None:
+        """The rounds; `scale` (2, 8): the targets' standardization (mean, std), to re-project between rounds."""
+        super().__init__(width, cam_from_pinch, k)
+        if space not in ("pinch", "image"):
+            raise ValueError(f"space: pinch or image, not {space!r}")
+        self.rounds, self.shared, self.space = rounds, shared, space
+        default = np.stack([np.zeros(8), np.ones(8)])
+        self.register_buffer(
+            "scale", torch.as_tensor(scale if scale is not None else default, dtype=torch.float32)
+        )
+        self.steps = nn.ModuleList([_Round() for _ in range(1 if shared else rounds)])
+        self.eval_rounds: int | None = None
+        self.round_outputs: list[torch.Tensor] = []
+
+    def _metric(self, z: torch.Tensor) -> torch.Tensor:
+        mean, std = self.scale
+        m = z * std + mean
+        axis = nn.functional.normalize(z[:, 3:6], dim=1)
+        return torch.cat([m[:, :3], axis, m[:, 6:7].clamp(min=0.003), m[:, 7:8].clamp(min=0.01)], dim=1)
+
+    def _standard(self, m: torch.Tensor) -> torch.Tensor:
+        mean, std = self.scale
+        z = (m - mean) / std
+        return torch.cat([z[:, :3], m[:, 3:6], z[:, 6:8]], dim=1)
+
+    def _corrected(
+        self, z: torch.Tensor, m: torch.Tensor, delta: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The corrected cylinder: (standardized, in meters)."""
+        if self.space == "pinch":
+            new_z = z + delta[:, :8]
+            return new_z, self._metric(new_z)
+        t, k = self.projector.cam_from_pinch, self.projector.k
+        cam = m[:, :3] @ t[:3, :3].T + t[:3, 3]
+        depth = cam[:, 2:3].clamp(min=1e-3)
+        u = k[0, 0] * cam[:, :1] / depth + k[0, 2] + 10.0 * delta[:, 0:1]  # (10 px a unit)
+        v = k[1, 1] * cam[:, 1:2] / depth + k[1, 2] + 10.0 * delta[:, 1:2]
+        depth = depth * torch.exp(0.1 * delta[:, 2:3])
+        cam = torch.cat([(u - k[0, 2]) * depth / k[0, 0], (v - k[1, 2]) * depth / k[1, 1], depth], dim=1)
+        center = (cam - t[:3, 3]) @ t[:3, :3]
+        axis = nn.functional.normalize(m[:, 3:6] + delta[:, 3:6], dim=1)
+        size = m[:, 6:8] * torch.exp(0.1 * delta[:, 6:8])
+        new_m = torch.cat([center, axis, size], dim=1)
+        return self._standard(new_m), new_m
+
+    def forward(
+        self, cls: torch.Tensor, patches: torch.Tensor, prior_z: torch.Tensor, prior: torch.Tensor
+    ) -> torch.Tensor:
+        """The last round's corrected cylinder (B, 9)."""
+        b = len(patches)
+        fmap = self.project_in(patches).transpose(1, 2).reshape(b, WIDTH, *GRID)
+        rounds = self.eval_rounds if (self.eval_rounds and self.shared) else self.rounds
+        z, m = prior_z[:, :8], prior
+        hidden = torch.tanh(self.embed(prior_z))
+        self.round_outputs = []
+        weights = torch.zeros(0)
+        for r in range(rounds):
+            step = self.steps[0 if self.shared else r]
+            grid, valid = self.projector(m)
+            hidden, delta, weights = step(fmap, hidden, self.embed(z), grid, valid)
+            z, m = self._corrected(z, m, delta)
+            self.round_outputs.append(torch.cat([z, delta[:, 8:9]], dim=1))
+            z, m = z.detach(), m.detach()  # (RAFT: the estimate detached between rounds)
+        self.last_weights = weights.detach()
+        return self.round_outputs[-1]
+
+
 KINDS = {
     "residual_mlp": ResidualMLP,
     "prior_query": PriorQuery,
     "prior_soft": PriorQuery,
     "prior_sample": PriorSample,
+    "prior_iter": IterativeSample,
 }
 
 
-def build_prior_head(kind: str, width: int, queries: int, camera: dict[str, Any] | None = None) -> nn.Module:
-    """The prior head of `kind` on tokens `width` wide; `camera` ({"cam_from_pinch", "k"}): the wrist camera's."""
+def build_prior_head(
+    kind: str,
+    width: int,
+    queries: int,
+    camera: dict[str, Any] | None = None,
+    rounds: int = 1,
+    shared: bool = True,
+    space: str = "pinch",
+) -> nn.Module:
+    """The prior head of `kind` on tokens `width` wide.
+
+    `camera` ({"cam_from_pinch", "k"}, and "scale" for the iterative head): the wrist camera's; `rounds`, `shared`,
+    `space`: the iterative head's (`IterativeSample`).
+    """
     cam = camera or {}
     args = (width, cam.get("cam_from_pinch"), cam.get("k"))
     if kind == "residual_mlp":
@@ -275,6 +417,8 @@ def build_prior_head(kind: str, width: int, queries: int, camera: dict[str, Any]
         return PriorQuery(*args, queries=queries, soft=True)
     if kind == "prior_sample":
         return PriorSample(*args)
+    if kind == "prior_iter":
+        return IterativeSample(*args, scale=cam.get("scale"), rounds=rounds, shared=shared, space=space)
     raise ValueError(f"no prior head kind {kind!r}")
 
 

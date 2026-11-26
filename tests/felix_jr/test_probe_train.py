@@ -156,3 +156,52 @@ def test_prior_heads_learn_to_correct_and_need_a_prior():
     assert float(value) < 0.5 * first
     with pytest.raises(ValueError):
         run_head(head, spec, feats)
+
+
+def test_the_iterative_head_starts_as_its_prior_and_runs_its_rounds():
+    """Untrained, every variant (shared or not, the pinch frame's or the image's corrections) returns its prior (in the
+    image's terms that is a projection there and back: exact); a shared head runs more rounds when asked, a separate
+    one its own; each round's output kept."""
+    import numpy as np
+
+    from lerobot.felix_jr.sim2real.probe_train import HeadSpec, build, run_head
+
+    camera = _camera() | {"scale": np.stack([np.zeros(8), np.ones(8)])}
+    feats = {12: (torch.randn(3, DIM), torch.randn(3, GRID[0] * GRID[1], DIM))}
+    prior = torch.tensor([[0.01, -0.02, 0.05, 0.0, 1.0, 0.0, 0.02, 0.1]] * 3)
+    for shared in (True, False):
+        for space in ("pinch", "image"):
+            spec = HeadSpec("i", "prior_iter", (12,), rounds=3, shared=shared, space=space)
+            head = build(spec, camera)
+            out = run_head(head, spec, feats, prior, prior)
+            assert torch.allclose(out[:, :8], prior, atol=1e-5), (shared, space)
+            assert len(head.round_outputs) == 3
+            head.eval_rounds = 5
+            run_head(head, spec, feats, prior, prior)
+            assert len(head.round_outputs) == (5 if shared else 3), (shared, space)
+
+
+def test_the_iterative_head_learns_with_a_loss_on_every_round():
+    import numpy as np
+
+    from lerobot.felix_jr.sim2real.probe_train import HeadSpec, build, loss, run_head
+
+    torch.manual_seed(0)
+    spec = HeadSpec("i", "prior_iter", (12,), rounds=3, shared=True)
+    head = build(spec, _camera() | {"scale": np.stack([np.zeros(8), np.ones(8)])})
+    feats = {12: (torch.randn(16, DIM), torch.randn(16, GRID[0] * GRID[1], DIM))}
+    target = torch.tensor([[0.01, 0.0, 0.05, 0.0, 1.0, 0.0, 0.02, 0.1]] * 16)
+    prior = target.clone()
+    prior[:, 0] += 0.02
+    scale = torch.stack([torch.zeros(8), torch.ones(8)])
+    seen = torch.ones(16, dtype=torch.bool)
+    opt = torch.optim.Adam(head.parameters(), lr=1e-2)
+    values = []
+    for _ in range(30):
+        run_head(head, spec, feats, prior, prior)
+        value = sum(loss(o, target, seen, scale) for o in head.round_outputs) / 3
+        values.append(float(value))
+        opt.zero_grad()
+        value.backward()
+        opt.step()
+    assert values[-1] < 0.5 * values[0]
