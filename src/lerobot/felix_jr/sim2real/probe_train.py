@@ -286,11 +286,64 @@ def augment(rgb: torch.Tensor, generator: torch.Generator | None = None) -> torc
     return (x.clamp(0, 1) * 255).round().to(torch.uint8)
 
 
+class FrameBatches(torch.utils.data.Dataset):
+    """A `probe_data` folder's frames served a batch at a time.
+
+    An item is a list of frame indices (a `BatchSampler`'s), read in order from the memory-mapped file (opened in each
+    worker: a memory map handed to a worker would be pickled whole). Returns (frames (B, H, W, 3) uint8, their indices
+    (B,), sorted).
+    """
+
+    def __init__(self, folder: Path) -> None:
+        """The frames' file."""
+        self.path = folder / "frames.npy"
+        self.n = int(np.load(self.path, mmap_mode="r").shape[0])
+        self._frames: np.ndarray | None = None
+
+    def __len__(self) -> int:
+        """The frames."""
+        return self.n
+
+    def __getitem__(self, idx: Any) -> tuple[torch.Tensor, torch.Tensor]:
+        """A batch's frames and indices."""
+        if self._frames is None:
+            self._frames = np.load(self.path, mmap_mode="r")
+        order = np.sort(np.asarray(idx))
+        return torch.from_numpy(np.ascontiguousarray(self._frames[order])), torch.from_numpy(order)
+
+
+def loader(
+    folder: Path, batch: int, shuffle: bool, workers: int, seed: int = 0, device: str = "cpu"
+) -> torch.utils.data.DataLoader:
+    """A `DataLoader` of `FrameBatches`: `workers` processes gather the batches ahead (prefetched, pinned).
+
+    `shuffle`: random batches of `batch` (the last partial one dropped), else in order (all of them).
+    """
+    data = FrameBatches(folder)
+    gen = torch.Generator().manual_seed(seed)
+    base = (
+        torch.utils.data.RandomSampler(data, generator=gen)
+        if shuffle
+        else torch.utils.data.SequentialSampler(data)
+    )
+    sampler = torch.utils.data.BatchSampler(base, batch, drop_last=shuffle)
+    return torch.utils.data.DataLoader(
+        data,
+        sampler=sampler,
+        batch_size=None,
+        num_workers=workers,
+        pin_memory=device.startswith("cuda"),
+        prefetch_factor=4 if workers > 0 else None,
+        persistent_workers=workers > 0,
+    )
+
+
 class ProbeData:
     """A `probe_data` folder: its frames (memory-mapped) and labels."""
 
     def __init__(self, folder: Path) -> None:
         """The frames and labels of `folder`."""
+        self.folder = folder
         self.frames = np.load(folder / "frames.npy", mmap_mode="r")
         labels = np.load(folder / "labels.npz")
         self.labels = {k: labels[k] for k in labels.files if k not in ("pools", "summary")}
@@ -315,6 +368,22 @@ class ProbeData:
 
         _, pinch = priors(self.labels, np.sort(idx), table, mean_size)
         return torch.from_numpy(pinch.astype(np.float32)).to(device)
+
+    def on_device(self, device: str) -> dict[str, torch.Tensor]:
+        """The labels the training loop needs, as tensors on `device`, once.
+
+        The targets, in view, and the columns the priors are drawn from (`head_prior.priors_torch`).
+        """
+        out = {
+            "targets": torch.from_numpy(self.targets()).to(device),
+            "visible": torch.from_numpy(self.visible).to(device),
+        }
+        if self.has_pinch_pose:
+            for k in ("round", "world"):
+                out[k] = torch.from_numpy(self.labels[k].astype(np.int64)).to(device)
+            for k in ("in_root", "size", "pinch_pos", "pinch_quat"):
+                out[k] = torch.from_numpy(self.labels[k].astype(np.float32)).to(device)
+        return out
 
     def targets(self) -> np.ndarray:
         """(N, 8): the center, the axis, the radius and height."""
@@ -439,6 +508,7 @@ def evaluate(
     batch: int,
     prior_table: Any = None,
     mean_size: np.ndarray | None = None,
+    workers: int = 0,
 ) -> dict[str, Any]:
     """Each head's errors on `data`, with the priors' when given.
 
@@ -451,15 +521,22 @@ def evaluate(
     for h in heads.values():
         h.eval()
     blocks = _blocks(specs)
+    labels = data.on_device(device)
+    table_t = mean_t = None
+    if prior_table is not None:
+        from .head_prior import priors_torch, table_to_torch
+
+        assert mean_size is not None
+        table_t = table_to_torch(prior_table, device)
+        mean_t = torch.as_tensor(mean_size, dtype=torch.float32, device=device)
     with torch.no_grad():
-        for start in range(0, data.n, batch):
-            idx = np.arange(start, min(start + batch, data.n))
-            rgb, _, _ = data.batch(idx, device)
+        for frames, idx in loader(data.folder, batch, False, workers, device=device):
+            rgb = frames.to(device, non_blocking=True)
+            idx = idx.to(device)
             feats = features(dino, rgb, blocks)
             prior = prior_z = None
-            if prior_table is not None:
-                assert mean_size is not None
-                prior = data.priors(idx, prior_table, mean_size, device)
+            if table_t is not None:
+                prior = priors_torch(labels, idx, table_t, mean_t)
                 prior_z = standardize(prior, scale)
                 p = {"center": prior[:, :3], "axis": prior[:, 3:6], "size": prior[:, 6:8]}
                 p["in_view"] = torch.ones(len(prior), dtype=torch.bool, device=device)
@@ -548,10 +625,16 @@ def train(
     seed: int = 0,
     specs: tuple[HeadSpec, ...] = BASIC_SPECS,
     augmented: bool = False,
+    workers: int = 8,
+    max_steps: int | None = None,
+    compiled: bool = False,
 ) -> dict[str, Any]:
-    """The heads trained (the module docstring); returns the metrics."""
+    """The heads trained (the module docstring); returns the metrics.
+
+    `workers`: processes gathering the batches ahead (0: in this one); `max_steps`: at most this many batches an epoch
+    (a timing run); `compiled`: the heads `torch.compile`d in place (`nn.Module.compile`).
+    """
     torch.manual_seed(seed)
-    rng = np.random.default_rng(seed)
     dino = dinov2_small(device, hub)
     data, test = ProbeData(train_dir), ProbeData(test_dir)
     seen_targets = data.targets()[data.visible]
@@ -575,26 +658,39 @@ def train(
     mean_size = seen_targets[:, 6:8].mean(axis=0)
     test_table = test.prior_table(seed + 10_000) if uses_prior else None  # (the same priors every evaluation)
     heads = {s.name: build(s, camera).to(device) for s in specs}
+    if compiled:
+        for h in heads.values():
+            h.compile()
     blocks = _blocks(by_name)
-    steps = epochs * (data.n // batch)
+    labels = data.on_device(device)
+    mean_t = torch.as_tensor(mean_size, dtype=torch.float32, device=device)
+    batches = loader(data.folder, batch, True, workers, seed, device)
+    per_epoch = min(len(batches), max_steps) if max_steps else len(batches)
+    steps = epochs * per_epoch
     optims = {name: torch.optim.AdamW(h.parameters(), lr=lr, weight_decay=1e-4) for name, h in heads.items()}
     sched = {name: torch.optim.lr_scheduler.CosineAnnealingLR(o, max(steps, 1)) for name, o in optims.items()}
     out.mkdir(parents=True, exist_ok=True)
     history = []
     started = time.perf_counter()
     for epoch in range(epochs):
-        order = rng.permutation(data.n)
-        table = (
-            data.prior_table(seed + epoch) if uses_prior else None
-        )  # (the head's errors drawn again each epoch)
-        losses = dict.fromkeys(heads, 0.0)
-        nb = max(data.n // batch, 1)
-        for b in range(nb):
-            idx = order[b * batch : (b + 1) * batch]
-            rgb, target, seen = data.batch(idx, device)
+        table = None
+        if uses_prior:  # (the head's errors drawn again each epoch)
+            from .head_prior import priors_torch, table_to_torch
+
+            table = table_to_torch(data.prior_table(seed + epoch), device)
+        losses = {name: torch.zeros((), device=device) for name in heads}
+        epoch_started, waited = time.perf_counter(), 0.0
+        fetched = time.perf_counter()
+        for step, (frames, idx) in enumerate(batches):
+            if step >= per_epoch:
+                break
+            waited += time.perf_counter() - fetched
+            rgb = frames.to(device, non_blocking=True)
+            idx = idx.to(device, non_blocking=True)
+            target, seen = labels["targets"][idx], labels["visible"][idx]
             prior = prior_z = None
             if table is not None:
-                prior = data.priors(idx, table, mean_size, device)
+                prior = priors_torch(labels, idx, table, mean_t)
                 prior_z = standardize(prior, scale)
             if augmented:
                 rgb = augment(rgb)
@@ -613,9 +709,16 @@ def train(
                 value.backward()
                 optims[name].step()
                 sched[name].step()
-                losses[name] += float(value.detach()) / nb
-        metrics = evaluate(dino, heads, by_name, test, scale, device, batch, test_table, mean_size)
-        history.append({"epoch": epoch, "loss": losses, "test": metrics})
+                losses[name] += value.detach() / per_epoch  # (on the device: no wait for it every step)
+            fetched = time.perf_counter()
+        train_s = time.perf_counter() - epoch_started
+        print(
+            f"epoch {epoch + 1}: {per_epoch} steps in {train_s:.0f} s ({per_epoch / train_s:.2f} a second), "
+            f"{waited:.0f} s of it waiting for batches",
+            flush=True,
+        )
+        metrics = evaluate(dino, heads, by_name, test, scale, device, batch, test_table, mean_size, workers)
+        history.append({"epoch": epoch, "loss": {n: float(v) for n, v in losses.items()}, "test": metrics})
         line = ", ".join(
             f"{n} {m['center_mm'].get('median', float('nan')):.1f}/{m['center_mm'].get('p90', float('nan')):.1f}"
             for n, m in metrics.items()
@@ -664,6 +767,13 @@ def main(argv: list[str] | None = None) -> None:
         "--augment", action="store_true", help="jitter the training frames' colours (`augment`)"
     )
     parser.add_argument(
+        "--workers", type=int, default=8, help="processes gathering the batches ahead (0: none)"
+    )
+    parser.add_argument(
+        "--max-steps", type=int, default=None, help="at most this many batches an epoch (timing)"
+    )
+    parser.add_argument("--compile", action="store_true", help="torch.compile the heads (in place)")
+    parser.add_argument(
         "--eval-only",
         type=Path,
         default=None,
@@ -678,7 +788,9 @@ def main(argv: list[str] | None = None) -> None:
         uses_prior = any(sp.kind in PRIOR_KINDS for sp in specs.values()) and test.has_pinch_pose
         table = test.prior_table(args.seed + 10_000) if uses_prior else None
         mean_size = test.targets()[test.visible][:, 6:8].mean(axis=0)
-        metrics = evaluate(dino, heads, specs, test, scale, args.device, args.batch, table, mean_size)
+        metrics = evaluate(
+            dino, heads, specs, test, scale, args.device, args.batch, table, mean_size, args.workers
+        )
         args.out.mkdir(parents=True, exist_ok=True)
         (args.out / "eval.json").write_text(json.dumps(metrics, indent=1))
         print_per_parameter(metrics)
@@ -695,6 +807,9 @@ def main(argv: list[str] | None = None) -> None:
         args.seed,
         SPECS[args.heads],
         args.augment,
+        args.workers,
+        args.max_steps,
+        args.compile,
     )
     summary = {
         n: {"center_mm": m["center_mm"], "center_mm_not_held": m["center_mm_not_held"]}

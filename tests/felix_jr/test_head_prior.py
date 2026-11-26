@@ -76,3 +76,33 @@ def test_the_gain_curve_bins_by_the_prior_error():
     assert [b["n"] for b in curve] == [1, 2, 1]
     assert curve[0]["worse_than_prior"] == 1.0 and curve[1]["worse_than_prior"] == 0.0
     assert curve[2]["estimate_median"] == 5.0
+
+
+def test_the_torch_priors_are_the_numpy_ones():
+    """`priors_torch` (the training loop's, on the device) gives `priors`' pinch-frame priors."""
+    import torch
+
+    from lerobot.felix_jr.sim2real.head_prior import priors_torch, table_to_torch
+
+    rng = np.random.default_rng(2)
+    n = 40
+    labels = {
+        "round": rng.integers(0, 3, n),
+        "world": rng.integers(0, 50, n),
+        "in_root": np.concatenate([rng.normal(0, 0.1, (n, 3)), np.tile([0.0, 0.0, 1.0], (n, 1))], axis=1),
+        "size": rng.uniform(0.01, 0.2, (n, 2)),
+        "pinch_pos": rng.normal(0, 0.3, (n, 3)),
+        "pinch_quat": _random_quats(rng, n),
+    }
+    table = episode_errors(3, 50, HeadErrors(), rng)
+    mean_size = np.array([0.025, 0.12])
+    idx = np.sort(rng.choice(n, 25, replace=False))
+    _, expected = priors(labels, idx, table, mean_size)
+    t = {
+        k: torch.as_tensor(v, dtype=torch.float32 if v.dtype.kind == "f" else torch.long)
+        for k, v in labels.items()
+    }
+    got = priors_torch(
+        t, torch.as_tensor(idx), table_to_torch(table, "cpu"), torch.as_tensor(mean_size, dtype=torch.float32)
+    )
+    assert np.allclose(got.numpy(), expected, atol=1e-5)

@@ -141,3 +141,55 @@ def gain_curve(
             }
         )
     return out
+
+
+# ---- the same on the GPU (torch): the training loop's, the batch's priors computed where its frames are ----
+
+
+def table_to_torch(table: EpisodeErrors, device: Any) -> dict[str, Any]:
+    """An `EpisodeErrors` table as torch tensors on `device`."""
+    import torch
+
+    return {
+        "offset": torch.as_tensor(table.offset, dtype=torch.float32, device=device),
+        "d_height": torch.as_tensor(table.d_height, dtype=torch.float32, device=device),
+        "d_radius": torch.as_tensor(table.d_radius, dtype=torch.float32, device=device),
+        "weak": torch.as_tensor(table.weak, device=device),
+    }
+
+
+def quat_to_matrix_torch(q: Any) -> Any:
+    """`quat_to_matrix` in torch: (N, 4, w x y z) -> (N, 3, 3)."""
+    import torch
+
+    w, x, y, z = q.unbind(dim=1)
+    return torch.stack(
+        [
+            torch.stack([1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)], dim=-1),
+            torch.stack([2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)], dim=-1),
+            torch.stack([2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)], dim=-1),
+        ],
+        dim=1,
+    )
+
+
+def priors_torch(labels: dict[str, Any], idx: Any, table: dict[str, Any], mean_size: Any) -> Any:
+    """`priors`' pinch-frame priors (B, 8) in torch, on the GPU.
+
+    For the frames `idx` (a tensor) of `labels` (torch tensors on the device: `round`, `world`, `in_root`, `size`,
+    `pinch_pos`, `pinch_quat`) and a `table_to_torch` table.
+    """
+    import torch
+
+    r, w = labels["round"][idx], labels["world"][idx]
+    size = labels["size"][idx]
+    weak = table["weak"][r, w]
+    radius = torch.where(weak, mean_size[0], size[:, 0] + table["d_radius"][r, w]).clamp(min=0.004)
+    height = torch.where(weak, mean_size[1], size[:, 1] + table["d_height"][r, w]).clamp(min=0.02)
+    center = labels["in_root"][idx, :3] + table["offset"][r, w]
+    up = torch.tensor([0.0, 0.0, 1.0], device=center.device).expand(len(idx), 3)
+    rot = quat_to_matrix_torch(labels["pinch_quat"][idx])
+    pos = labels["pinch_pos"][idx]
+    c = torch.einsum("nji,nj->ni", rot, center - pos)
+    a = torch.einsum("nji,nj->ni", rot, up)
+    return torch.cat([c, a, radius[:, None], height[:, None]], dim=1)

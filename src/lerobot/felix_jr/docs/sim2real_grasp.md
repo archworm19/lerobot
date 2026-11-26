@@ -748,6 +748,15 @@ distractors, then the warm start across a scan's frames.
   look's materials): step 2's probe attends the lip balm, never having had to choose. Needed with or without a prior
   (without, to learn which object; with, to learn to ignore the rest).
 
+**Later (decided 2026-11-26): training online from the simulator.** The probe trains on recorded frames (`probe_data`
+writes ~200k frames, ~23 GB, to the pod's disk; `probe_train` reads them back each epoch). Online instead: the
+environment, the renderer, DINO and the heads together on the GPU, each step's frames pushed into a GPU replay buffer
+(e.g. the last 50k, ~5.6 GB) and trained on at random: every frame new (fresh starts, priors, looks, action noise), no
+disk and no gather on the CPU, and the machinery the student's DAgger needs anyway (the policy's own rollouts). The
+simulator renders ~2,500 frames/s at 1,024 worlds against training's ~1,900: it can keep up. A fixed recorded
+held-out set kept for comparisons. Not now: the `DataLoader` (workers gathering the batches ahead) fixed the GPU's
+idle time first.
+
 **Smaller, any time:**
 
 - The axis from the arm, not the image (the objects stand upright: vertical in the base frame, in the pinch frame
