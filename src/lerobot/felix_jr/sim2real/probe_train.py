@@ -347,6 +347,76 @@ def _blocks(specs: dict[str, HeadSpec]) -> tuple[int, ...]:
     return tuple(sorted({b for s in specs.values() for b in s.blocks}))
 
 
+SIGNED = (
+    "center x (pinch)",
+    "center y (pinch)",
+    "center z (pinch)",
+    "center x (root)",
+    "center y (root)",
+    "center z (root, vertical)",
+    "radius",
+    "height",
+)
+
+
+def per_parameter(
+    pred: dict[str, np.ndarray], prior: dict[str, np.ndarray], target: np.ndarray, pinch_quat: np.ndarray
+) -> dict[str, dict[str, float]]:
+    """Which of the cylinder's parameters a head's correction helps (mm; the axis in deg).
+
+    Each parameter: the prior's and the head's median |error|, the share of frames the head improves on the prior,
+    and the correction's slope against the prior's error (the correction regressed on minus the prior's error: 1 undoes
+    it, 0 ignores it). The center in the pinch frame and in the root frame (x, y across the table; z the vertical).
+    Read with the errors: for a prior head, a slope near 1 and a small error fixes the parameter, near 0 copies the
+    prior's; an image-only head never sees the prior, so its slope is ~1 whatever (its own error is what counts).
+    """
+    from .head_prior import quat_to_matrix
+
+    r = quat_to_matrix(pinch_quat)
+
+    def signed(x: dict[str, np.ndarray]) -> np.ndarray:
+        e = 1000 * (x["center"] - target[:, :3])
+        e_root = np.einsum("nij,nj->ni", r, e)
+        return np.column_stack([e, e_root, 1000 * (x["size"] - target[:, 6:8])])
+
+    def angle(x: dict[str, np.ndarray]) -> np.ndarray:
+        return np.degrees(np.arccos(np.clip(np.abs(np.sum(x["axis"] * target[:, 3:6], axis=1)), -1, 1)))
+
+    e_prior, e_head = signed(prior), signed(pred)
+    out: dict[str, dict[str, float]] = {}
+    for i, name in enumerate(SIGNED):
+        a, b = e_prior[:, i], e_head[:, i]
+        correction = b - a
+        var = float(np.var(a))
+        out[name] = {
+            "prior_median_abs": float(np.median(np.abs(a))),
+            "head_median_abs": float(np.median(np.abs(b))),
+            "improved": float(np.mean(np.abs(b) < np.abs(a))),
+            "slope": float(-np.cov(correction, a)[0, 1] / var) if var > 1e-12 else float("nan"),
+        }
+    a, b = angle(prior), angle(pred)
+    out["axis (deg)"] = {
+        "prior_median_abs": float(np.median(a)),
+        "head_median_abs": float(np.median(b)),
+        "improved": float(np.mean(b < a)),
+        "slope": float("nan"),
+    }
+    return out
+
+
+def print_per_parameter(metrics: dict[str, Any]) -> None:
+    """The per-parameter breakdown (`per_parameter`) of each prior head, a table a head."""
+    for name, m in metrics.items():
+        if "per_parameter" not in m:
+            continue
+        print(f"== {name}: prior |error| -> head |error| (median), improved, the correction's slope")
+        for param, v in m["per_parameter"].items():
+            print(
+                f"   {param:26s} {v['prior_median_abs']:6.1f} -> {v['head_median_abs']:6.1f}"
+                f"   improved {100 * v['improved']:3.0f} %   slope {v['slope']:5.2f}"
+            )
+
+
 def evaluate(
     dino: nn.Module,
     heads: dict[str, nn.Module],
@@ -428,6 +498,17 @@ def evaluate(
             from .head_prior import gain_curve
 
             result[name]["gain_curve"] = gain_curve(err_mm[seen], prior_err[seen])
+            if name != "(the prior alone)":
+                prior_p = {
+                    k: np.concatenate([c[k] for c in preds["(the prior alone)"]])
+                    for k in ("center", "axis", "size")
+                }
+                result[name]["per_parameter"] = per_parameter(
+                    {k: v[seen] for k, v in p.items() if k in ("center", "axis", "size")},
+                    {k: v[seen] for k, v in prior_p.items()},
+                    target[seen],
+                    data.labels["pinch_quat"][seen],
+                )
     for h in heads.values():
         h.train()
     return result
@@ -551,7 +632,26 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--augment", action="store_true", help="jitter the training frames' colours (`augment`)"
     )
+    parser.add_argument(
+        "--eval-only",
+        type=Path,
+        default=None,
+        metavar="HEADS_PT",
+        help="evaluate a trained heads.pt on --test (its priors as training's evaluation drew them); --train unused",
+    )
     args = parser.parse_args(argv)
+    if args.eval_only is not None:
+        dino = dinov2_small(args.device, args.hub)
+        heads, specs, scale = load_heads(args.eval_only, args.device)
+        test = ProbeData(args.test)
+        uses_prior = any(sp.kind in PRIOR_KINDS for sp in specs.values()) and test.has_pinch_pose
+        table = test.prior_table(args.seed + 10_000) if uses_prior else None
+        mean_size = test.targets()[test.visible][:, 6:8].mean(axis=0)
+        metrics = evaluate(dino, heads, specs, test, scale, args.device, args.batch, table, mean_size)
+        args.out.mkdir(parents=True, exist_ok=True)
+        (args.out / "eval.json").write_text(json.dumps(metrics, indent=1))
+        print_per_parameter(metrics)
+        return
     result = train(
         args.train,
         args.test,
@@ -570,6 +670,7 @@ def main(argv: list[str] | None = None) -> None:
         for n, m in result["final"].items()
     }
     print(json.dumps(summary, indent=1))
+    print_per_parameter(result["final"])
 
 
 if __name__ == "__main__":
