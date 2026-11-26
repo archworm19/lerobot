@@ -94,7 +94,17 @@ REFINE2_SPECS = (
 SPECS = {"basic": BASIC_SPECS, "grid": GRID_SPECS, "refine": REFINE_SPECS, "refine2": REFINE2_SPECS}
 PRIOR_KINDS = ("residual_mlp", "prior_query", "prior_soft", "prior_sample", "prior_iter")
 ROUND_WEIGHT = 0.8  # each round's loss weighted ROUND_WEIGHT ** (rounds left after it), as RAFT's
-EVAL_ROUNDS = (1, 2, 3, 4, 5)  # a shared iterative head evaluated at each of these too
+EVAL_ROUNDS = (
+    1,
+    2,
+    3,
+    4,
+    5,
+)  # a shared iterative head evaluated at each of these too (the last epoch, --eval-only)
+# torch.compile: a function's compiled graphs at most this many (Dynamo's default 8; an evaluation's round sweep compiles
+# one a round count, plus no-grad and the short last batch: a shared iterative head reaches 8, past which Dynamo runs
+# it uncompiled; training itself compiles one graph a head)
+COMPILE_GRAPHS = 16
 # the heads of files written before the specs were (their names: the basic ones)
 LEGACY = {s.name: s for s in BASIC_SPECS}
 
@@ -509,8 +519,11 @@ def evaluate(
     prior_table: Any = None,
     mean_size: np.ndarray | None = None,
     workers: int = 0,
+    sweep_rounds: bool = True,
 ) -> dict[str, Any]:
     """Each head's errors on `data`, with the priors' when given.
+
+    `sweep_rounds`: a shared iterative head at each of `EVAL_ROUNDS` too.
 
     Each head's errors on `data` (the module docstring); with `prior_table`, the priors too (the same for every
     evaluation: the prior alone a row of its own) and each head's gain curve against them.
@@ -545,7 +558,7 @@ def evaluate(
                 out = decode(run_head(h, specs[name], feats, prior_z, prior), scale)
                 preds[name].append({k: v.cpu().numpy() for k, v in out.items()})
                 if (
-                    specs[name].kind == "prior_iter" and specs[name].shared
+                    sweep_rounds and specs[name].kind == "prior_iter" and specs[name].shared
                 ):  # (more or fewer rounds than trained)
                     for r in EVAL_ROUNDS:
                         h.eval_rounds = r
@@ -659,6 +672,9 @@ def train(
     test_table = test.prior_table(seed + 10_000) if uses_prior else None  # (the same priors every evaluation)
     heads = {s.name: build(s, camera).to(device) for s in specs}
     if compiled:
+        import torch._dynamo.config as dynamo_config
+
+        dynamo_config.recompile_limit = max(dynamo_config.recompile_limit, COMPILE_GRAPHS)
         for h in heads.values():
             h.compile()
     blocks = _blocks(by_name)
@@ -727,7 +743,20 @@ def train(
             ),
             flush=True,
         )
-        metrics = evaluate(dino, heads, by_name, test, scale, device, batch, test_table, mean_size, workers)
+        last = epoch == epochs - 1
+        metrics = evaluate(
+            dino,
+            heads,
+            by_name,
+            test,
+            scale,
+            device,
+            batch,
+            test_table,
+            mean_size,
+            workers,
+            sweep_rounds=last,
+        )
         history.append({"epoch": epoch, "loss": {n: float(v) for n, v in losses.items()}, "test": metrics})
         line = ", ".join(
             f"{n} {m['center_mm'].get('median', float('nan')):.1f}/{m['center_mm'].get('p90', float('nan')):.1f}"

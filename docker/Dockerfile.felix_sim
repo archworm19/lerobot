@@ -27,9 +27,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/venv/bin:$PATH
 
 # python, what MuJoCo's EGL rendering and OpenCV need, ssh and rsync (RunPod reaches a pod over ssh: its own templates
-# start sshd, a custom image must), git (a run records its commit)
+# start sshd, a custom image must), git (a run records its commit), a C compiler and Python's headers (torch.compile:
+# Triton builds a small C launcher for its kernels; without them `probe_train --compile` fails)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python${PYTHON_VERSION} python${PYTHON_VERSION}-venv ca-certificates curl git \
+        python${PYTHON_VERSION} python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-dev gcc libc6-dev \
+        ca-certificates curl git \
         libglib2.0-0 libgl1 libegl1 libgomp1 ffmpeg \
         openssh-server rsync \
     && curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \

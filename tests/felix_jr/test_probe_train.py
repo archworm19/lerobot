@@ -205,3 +205,53 @@ def test_the_iterative_head_learns_with_a_loss_on_every_round():
         value.backward()
         opt.step()
     assert values[-1] < 0.5 * values[0]
+
+
+def test_a_compiled_head_compiles_one_graph_for_training_and_its_sweep_stays_under_the_limit():
+    """torch.compile (aot_eager: Dynamo's tracing as on the GPU, no code generated): a shared iterative head's training
+    steps compile one graph, however many; evaluation (no grad, a short last batch, the rounds swept) adds a few and
+    stays within `COMPILE_GRAPHS` (past Dynamo's limit it would run uncompiled)."""
+    import numpy as np
+    import torch._dynamo
+    from torch._dynamo.utils import counters
+
+    from lerobot.felix_jr.sim2real.probe_train import (
+        COMPILE_GRAPHS,
+        EVAL_ROUNDS,
+        HeadSpec,
+        build,
+        loss,
+        run_head,
+    )
+
+    torch._dynamo.reset()
+    counters.clear()
+    spec = HeadSpec("i", "prior_iter", (12,), rounds=3, shared=True)
+    head = build(spec, _camera() | {"scale": np.stack([np.zeros(8), np.ones(8)])})
+    head.compile(backend="aot_eager")
+    scale = torch.stack([torch.zeros(8), torch.ones(8)])
+    opt = torch.optim.AdamW(head.parameters(), lr=1e-3)
+
+    def batch(n):
+        feats = {12: (torch.randn(n, DIM), torch.randn(n, GRID[0] * GRID[1], DIM))}
+        prior = torch.tensor([[0.01, -0.02, 0.05, 0.0, 1.0, 0.0, 0.02, 0.1]]).repeat(n, 1)
+        return feats, prior
+
+    for _ in range(6):
+        feats, prior = batch(8)
+        run_head(head, spec, feats, prior, prior)
+        value = sum(loss(o, prior, torch.ones(8, dtype=torch.bool), scale) for o in head.round_outputs)
+        opt.zero_grad()
+        value.backward()
+        opt.step()
+    assert counters["stats"]["unique_graphs"] == 1
+    head.eval()
+    with torch.no_grad():
+        for n in (8, 5):
+            feats, prior = batch(n)
+            run_head(head, spec, feats, prior, prior)
+            for r in EVAL_ROUNDS:
+                head.eval_rounds = r
+                run_head(head, spec, feats, prior, prior)
+            head.eval_rounds = None
+    assert counters["stats"]["unique_graphs"] <= COMPILE_GRAPHS
